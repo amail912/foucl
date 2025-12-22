@@ -1,4 +1,3 @@
-
 # Features
 
 ## [CRUD Note](./crud-note.feature.md#epics)<a name="crudNote"></a>
@@ -37,3 +36,23 @@ As an Sharad administrator, I can be assured of
 5. The [trash time-safety](./trash.feature.md#timeSafety)<a name="trash-timeSafety"></a>
 6. The [trash space-safety](./trash.feature.md#spaceSafety)<a name="trash-spaceSafety"></a>
 7. The [Server Configurable](./trash.feature.md#serverConfigurable) aspects of the trash<a name="trash-serverConfigurable"></a>
+
+## [User session](./user-session.feature.md)<a name="user-session"></a>
+
+The goal is to provide a user session. This epic is divided into sub-tasks:
+
+### [Authentication](./user-session.feature.md#authentication)
+
+The authentication lifecycle is as follows:
+
+As a user, I can:
+
+1. [Subscribe](./user-session.feature.md) via username and password
+2. [Log-in] via username and password
+3. The user can delete its login information (username and password)
+
+There are technical requirements:
+
+1. Password should not be stored. We store the hash of the password instead
+2. Session should be safe. It cannot be forged.
+3. The session has a limited lifetime decided by the server

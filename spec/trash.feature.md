@@ -1,4 +1,3 @@
-
 # [Trash](./summary.md#trash) Epics
 
 ## [Trashing](./summary.md#trash-trashing)<a name="trashing"></a>

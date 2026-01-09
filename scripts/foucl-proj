@@ -21,11 +21,11 @@ case $1 in
                 mkdir -p "$sandbox_dir/.$built_exe/data/checklist"
                 srt install foucl --to "$sandbox_dir"
                 cd "$sandbox_dir"
+                trap 'foucld stop' EXIT
                 foucld start
                 cd "$project_dir"
                 echo "Going to integration test"
                 sbt integration-test foucl
-                foucld stop
                 # here, with the options set, when the integration test fails, the server doesn't stop. Needs a try-catch or perhaps
                 # a task in the backgroud management so that when the integration tests are over, we can stop the server
                 ;;

@@ -2,6 +2,7 @@
 # foucl-proj.sh
 
 set -euo pipefail
+set -x
 shopt -s inherit_errexit
 
 case $1 in
@@ -10,6 +11,18 @@ case $1 in
                 ;;
         test)
                 sbt test foucl
+                ;;
+        start-sandbox)
+                project_dir=$(pwd)
+                built_exe=$(sbt build foucl | tail -n1)
+                srt publish foucl --input "$built_exe"
+                sandbox_dir="./dist-newstyle/sandbox/foucl"
+                rm -rf "$sandbox_dir"
+                mkdir -p "$sandbox_dir/data/note"
+                mkdir -p "$sandbox_dir/data/checklist"
+                srt install foucl --to "$sandbox_dir"
+                cd "$sandbox_dir"
+                foucld start
                 ;;
         integration-test)
                 project_dir=$(pwd)
@@ -26,8 +39,6 @@ case $1 in
                 cd "$project_dir"
                 echo "Going to integration test"
                 sbt integration-test foucl
-                # here, with the options set, when the integration test fails, the server doesn't stop. Needs a try-catch or perhaps
-                # a task in the backgroud management so that when the integration tests are over, we can stop the server
                 ;;
           *)
                 usage

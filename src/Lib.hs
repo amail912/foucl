@@ -15,24 +15,49 @@ import Data.Either (either)
 import Control.Concurrent.MVar (takeMVar)
 import qualified Data.ByteString.Lazy.Char8 as BL (unpack)
 import Data.Aeson (ToJSON, decode, encode)
-import Happstack.Server (Response, ServerPartT, BodyPolicy, RqBody, takeRequestBody, unBody, rqBody, decodeBody, askRq, defaultBodyPolicy, toResponse, nullDir, path, serveFileFrom, guessContentTypeM, mimeTypes, uriRest, nullConf, simpleHTTP, toResponse,  method, ok, badRequest, internalServerError, notFound, dir, Method(GET, POST, DELETE, PUT), Conf(..))
-
+import Happstack.Server (Response, ServerPartT, BodyPolicy, RqBody, takeRequestBody, unBody, rqBody, decodeBody, askRq, defaultBodyPolicy, toResponse, nullDir, path, serveFileFrom, guessContentTypeM, mimeTypes, uriRest, nullConf, simpleHTTP, toResponse,  method, ok, badRequest, internalServerError, notFound, dir, Method(GET, POST, DELETE, PUT), Conf(..), lookPairs)
+import Happstack.Server.FileServe.BuildingBlocks (combineSafe)
 import Model (NoteContent, ChecklistContent, Content, Identifiable(..))
 import qualified CrudStorage as CrudStorage
 import Crud
 import NoteCrud (NoteServiceConfig(..), defaultNoteServiceConfig)
 import ChecklistCrud (ChecklistServiceConfig(..), defaultChecklistServiceConfig)
+import System.Directory (doesFileExist, getCurrentDirectory)
+import System.FilePath ((</>))
 
 runApp :: IO ()
 runApp = do
     putStrLn "running server"
     simpleHTTP nullConf { port = 8081 } $ do
         askRq >>= log . show >> log "=========================END REQUEST====================\n"
-        msum [ noteController
-             , checklistController
+        msum [ homePage
+             , apiController
              , serveStaticResource
              , mzero
              ]
+
+homePage :: ServerPartT IO Response
+homePage = do
+    nullDir
+    cd <- liftIO getCurrentDirectory
+    serveFileFrom (cd </> "static/") (guessContentTypeM mimeTypes) "index.html"
+
+tmpController :: ServerPartT IO Response
+tmpController = dir "tmp" $ do
+    nullDir
+    method POST
+    liftIO $ putStrLn "Reading tmp body"
+    decodeBody (defaultBodyPolicy "/tmp/" 4096 4096 4096)
+    inputs <- lookPairs
+    liftIO $ putStrLn (show inputs)
+    liftIO $ writeFile "inputs.txt" (show inputs)
+    successResponse (return True)
+
+apiController :: ServerPartT IO Response
+apiController = dir "api" $ msum [ noteController
+                                 , checklistController
+                                 , tmpController
+                                 ]
 
 noteController :: ServerPartT IO Response
 noteController = dir "note" noteHandlers 
@@ -43,7 +68,7 @@ noteController = dir "note" noteHandlers
                                                            , crudPut
                                                            ]
 checklistController :: ServerPartT IO Response
-checklistController = dir "checklist" checklistHandlers 
+checklistController = dir "checklist" checklistHandlers
     where
         checklistHandlers = msum $ defaultChecklistServiceConfig <%> [ crudGet
                                                                      , crudPost
@@ -140,10 +165,9 @@ serveStaticResource :: ServerPartT IO Response
 serveStaticResource = do
     method GET
     log "Serving static resource"
-    path (\filePath -> do
-        log ("trying to get resource " ++ filePath)
-        nullDir
-        serveFileFrom "static/" (guessContentTypeM mimeTypes) filePath) -- check serveFileFrom for filesystem attacks with ..
+    dir "static" $ uriRest (\rest -> do
+        cd <- liftIO getCurrentDirectory -- replace with configuration data directory
+        serveFileFrom (cd </> "static/") (guessContentTypeM mimeTypes) (tail rest)) -- check serveFileFrom for filesystem attacks with ..
 
 orElse :: Maybe a -> a -> a
 (Just a) `orElse` _ = a

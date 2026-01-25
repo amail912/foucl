@@ -201,7 +201,8 @@ emptyInternalError :: ServerPartT IO Response
 emptyInternalError = internalServerError $ toResponse ()
 
 log :: MonadIO m => String -> m () 
-log = liftIO . putStrLn
+log s = do
+  liftIO $ putStrLn s >> hFlush stdout
 
 infixr 4 <%>
 

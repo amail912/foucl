@@ -24,6 +24,7 @@ import NoteCrud (NoteServiceConfig(..), defaultNoteServiceConfig)
 import ChecklistCrud (ChecklistServiceConfig(..), defaultChecklistServiceConfig)
 import System.Directory (doesFileExist, getCurrentDirectory)
 import System.FilePath ((</>))
+import System.IO (hFlush, stdout)
 
 runApp :: IO ()
 runApp = do
@@ -42,11 +43,11 @@ homePage = do
     cd <- liftIO getCurrentDirectory
     serveFileFrom (cd </> "static/") (guessContentTypeM mimeTypes) "index.html"
 
-tmpController :: ServerPartT IO Response
-tmpController = dir "tmp" $ do
+signupController :: ServerPartT IO Response
+signupController = dir "signup" $ do
     nullDir
     method POST
-    liftIO $ putStrLn "Reading tmp body"
+    liftIO $ putStrLn "Reading signup body"
     decodeBody (defaultBodyPolicy "/tmp/" 4096 4096 4096)
     inputs <- lookPairs
     liftIO $ putStrLn (show inputs)
@@ -56,7 +57,7 @@ tmpController = dir "tmp" $ do
 apiController :: ServerPartT IO Response
 apiController = dir "api" $ msum [ noteController
                                  , checklistController
-                                 , tmpController
+                                 , signupController
                                  ]
 
 noteController :: ServerPartT IO Response

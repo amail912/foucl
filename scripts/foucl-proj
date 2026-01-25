@@ -12,6 +12,10 @@ case $1 in
         test)
                 sbt test foucl
                 ;;
+        restart-sandbox)
+                foucld stop
+                foucl-proj start-sandbox
+                ;;
         start-sandbox)
                 project_dir=$(pwd)
                 built_exe=$(sbt build foucl | tail -n1)

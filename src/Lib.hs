@@ -18,7 +18,7 @@ import Data.Aeson (ToJSON, decode, encode)
 import Happstack.Server (Response, ServerPartT, BodyPolicy, RqBody, takeRequestBody, unBody, rqBody, decodeBody, askRq, defaultBodyPolicy, toResponse, nullDir, path, serveFileFrom, guessContentTypeM, mimeTypes, uriRest, nullConf, simpleHTTP, toResponse,  method, ok, badRequest, internalServerError, notFound, dir, Method(GET, POST, DELETE, PUT), Conf(..), lookPairs)
 import Happstack.Server.FileServe.BuildingBlocks (combineSafe)
 import Model (NoteContent, ChecklistContent, Content, Identifiable(..))
-import qualified CrudStorage as CrudStorage
+import qualified CrudStorage
 import Crud
 import NoteCrud (NoteServiceConfig(..), defaultNoteServiceConfig)
 import ChecklistCrud (ChecklistServiceConfig(..), defaultChecklistServiceConfig)
@@ -50,7 +50,7 @@ signupController = dir "signup" $ do
     liftIO $ putStrLn "Reading signup body"
     decodeBody (defaultBodyPolicy "/tmp/" 4096 4096 4096)
     inputs <- lookPairs
-    liftIO $ putStrLn (show inputs)
+    liftIO $ print inputs
     liftIO $ writeFile "inputs.txt" (show inputs)
     successResponse (return True)
 
@@ -61,7 +61,7 @@ apiController = dir "api" $ msum [ noteController
                                  ]
 
 noteController :: ServerPartT IO Response
-noteController = dir "note" noteHandlers 
+noteController = dir "note" noteHandlers
     where
         noteHandlers = msum $ defaultNoteServiceConfig <%> [ crudGet
                                                            , crudPost
@@ -89,8 +89,8 @@ successResponse action = do
     a <- liftIO action
     (ok . toResponse . encode) a
 
-handlePotentialParsingErrors :: [ExceptT CrudReadException IO (Identifiable a)] -> IO [Identifiable a] 
-handlePotentialParsingErrors parsingTries = foldM accumulateSuccessOrLogError [] parsingTries
+handlePotentialParsingErrors :: [ExceptT CrudReadException IO (Identifiable a)] -> IO [Identifiable a]
+handlePotentialParsingErrors = foldM accumulateSuccessOrLogError []
 
 accumulateSuccessOrLogError :: [Identifiable a] -> ExceptT CrudReadException IO (Identifiable a) -> IO [Identifiable a]
 accumulateSuccessOrLogError acc parsingResult = do
@@ -111,7 +111,7 @@ crudPost crudConfig = do
         handleBody :: RqBody -> ServerPartT IO Response
         handleBody rqBody = do
             let bodyBS = unBody rqBody
-                noteContent = decode bodyBS :: Content a => Maybe a 
+                noteContent = decode bodyBS :: Content a => Maybe a
             log ("Getting body bytestrings: " ++ show bodyBS)
             log ("Getting deserialized content: " ++ show noteContent)
             fmap (createNoteContent crudConfig) noteContent `orElse` genericInternalError "Unexpected problem during note creation"
@@ -136,7 +136,7 @@ crudDelete crudConfig = do
 
 handleDeletionError :: String -> CrudWriteException -> ServerPartT IO Response
 handleDeletionError pathId err = do
-    logDeletionError pathId err 
+    logDeletionError pathId err
     notFound $ toResponse ()
 
 logDeletionError pathId s = log ("Error while deleting item " ++ pathId ++ ": " ++ show s)
@@ -160,7 +160,7 @@ crudPut crudConfig = do
 handleUpdate :: CRUDEngine crudType a => crudType -> Identifiable a -> ServerPartT IO Response
 handleUpdate crudConfig update =
     recoverWith (const.notFound.toResponse $ "Unable to find storage dir")
-                (fmap (ok.toResponse.encode) $ CrudStorage.modifyItem crudConfig update)
+                (ok.toResponse.encode <$> CrudStorage.modifyItem crudConfig update)
 
 serveStaticResource :: ServerPartT IO Response
 serveStaticResource = do
@@ -168,16 +168,19 @@ serveStaticResource = do
     log "Serving static resource"
     dir "static" $ uriRest (\rest -> do
         cd <- liftIO getCurrentDirectory -- replace with configuration data directory
-        serveFileFrom (cd </> "static/") (guessContentTypeM mimeTypes) (tail rest)) -- check serveFileFrom for filesystem attacks with ..
+        case rest of
+          [] -> badRequest $ toResponse "toto"
+          [a] -> badRequest $ toResponse "toto"
+          (_:withoutFrontSlash) -> serveFileFrom (cd </> "static/") (guessContentTypeM mimeTypes) withoutFrontSlash) -- check serveFileFrom for filesystem attacks with ..
 
 orElse :: Maybe a -> a -> a
 (Just a) `orElse` _ = a
 _        `orElse` b = b
 
-recoverIO :: (MonadIO m, Monad m) => ExceptT e IO (m a) -> (e -> (m a)) -> m a
+recoverIO :: (MonadIO m, Monad m) => ExceptT e IO (m a) -> (e -> m a) -> m a
 recoverIO exceptT f = join $ liftIO $ fmap (either f id) (runExceptT exceptT)
 
-recoverWith :: (MonadIO m, Monad m) => (e -> (m a)) -> ExceptT e IO (m a) -> m a
+recoverWith :: (MonadIO m, Monad m) => (e -> m a) -> ExceptT e IO (m a) -> m a
 recoverWith = flip recoverIO
 
 orElseIO :: (MonadIO m, Monad m) => MaybeT IO (m a) -> m a -> m a
@@ -196,14 +199,14 @@ recover errorHandler successHandler errorMonad = do
 genericInternalError :: String -> ServerPartT IO Response
 genericInternalError s = do
     log ("Internal error: \n\t" ++ s)
-    emptyInternalError 
+    emptyInternalError
 
 emptyInternalError :: ServerPartT IO Response
 emptyInternalError = internalServerError $ toResponse ()
 
-log :: MonadIO m => String -> m () 
+log :: (Show s, MonadIO m) => s -> m ()
 log s = do
-  liftIO $ putStrLn s >> hFlush stdout
+  liftIO $ print s >> hFlush stdout
 
 infixr 4 <%>
 

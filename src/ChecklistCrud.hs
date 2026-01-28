@@ -4,9 +4,9 @@ module ChecklistCrud (ChecklistServiceConfig(..), defaultChecklistServiceConfig)
 
 import           Crud        (CRUDEngine (..), DiskFileStorageConfig (..))
 import           Model       (ChecklistContent (..))
-import qualified CrudStorage as CrudStorage
+import qualified CrudStorage
 
-data ChecklistServiceConfig = ChecklistServiceConfig String
+newtype ChecklistServiceConfig = ChecklistServiceConfig String
 
 instance DiskFileStorageConfig ChecklistServiceConfig where
     rootPath (ChecklistServiceConfig path) = path

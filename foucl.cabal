@@ -23,6 +23,7 @@ library
       , Crud
       , NoteCrud
       , ChecklistCrud
+      , Auth
   other-modules:
       Paths_foucl
   hs-source-dirs:
@@ -39,6 +40,8 @@ library
     , system-filepath
     , transformers
     , transformers-either
+    , text
+    , password
     , mtl
     , base64-bytestring
     , SHA

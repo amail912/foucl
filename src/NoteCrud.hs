@@ -4,9 +4,9 @@ module NoteCrud (NoteServiceConfig(..), defaultNoteServiceConfig) where
 
 import           Crud        (CRUDEngine (..), DiskFileStorageConfig (..))
 import           Model       (NoteContent (..))
-import qualified CrudStorage as CrudStorage
+import qualified CrudStorage
 
-data NoteServiceConfig = NoteServiceConfig String
+newtype NoteServiceConfig = NoteServiceConfig String
 
 instance DiskFileStorageConfig NoteServiceConfig where
     rootPath (NoteServiceConfig path) = path

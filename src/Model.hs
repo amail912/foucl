@@ -20,8 +20,8 @@ import qualified Data.UUID                  as UUID (toString)
 import           Data.Digest.Pure.SHA        (bytestringDigest, sha256)
 import           GHC.Generics                (Generic)
 
-data StorageId = StorageId { id      :: String
-                           , version :: String
+data StorageId = StorageId { id      :: !String
+                           , version :: !String
                            } deriving (Show, Generic, Eq)
 
 instance ToJSON   StorageId
@@ -31,7 +31,7 @@ class (Show a, Eq a, ToJSON a, FromJSON a) => Content a where
   hash :: a -> String
 
 data Content a => Identifiable a =
-    Identifiable { storageId :: StorageId, content :: a } deriving (Eq, Show)
+    Identifiable { storageId :: !StorageId, content :: !a } deriving (Eq, Show)
 
 instance Content a => ToJSON (Identifiable a) where
   toJSON (Identifiable {..}) =

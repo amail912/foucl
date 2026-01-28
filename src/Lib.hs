@@ -21,7 +21,8 @@ import Data.List (isPrefixOf)
 import qualified Data.Text as Text
 import Control.Concurrent.MVar (takeMVar)
 import qualified Data.ByteString.Lazy.Char8 as BL (unpack)
-import Happstack.Server (Response, ServerPartT, BodyPolicy, RqBody, takeRequestBody, unBody, rqBody, decodeBody, askRq, defaultBodyPolicy, toResponse, nullDir, path, serveFileFrom, guessContentTypeM, mimeTypes, uriRest, nullConf, simpleHTTP, toResponse,  method, ok, badRequest, internalServerError, notFound, dir, Method(GET, POST, DELETE, PUT), Conf(..), lookPairs, ServerPart)
+import Happstack.Server (FilterMonad, Response, ServerPartT, BodyPolicy, RqBody, takeRequestBody, unBody, rqBody, decodeBody, askRq, defaultBodyPolicy, toResponse, nullDir, path, serveFileFrom, guessContentTypeM, mimeTypes, uriRest, nullConf, simpleHTTP, toResponse,  method, ok, internalServerError, notFound, dir, Method(GET, POST, DELETE, PUT), Conf(..), lookPairs, ServerPart)
+import qualified Happstack.Server as HServer
 import Model (NoteContent, ChecklistContent, Content, Identifiable(..))
 import qualified CrudStorage
 import Crud
@@ -48,6 +49,9 @@ runApp = do
 
 type AppM a = ExceptT String (ServerPartT IO) a
 
+badRequest :: FilterMonad Response m => String -> m Response
+badRequest =  HServer.badRequest . toResponse
+
 homePage :: ServerPartT IO Response
 homePage = do
     nullDir
@@ -61,33 +65,29 @@ signupController = dir "signup" $ do
     method POST
     liftIO $ putStrLn "Reading signup body"
     body <- askRq >>= takeRequestBody
-    eitherResp <- runExceptT $ maybe (badRequest $ toResponse ("Empty body" :: String))
-                                     handleBody
-                                     body
-    case eitherResp of
-      Left s -> badRequest $ toResponse $ "Something went wrong: " <> s
-      Right r -> ok r
-    where handleBody :: RqBody -> AppM Response
+    maybe (badRequest "Empty body")
+          handleBody
+          body
+    where handleBody :: RqBody -> ServerPartT IO Response --AppM Response
           handleBody body = do
-            let formData :: Maybe SignupRequest
-                formData = decode $ unBody body
-            maybe (badRequest $ toResponse ("Unable to decode the body as a SignupData" :: String))
+            maybe (badRequest "Unable to decode the body as a SignupData")
                   doCreateUser
-                  formData
-          doCreateUser :: SignupRequest -> AppM Response
+                  (decode $ unBody body)
+
+          doCreateUser :: SignupRequest -> ServerPartT IO Response --AppM Response
           doCreateUser signupRequest = do
             res <- liftIO $ runExceptT $ createUser signupRequest
             either handleUserCreationError
                    (const $ ok $ toResponse ())
                    res
-          handleUserCreationError (BadRequest br) = do
-            let errorStr = case br of
+
+          handleUserCreationError (BadRequest br) = badRequest errorStr
+            where errorStr = case br of
                              EmptyUsername -> "Username cannot be empty"
                              UsernameDoesNotRespectPattern -> "Username has forbidden characters"
                              EmptyPassword -> "Password cannot be empty"
 
-            badRequest $ toResponse (errorStr :: String)
-          handleUserCreationError UserAlreadyExists = badRequest $ toResponse ("Unable to create user" :: String)
+          handleUserCreationError UserAlreadyExists = badRequest "Unable to create user"
           handleUserCreationError (TechnicalError _) = internalServerError $ toResponse ("Unable to create user" :: String)
 
 --
@@ -227,8 +227,8 @@ serveStaticResource = do
     dir "static" $ uriRest (\rest -> do
         cd <- liftIO getCurrentDirectory -- replace with configuration data directory
         case rest of
-          [] -> badRequest $ toResponse ("toto" :: String)
-          [a] -> badRequest $ toResponse ("toto" :: String)
+          [] -> badRequest "toto"
+          [a] -> badRequest "toto"
           (_:withoutFrontSlash) -> serveFileFrom (cd </> "static/") (guessContentTypeM mimeTypes) withoutFrontSlash) -- check serveFileFrom for filesystem attacks with ..
 
 orElse :: Maybe a -> a -> a

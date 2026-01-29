@@ -34,7 +34,20 @@ import System.IO (hFlush, stdout)
 import GHC.Generics (Generic)
 import Data.ByteString.Lazy.Char8 (writeFile)
 import Filesystem.Path.CurrentOS    (commonPrefix, encodeString, decodeString, collapse, append)
-import Auth (SignupRequest (SignupRequest), SignupRequestError(..), SignupError(..), createUser)
+import qualified Auth (SignupRequest (SignupRequest), SignupRequestError(..), SignupError(..), createUser)
+
+
+class ToServerResponse e where
+  toServerResponse :: Monad m => e -> ServerPartT m Response
+
+instance ToServerResponse Auth.SignupError where
+  toServerResponse (Auth.BadRequest br) = badRequest errorStr
+    where errorStr = case br of
+                     Auth.EmptyUsername -> "Username cannot be empty"
+                     Auth.UsernameDoesNotRespectPattern -> "Username has forbidden characters"
+                     Auth.EmptyPassword -> "Password cannot be empty"
+  toServerResponse Auth.UserAlreadyExists = badRequest "Unable to create user"
+  toServerResponse (Auth.TechnicalError _) = internalServerError $ toResponse ("Unable to create user" :: String)
 
 runApp :: IO ()
 runApp = do
@@ -74,43 +87,13 @@ signupController = dir "signup" $ do
                   doCreateUser
                   (decode $ unBody body)
 
-          doCreateUser :: SignupRequest -> ServerPartT IO Response --AppM Response
+          doCreateUser :: Auth.SignupRequest -> ServerPartT IO Response --AppM Response
           doCreateUser signupRequest = do
-            res <- liftIO $ runExceptT $ createUser signupRequest
-            either handleUserCreationError
+            res <- liftIO $ runExceptT $ Auth.createUser signupRequest
+            either toServerResponse
                    (const $ ok $ toResponse ())
                    res
 
-          handleUserCreationError (BadRequest br) = badRequest errorStr
-            where errorStr = case br of
-                             EmptyUsername -> "Username cannot be empty"
-                             UsernameDoesNotRespectPattern -> "Username has forbidden characters"
-                             EmptyPassword -> "Password cannot be empty"
-
-          handleUserCreationError UserAlreadyExists = badRequest "Unable to create user"
-          handleUserCreationError (TechnicalError _) = internalServerError $ toResponse ("Unable to create user" :: String)
-
---
--- | Combine two 'FilePath's, ensuring that the resulting path leads to
--- a file within the first 'FilePath'.
---
--- >>> combineSafe "/var/uploads/" "etc/passwd"
--- Just "/var/uploads/etc/passwd"
--- >>> combineSafe "/var/uploads/" "/etc/passwd"
--- Nothing
--- >>> combineSafe "/var/uploads/" "../../etc/passwd"
--- Nothing
--- >>> combineSafe "/var/uploads/" "../uploads/home/../etc/passwd"
--- Just "/var/uploads/etc/passwd"
-combineSafe :: FilePath -> FilePath -> Maybe FilePath
-combineSafe root path =
-    if commonPrefix [root', joined] == root'
-      then Just $ encodeString joined
-      else Nothing
-  where
-    root'  = decodeString root
-    path'  = decodeString path
-    joined = collapse $ append root' path'
 
 apiController :: ServerPartT IO Response
 apiController = dir "api" $ msum [ noteController

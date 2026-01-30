@@ -6,7 +6,7 @@ module Lib
     ) where
 
 import Prelude hiding (log, writeFile)
-import Data.Aeson (ToJSON(toJSON), decode, encode)
+import Data.Aeson (ToJSON(toJSON), FromJSON, decode, encode, decode')
 import Data.Function ((&))
 import Data.Functor ((<$>))
 import Data.Maybe (Maybe(..))
@@ -105,6 +105,24 @@ signupController = dir "signup" $ do
             res <- liftIO $ runExceptT $ Auth.createUser signupRequest
             either toServerResponse
                    (ok . toResponse)
+                   res
+
+withBusinessHandling :: (FromJSON a, ToServerResponse e) => (a -> ExceptT e IO r) -> ServerPartT IO Response
+withBusinessHandling handle = do
+    body <- askRq >>= takeRequestBody
+    maybe (badRequest "Empty body")
+          handleBody
+          body
+    where handleBody :: RqBody -> ServerPartT IO Response --AppM Response
+          handleBody body = maybe (badRequest "Unable to decode the body as a SignupData")
+                                  (processDecodedBody handle)
+                                  (decode' $ unBody body)
+
+          processDecodedBody :: ToServerResponse e => (a -> ExceptT e IO r) -> a -> ServerPartT IO Response
+          processDecodedBody handle input = do
+            res <- liftIO $ runExceptT $ handle input
+            either toServerResponse
+                   (const $ ok $ toResponse ())
                    res
 
 

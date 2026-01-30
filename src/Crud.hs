@@ -1,5 +1,4 @@
 {-# LANGUAGE FunctionalDependencies #-}
-{-# LANGUAGE MultiParamTypeClasses  #-}
 
 module Crud ( DiskFileStorageConfig(..), CRUDEngine(..)
             , Error(..), CrudReadException(..), FromCrudReadException(..)
@@ -21,20 +20,20 @@ class (DiskFileStorageConfig crudType, Content a) => CRUDEngine crudType a | cru
   putItem :: crudType -> Identifiable a -> ExceptT CrudModificationException IO StorageId
   crudTypeDenomination :: crudType -> String
 
-data Error = FatalError String deriving (Eq, Show)
+newtype Error = FatalError String deriving (Eq, Show)
 
 type ErrorMessage = String
 type ParsedString = ByteString
 
-data CrudReadException = IOReadException IOError
-                       | CrudParsingException ParsedString ErrorMessage FilePath
+data CrudReadException = IOReadException !IOError
+                       | CrudParsingException !ParsedString !ErrorMessage !FilePath
                        deriving (Show, Eq)
 
-data CrudWriteException = IOWriteException IOError deriving (Show, Eq)
+newtype CrudWriteException = IOWriteException IOError deriving (Show, Eq)
 
-data CrudModificationException = CrudModificationReadingException CrudReadException
-                               | CrudModificationWritingException CrudWriteException
-                               | NotCurrentVersion StorageId
+data CrudModificationException = CrudModificationReadingException !CrudReadException
+                               | CrudModificationWritingException !CrudWriteException
+                               | NotCurrentVersion !StorageId
                                deriving (Show, Eq)
 
 class FromCrudReadException a where

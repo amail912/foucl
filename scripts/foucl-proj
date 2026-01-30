@@ -24,6 +24,7 @@ case $1 in
                 rm -rf "$sandbox_dir"
                 mkdir -p "$sandbox_dir/data/note"
                 mkdir -p "$sandbox_dir/data/checklist"
+                mkdir -p "$sandbox_dir/data/users"
                 srt install foucl --to "$sandbox_dir"
                 cd "$sandbox_dir"
                 foucld start
@@ -34,8 +35,9 @@ case $1 in
                 srt publish foucl --input "$built_exe"
                 sandbox_dir="./dist-newstyle/sandbox"
                 rm -rf "$sandbox_dir"
-                mkdir -p "$sandbox_dir/.$built_exe/data/note"
-                mkdir -p "$sandbox_dir/.$built_exe/data/checklist"
+                mkdir -p "$sandbox_dir/data/note"
+                mkdir -p "$sandbox_dir/data/checklist"
+                mkdir -p "$sandbox_dir/data/users"
                 srt install foucl --to "$sandbox_dir"
                 cd "$sandbox_dir"
                 trap 'foucld stop' EXIT

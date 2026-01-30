@@ -58,14 +58,14 @@ persistUser username passwordHash = do
       dataDir = cd </> ("data" <> [pathSeparator])
   userPath <- liftIO $ ensureChild dataDir filePath
   maybe (throwError $ BadRequest UsernameDoesNotRespectPattern)
-        writeUserFile
+        (writeUserFile cd)
         userPath
-  where writeUserFile p = do
-          dirExists <- liftIO (doesDirectoryExist $ "data" </> "users")
+  where writeUserFile cd p = do
+          dirExists <- liftIO (doesDirectoryExist $ cd </> "data" </> "users")
           if not dirExists
             then throwError $ TechnicalError UsersDirDoesNotExist
             else do
               exists <- liftIO $ doesFileExist ("data" </> "users" </> username)
-              if not exists
+              if exists
                 then throwError UserAlreadyExists
                 else liftIO $ writeFile p (encode $ PersistedUser {uname = username, passwordHash = passwordHash})

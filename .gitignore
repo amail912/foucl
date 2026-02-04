@@ -5,3 +5,4 @@ dist-newstyle/
 .vscode/
 *.swp
 *.swo
+server.log

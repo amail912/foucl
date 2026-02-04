@@ -4,23 +4,27 @@
 module UnitTests (runUnitTests) where
 
 import Prelude hiding(id)
+import Control.Monad (when)
 import Test.HUnit.Lang
 import Test.HUnit.Base(Counts(..), (@?), (~:), test, assertBool, assertFailure)
 import Test.HUnit.Text (runTestTT)
 import Crud (CRUDEngine(..), DiskFileStorageConfig(..), Error(..), CrudModificationException(..), CrudReadException(..), CrudWriteException(..))
 import Model (Identifiable(..), NoteContent(..), ChecklistContent(..), ChecklistItem(..), StorageId(..)) 
-import System.Directory (removeDirectoryRecursive, createDirectory,doesDirectoryExist, doesFileExist, listDirectory)
+import System.Directory (removeDirectoryRecursive, createDirectory, doesDirectoryExist, doesFileExist, listDirectory, createDirectoryIfMissing, getCurrentDirectory)
+import System.FilePath ((</>))
 import Data.Maybe (fromJust)
 import Data.Either (isRight)
 import Data.List ((\\))
+import Control.Exception (bracket)
 import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import Control.Monad.Trans.Except (runExceptT)
 import System.Exit (exitSuccess, exitFailure)
 import NoteCrud (NoteServiceConfig(..))
 import ChecklistCrud (ChecklistServiceConfig(..))
+import Auth (ensureChild)
 
 runUnitTests :: IO ()
-runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests]
+runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, authServiceTests]
 
 runTestTTAndExit tests = do
   c <- runTestTT tests
@@ -47,6 +51,53 @@ checklistServiceTests = test [ "Creating a checklist should create a new file in
                              , "Modifying an non-existing checklist should give back a NotFoundError" ~: withEmptyDir checklistServiceConfig modifyANonExistingNote
                              , "Modifying an existing checklist but with wrong current version should give back a NotCurrentVersion error" ~: withEmptyDir checklistServiceConfig modifyWrongCurrentVersion
                              ]
+
+authServiceTests = test [ "ensureChild accepts a real child path" ~: ensureChildAcceptsChild
+                        , "ensureChild rejects prefixed sibling path" ~: ensureChildRejectsPrefixedSibling
+                        , "ensureChild rejects parent traversal path" ~: ensureChildRejectsParentTraversal
+                        ]
+
+ensureChildAcceptsChild :: IO ()
+ensureChildAcceptsChild = withAuthTestPaths $ \parent child _ -> do
+    result <- ensureChild parent child
+    assertEqual "Expected child path to be accepted" (Just child) result
+
+ensureChildRejectsPrefixedSibling :: IO ()
+ensureChildRejectsPrefixedSibling = withAuthTestPaths $ \parent _ sibling -> do
+    result <- ensureChild parent sibling
+    assertEqual "Expected prefixed sibling path to be rejected" Nothing result
+
+ensureChildRejectsParentTraversal :: IO ()
+ensureChildRejectsParentTraversal = withAuthTestPaths $ \parent child _ -> do
+    let parentTraversal = parent </> ".." </> "outside" </> "user"
+        outsideDir = parent </> ".." </> "outside"
+        outsideUser = outsideDir </> "user"
+    createDirectoryIfMissing True outsideDir
+    writeFile outsideUser ""
+    result <- ensureChild parent parentTraversal
+    assertEqual "Expected parent traversal path to be rejected" Nothing result
+
+withAuthTestPaths :: (FilePath -> FilePath -> FilePath -> IO ()) -> IO ()
+withAuthTestPaths action = bracket setup cleanup $ \paths -> do
+    let (parentDir, childPath, siblingPath, _) = paths
+    action parentDir childPath siblingPath
+  where
+    setup = do
+      cd <- getCurrentDirectory
+      let baseDir = cd </> "foucl-unit-test"
+          parentDir = baseDir </> "data"
+          childDir = parentDir </> "users"
+          childPath = childDir </> "alice"
+          siblingDir = baseDir </> "data-users"
+          siblingPath = siblingDir </> "bob"
+      createDirectoryIfMissing True childDir
+      createDirectoryIfMissing True siblingDir
+      writeFile childPath ""
+      writeFile siblingPath ""
+      pure (parentDir, childPath, siblingPath, baseDir)
+    cleanup (_, _, _, baseDir) = do
+      exists <- doesDirectoryExist baseDir
+      when exists $ removeDirectoryRecursive baseDir
 
 createTest :: ContentGen crudConfig a => crudConfig -> IO ()
 createTest config = do

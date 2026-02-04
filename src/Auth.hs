@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE NamedFieldPuns #-}
-module Auth (SignupRequest(..), SignupError(..), SignupRequestError(..), createUser) where
+module Auth (SignupRequest(..), SignupError(..), SignupRequestError(..), createUser, ensureChild) where
 
 import Prelude hiding (writeFile)
 import Control.Monad (when)
@@ -13,7 +13,7 @@ import Data.List (isPrefixOf)
 import Data.Password.Argon2 (Password, PasswordHash(..), Argon2, mkPassword, hashPassword, checkPassword)
 import qualified Data.Text as Text (Text, null)
 import System.Directory (doesFileExist, doesDirectoryExist, getCurrentDirectory, canonicalizePath)
-import System.FilePath ((</>), pathSeparator)
+import System.FilePath ((</>), pathSeparator, isAbsolute, makeRelative)
 
 data SignupError = BadRequest !SignupRequestError | UserAlreadyExists | TechnicalError !SignupTechnicalError
 data SignupRequestError = EmptyUsername | EmptyPassword | UsernameDoesNotRespectPattern
@@ -48,7 +48,10 @@ instance ToJSON PersistedUser where
 
 ensureChild :: FilePath -> FilePath -> IO (Maybe FilePath)
 ensureChild parent child = do
-  isUnderParent <- isPrefixOf <$> canonicalizePath parent <*> canonicalizePath child
+  canonicalParent <- canonicalizePath parent
+  canonicalChild <- canonicalizePath child
+  let relativeChild = makeRelative canonicalParent canonicalChild
+      isUnderParent = not (isAbsolute relativeChild) && not (isPrefixOf ".." relativeChild)
   if isUnderParent then pure (Just child) else pure Nothing
 
 persistUser :: String -> PasswordHash Argon2 -> SignupAppM ()

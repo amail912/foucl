@@ -74,6 +74,7 @@ test-suite foucl-unit-tests
     , HUnit ==1.6.0.0
     , directory
     , transformers
+    , filepath
   default-language: Haskell2010
 
 test-suite foucl-integration-tests

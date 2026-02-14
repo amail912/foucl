@@ -76,6 +76,36 @@ runIntegrationTests = hspec $ do
                                                            ])
                               $ blockedReq
       assertStatusCode "Signup should be blocked when rate limit is reached" 400 blockedResponse
+
+    it "should authenticate signin using stored signup password hash" $ do
+      uniquenessSuffix <- round <$> getPOSIXTime
+      let username = "signin-user-" ++ show uniquenessSuffix
+          password = "averystrongpass" :: String
+          signupPayload = object [ "username" .= username
+                                 , "password" .= password
+                                 ]
+      signupReq <- parseRequest "POST http://localhost:8081/api/signup"
+      signupResponse <- httpNoBody $ setRequestMethod "POST"
+                                $ setRequestHeader "Content-Type" ["application/json"]
+                                $ setRequestBodyJSON signupPayload
+                                $ signupReq
+      assertStatusCode "Signup before signin should succeed" 200 signupResponse
+
+      signinReq <- parseRequest "POST http://localhost:8081/api/signin"
+      signinResponse <- httpNoBody $ setRequestMethod "POST"
+                                $ setRequestHeader "Content-Type" ["application/json"]
+                                $ setRequestBodyJSON signupPayload
+                                $ signinReq
+      assertStatusCode "Signin should succeed with valid credentials" 200 signinResponse
+
+      invalidSigninReq <- parseRequest "POST http://localhost:8081/api/signin"
+      invalidSigninResponse <- httpBS $ setRequestMethod "POST"
+                               $ setRequestHeader "Content-Type" ["application/json"]
+                               $ setRequestBodyJSON (object [ "username" .= username
+                                                            , "password" .= ("wrongpasswordbad" :: String)
+                                                            ])
+                               $ invalidSigninReq
+      assertStatusCode "Signin should reject invalid password" 400 invalidSigninResponse
         where
         firstChecklistContent    = ChecklistContent { name = "First checklist"
                                                      , items = [ ChecklistItem { label = "First item label unchecked", checked = False }

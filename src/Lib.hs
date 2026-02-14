@@ -19,7 +19,6 @@ import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import Control.Monad.IO.Class (liftIO, MonadIO)
 import Data.Either (either)
 import Data.List (isPrefixOf)
-import qualified Data.Text as Text
 import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
 import Happstack.Server (FilterMonad, Response, ServerPartT, RqBody, takeRequestBody, unBody, rqBody, decodeBody, askRq, defaultBodyPolicy, nullDir, path, serveFileFrom, guessContentTypeM, mimeTypes, uriRest, nullConf, simpleHTTP, toResponse, method, ok, internalServerError, notFound, dir, Method(GET, POST, DELETE, PUT), Conf(..))
 import qualified Happstack.Server as HServer
@@ -36,7 +35,7 @@ import Data.Time.Clock (UTCTime, getCurrentTime, addUTCTime)
 import GHC.Generics (Generic)
 import Data.ByteString.Lazy.Char8 (writeFile)
 import Filesystem.Path.CurrentOS    (commonPrefix, encodeString, decodeString, collapse, append)
-import qualified Auth (SignupRequest (SignupRequest), SignupRequestError(..), SignupError(..), createUser)
+import qualified Auth (AuthRequest(..), AuthRequestError(..), AuthError(..), createUser, signinUser)
 
 type AppM a = ExceptT String (ServerPartT IO) a
 
@@ -55,7 +54,7 @@ emptyResponse = toResponse ()
 class ToServerResponse e where
   toServerResponse :: Monad m => e -> ServerPartT m Response
 
-instance ToServerResponse Auth.SignupError where
+instance ToServerResponse Auth.AuthError where
   toServerResponse (Auth.BadRequest br) = badRequest errorStr
     where errorStr = case br of
                      Auth.EmptyUsername -> "Username cannot be empty"
@@ -65,7 +64,8 @@ instance ToServerResponse Auth.SignupError where
                      Auth.UsernameTooShort -> "Username is too short"
                      Auth.UsernameTooLong -> "Username is too long"
   toServerResponse Auth.UserAlreadyExists = badRequest "Unable to create user"
-  toServerResponse (Auth.TechnicalError _) = internalServerError $ toResponse ("Unable to create user" :: String)
+  toServerResponse Auth.InvalidCredentials = HServer.unauthorized $ toResponse ("Invalid credentials" :: String)
+  toServerResponse (Auth.TechnicalError _) = internalServerError $ toResponse ("Unable to process authentication" :: String)
 
 runApp :: IO ()
 runApp = do
@@ -84,6 +84,7 @@ apiController :: MVar [UTCTime] -> FilePath -> ServerPartT IO Response
 apiController signupRateLimitState tmpDir = dir "api" $ msum [ noteController
                                                               , checklistController
                                                               , signupController signupRateLimitState tmpDir
+                                                              , signinController
                                                               ]
 
 homePage :: ServerPartT IO Response
@@ -126,12 +127,18 @@ signupController signupRateLimitState tmpDir = dir "signup" $ do
                   doCreateUser
                   (decode $ unBody body)
 
-          doCreateUser :: Auth.SignupRequest -> ServerPartT IO Response --AppM Response
+          doCreateUser :: Auth.AuthRequest -> ServerPartT IO Response --AppM Response
           doCreateUser signupRequest = do
             res <- liftIO $ runExceptT $ Auth.createUser signupRequest
             either toServerResponse
                    (ok . toResponse)
                    res
+
+signinController :: ServerPartT IO Response
+signinController = dir "signin" $ do
+  nullDir
+  method POST
+  withBusinessHandling Auth.signinUser
 
 
 

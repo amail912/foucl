@@ -23,7 +23,7 @@ import qualified Auth
 import qualified Data.Text as Text
 
 runUnitTests :: IO ()
-runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, signupValidationTests]
+runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, signupValidationTests, signinValidationTests]
 
 runTestTTAndExit tests = do
   c <- runTestTT tests
@@ -174,14 +174,14 @@ signupValidationTests = test [ "Signup should reject short passwords" ~: rejectS
 
 rejectShortPassword :: IO ()
 rejectShortPassword = do
-    result <- runExceptT $ Auth.createUser $ Auth.SignupRequest { Auth.username = "valid-user", Auth.password = Text.pack "short" }
+    result <- runExceptT $ Auth.createUser $ Auth.AuthRequest { Auth.username = "valid-user", Auth.password = Text.pack "short" }
     case result of
       Left (Auth.BadRequest Auth.PasswordTooShort) -> assertBool "PasswordTooShort expected" True
       _ -> assertFailure "Expected PasswordTooShort"
 
 rejectInvalidUsername :: IO ()
 rejectInvalidUsername = do
-    result <- runExceptT $ Auth.createUser $ Auth.SignupRequest { Auth.username = "bad/name", Auth.password = Text.pack "averystrongpass" }
+    result <- runExceptT $ Auth.createUser $ Auth.AuthRequest { Auth.username = "bad/name", Auth.password = Text.pack "averystrongpass" }
     case result of
       Left (Auth.BadRequest Auth.UsernameDoesNotRespectPattern) -> assertBool "UsernameDoesNotRespectPattern expected" True
       _ -> assertFailure "Expected UsernameDoesNotRespectPattern"
@@ -190,7 +190,7 @@ rejectInvalidUsername = do
 signupNominal :: IO ()
 signupNominal = withCleanSignupUser "signup-nominal-user" $ \username -> do
     let validPassword = Text.pack "averystrongpass"
-    result <- runExceptT $ Auth.createUser $ Auth.SignupRequest { Auth.username = username, Auth.password = validPassword }
+    result <- runExceptT $ Auth.createUser $ Auth.AuthRequest { Auth.username = username, Auth.password = validPassword }
     case result of
       Right () -> do
         cd <- getCurrentDirectory
@@ -202,10 +202,10 @@ signupNominal = withCleanSignupUser "signup-nominal-user" $ \username -> do
 signupAlreadyExistingUser :: IO ()
 signupAlreadyExistingUser = withCleanSignupUser "signup-existing-user" $ \username -> do
     let validPassword = Text.pack "averystrongpass"
-    firstTry <- runExceptT $ Auth.createUser $ Auth.SignupRequest { Auth.username = username, Auth.password = validPassword }
+    firstTry <- runExceptT $ Auth.createUser $ Auth.AuthRequest { Auth.username = username, Auth.password = validPassword }
     case firstTry of
       Right () -> do
-        secondTry <- runExceptT $ Auth.createUser $ Auth.SignupRequest { Auth.username = username, Auth.password = validPassword }
+        secondTry <- runExceptT $ Auth.createUser $ Auth.AuthRequest { Auth.username = username, Auth.password = validPassword }
         case secondTry of
           Left Auth.UserAlreadyExists -> assertBool "UserAlreadyExists expected" True
           _ -> assertFailure "Expected UserAlreadyExists"
@@ -216,7 +216,7 @@ signupAlreadyExistingUser = withCleanSignupUser "signup-existing-user" $ \userna
 signupUsesRestrictedPermissions :: IO ()
 signupUsesRestrictedPermissions = withCleanSignupUser "signup-permissions-user" $ \username -> do
     let validPassword = Text.pack "averystrongpass"
-    result <- runExceptT $ Auth.createUser $ Auth.SignupRequest { Auth.username = username, Auth.password = validPassword }
+    result <- runExceptT $ Auth.createUser $ Auth.AuthRequest { Auth.username = username, Auth.password = validPassword }
     case result of
       Right () -> do
         cd <- getCurrentDirectory
@@ -230,6 +230,43 @@ signupUsesRestrictedPermissions = withCleanSignupUser "signup-permissions-user" 
         assertBool "Expected profile file to be owner-readable" (readable profilePermissions)
         assertBool "Expected profile file to be owner-writable" (writable profilePermissions)
       _ -> assertFailure "Expected signup success"
+
+
+signinValidationTests = test [ "Signin should authenticate with valid credentials" ~: signinNominal
+                             , "Signin should reject invalid password" ~: signinRejectsInvalidPassword
+                             , "Signin should reject unknown users" ~: signinRejectsUnknownUser
+                             ]
+
+signinNominal :: IO ()
+signinNominal = withCleanSignupUser "signin-nominal-user" $ \username -> do
+    let validPassword = Text.pack "averystrongpass"
+    signupResult <- runExceptT $ Auth.createUser $ Auth.AuthRequest { Auth.username = username, Auth.password = validPassword }
+    case signupResult of
+      Right () -> do
+        signinResult <- runExceptT $ Auth.signinUser $ Auth.AuthRequest { Auth.username = username, Auth.password = validPassword }
+        case signinResult of
+          Right () -> assertBool "Signin should succeed" True
+          _ -> assertFailure "Expected successful signin"
+      _ -> assertFailure "Expected signup success"
+
+signinRejectsInvalidPassword :: IO ()
+signinRejectsInvalidPassword = withCleanSignupUser "signin-invalid-password-user" $ \username -> do
+    let validPassword = Text.pack "averystrongpass"
+    signupResult <- runExceptT $ Auth.createUser $ Auth.AuthRequest { Auth.username = username, Auth.password = validPassword }
+    case signupResult of
+      Right () -> do
+        signinResult <- runExceptT $ Auth.signinUser $ Auth.AuthRequest { Auth.username = username, Auth.password = Text.pack "wrongpassword!!" }
+        case signinResult of
+          Left Auth.InvalidCredentials -> assertBool "InvalidCredentials expected" True
+          _ -> assertFailure "Expected InvalidCredentials"
+      _ -> assertFailure "Expected signup success"
+
+signinRejectsUnknownUser :: IO ()
+signinRejectsUnknownUser = do
+    signinResult <- runExceptT $ Auth.signinUser $ Auth.AuthRequest { Auth.username = "signin-unknown-user", Auth.password = Text.pack "averystrongpass" }
+    case signinResult of
+      Left Auth.InvalidCredentials -> assertBool "InvalidCredentials expected" True
+      _ -> assertFailure "Expected InvalidCredentials"
 
 withCleanSignupUser :: String -> (String -> IO ()) -> IO ()
 withCleanSignupUser username action = do

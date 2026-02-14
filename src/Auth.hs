@@ -5,15 +5,16 @@ module Auth (SignupRequest(..), SignupError(..), SignupRequestError(..), createU
 
 import Prelude hiding (writeFile)
 import Control.Monad (when)
-import Control.Monad.Except (ExceptT, catchError, throwError)
+import Control.Monad.Except (ExceptT, throwError)
 import Control.Monad.IO.Class (liftIO)
-import Data.Aeson (ToJSON(toJSON), FromJSON(parseJSON), decode, encode, (.:), withObject, object, (.=))
-import Data.ByteString.Lazy.Char8 (ByteString, writeFile)
+import Data.Aeson (ToJSON(toJSON), FromJSON(parseJSON), encode, (.:), withObject, object, (.=))
+import Data.ByteString.Lazy.Char8 (writeFile)
 import Data.Char (isAlphaNum)
-import Data.Password.Argon2 (Password, PasswordHash(..), Argon2, mkPassword, hashPassword, checkPassword)
+import Data.Password.Argon2 (PasswordHash(..), Argon2, mkPassword, hashPassword)
 import qualified Data.Text as Text (Text, null, length)
-import System.Directory (doesDirectoryExist, createDirectory, getCurrentDirectory)
-import System.FilePath ((</>))
+import System.Directory (doesDirectoryExist, createDirectory, getCurrentDirectory, canonicalizePath, makeAbsolute)
+import System.FilePath ((</>), normalise, takeDirectory, takeFileName, addTrailingPathSeparator)
+import Data.List (isPrefixOf)
 import Control.Exception (try, IOException)
 
 data SignupError = BadRequest !SignupRequestError | UserAlreadyExists | TechnicalError !SignupTechnicalError
@@ -50,6 +51,17 @@ createUser (SignupRequest {username, password}) = do
   persistUser username hashPass
 
 data PersistedUser = PersistedUser {uname :: !String, passwordHash :: !(PasswordHash Argon2)}
+
+ensureChild :: FilePath -> FilePath -> IO (Maybe FilePath)
+ensureChild parent child = do
+  parentCanonical <- canonicalizePath parent
+  childAbsolute <- makeAbsolute (normalise child)
+  childParentCanonical <- canonicalizePath (takeDirectory childAbsolute)
+  let childCanonical = childParentCanonical </> takeFileName childAbsolute
+      parentPrefix = addTrailingPathSeparator parentCanonical
+  if childCanonical == parentCanonical || parentPrefix `isPrefixOf` childCanonical
+    then pure (Just childCanonical)
+    else pure Nothing
 instance ToJSON PersistedUser where
   toJSON (PersistedUser {uname, passwordHash}) =
     object [ "uname" .= uname, "passwordHash" .= unPasswordHash passwordHash ]
@@ -60,11 +72,15 @@ persistUser username passwordHash = do
   let usersDir = cd </> "data" </> "users"
       userDir = usersDir </> username
       profileFile = userDir </> "profile.json"
+  safeUserDir <- liftIO $ ensureChild usersDir userDir
+  safeProfile <- liftIO $ ensureChild usersDir profileFile
   dirExists <- liftIO (doesDirectoryExist usersDir)
   if not dirExists
     then throwError $ TechnicalError UsersDirDoesNotExist
-    else do
-      creationResult <- liftIO $ try (createDirectory userDir) :: SignupAppM (Either IOException ())
-      case creationResult of
-        Left _ -> throwError UserAlreadyExists
-        Right _ -> liftIO $ writeFile profileFile (encode $ PersistedUser {uname = username, passwordHash = passwordHash})
+    else case (safeUserDir, safeProfile) of
+      (Just realUserDir, Just realProfile) -> do
+        creationResult <- liftIO $ try (createDirectory realUserDir) :: SignupAppM (Either IOException ())
+        case creationResult of
+          Left _ -> throwError UserAlreadyExists
+          Right _ -> liftIO $ writeFile realProfile (encode $ PersistedUser {uname = username, passwordHash = passwordHash})
+      _ -> throwError $ BadRequest UsernameDoesNotRespectPattern

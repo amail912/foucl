@@ -9,18 +9,21 @@ import Test.HUnit.Base(Counts(..), (@?), (~:), test, assertBool, assertFailure)
 import Test.HUnit.Text (runTestTT)
 import Crud (CRUDEngine(..), DiskFileStorageConfig(..), Error(..), CrudModificationException(..), CrudReadException(..), CrudWriteException(..))
 import Model (Identifiable(..), NoteContent(..), ChecklistContent(..), ChecklistItem(..), StorageId(..)) 
-import System.Directory (removeDirectoryRecursive, createDirectory,doesDirectoryExist, doesFileExist, listDirectory)
+import System.Directory (removeDirectoryRecursive, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, getCurrentDirectory, getPermissions, Permissions(..))
 import Data.Maybe (fromJust)
 import Data.Either (isRight)
 import Data.List ((\\))
 import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import Control.Monad.Trans.Except (runExceptT)
+import Control.Exception (finally)
 import System.Exit (exitSuccess, exitFailure)
 import NoteCrud (NoteServiceConfig(..))
 import ChecklistCrud (ChecklistServiceConfig(..))
+import qualified Auth
+import qualified Data.Text as Text
 
 runUnitTests :: IO ()
-runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests]
+runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, signupValidationTests]
 
 runTestTTAndExit tests = do
   c <- runTestTT tests
@@ -161,3 +164,98 @@ instance ContentGen NoteServiceConfig NoteContent where
 
 instance ContentGen ChecklistServiceConfig ChecklistContent where
     generateExample _ i = ChecklistContent { name = "ExampleNoteTitle " ++ show i, items = [ ChecklistItem { label = "Checklist label " ++ show i ++ "-" ++ show k, checked = k `rem` 2 == 0 } | k <- [1..5] ] }
+
+signupValidationTests = test [ "Signup should reject short passwords" ~: rejectShortPassword
+                             , "Signup should reject invalid usernames" ~: rejectInvalidUsername
+                             , "Signup should create a user profile on valid payload" ~: signupNominal
+                             , "Signup should fail when user already exists" ~: signupAlreadyExistingUser
+                             , "Signup should create restricted file permissions" ~: signupUsesRestrictedPermissions
+                             ]
+
+rejectShortPassword :: IO ()
+rejectShortPassword = do
+    result <- runExceptT $ Auth.createUser $ Auth.SignupRequest { Auth.username = "valid-user", Auth.password = Text.pack "short" }
+    case result of
+      Left (Auth.BadRequest Auth.PasswordTooShort) -> assertBool "PasswordTooShort expected" True
+      _ -> assertFailure "Expected PasswordTooShort"
+
+rejectInvalidUsername :: IO ()
+rejectInvalidUsername = do
+    result <- runExceptT $ Auth.createUser $ Auth.SignupRequest { Auth.username = "bad/name", Auth.password = Text.pack "averystrongpass" }
+    case result of
+      Left (Auth.BadRequest Auth.UsernameDoesNotRespectPattern) -> assertBool "UsernameDoesNotRespectPattern expected" True
+      _ -> assertFailure "Expected UsernameDoesNotRespectPattern"
+
+
+signupNominal :: IO ()
+signupNominal = withCleanSignupUser "signup-nominal-user" $ \username -> do
+    let validPassword = Text.pack "averystrongpass"
+    result <- runExceptT $ Auth.createUser $ Auth.SignupRequest { Auth.username = username, Auth.password = validPassword }
+    case result of
+      Right () -> do
+        cd <- getCurrentDirectory
+        let profilePath = cd ++ "/data/users/" ++ username ++ "/profile.json"
+        profileExists <- doesFileExist profilePath
+        assertBool "Expected signup profile file to exist" profileExists
+      _ -> assertFailure "Expected signup success"
+
+signupAlreadyExistingUser :: IO ()
+signupAlreadyExistingUser = withCleanSignupUser "signup-existing-user" $ \username -> do
+    let validPassword = Text.pack "averystrongpass"
+    firstTry <- runExceptT $ Auth.createUser $ Auth.SignupRequest { Auth.username = username, Auth.password = validPassword }
+    case firstTry of
+      Right () -> do
+        secondTry <- runExceptT $ Auth.createUser $ Auth.SignupRequest { Auth.username = username, Auth.password = validPassword }
+        case secondTry of
+          Left Auth.UserAlreadyExists -> assertBool "UserAlreadyExists expected" True
+          _ -> assertFailure "Expected UserAlreadyExists"
+      _ -> assertFailure "Expected first signup to succeed"
+
+
+
+signupUsesRestrictedPermissions :: IO ()
+signupUsesRestrictedPermissions = withCleanSignupUser "signup-permissions-user" $ \username -> do
+    let validPassword = Text.pack "averystrongpass"
+    result <- runExceptT $ Auth.createUser $ Auth.SignupRequest { Auth.username = username, Auth.password = validPassword }
+    case result of
+      Right () -> do
+        cd <- getCurrentDirectory
+        let userDir = cd ++ "/data/users/" ++ username
+            profilePath = userDir ++ "/profile.json"
+        userDirPermissions <- getPermissions userDir
+        profilePermissions <- getPermissions profilePath
+        assertBool "Expected user dir to be owner-readable" (readable userDirPermissions)
+        assertBool "Expected user dir to be owner-writable" (writable userDirPermissions)
+        assertBool "Expected user dir to be searchable" (searchable userDirPermissions)
+        assertBool "Expected profile file to be owner-readable" (readable profilePermissions)
+        assertBool "Expected profile file to be owner-writable" (writable profilePermissions)
+      _ -> assertFailure "Expected signup success"
+
+withCleanSignupUser :: String -> (String -> IO ()) -> IO ()
+withCleanSignupUser username action = do
+    cd <- getCurrentDirectory
+    let usersDir = cd ++ "/data/users"
+        userDir = usersDir ++ "/" ++ username
+    usersDirCreatedByTest <- ensureUsersDir usersDir
+    cleanupSignupUserDir userDir
+    action username `finally` do
+      cleanupSignupUserDir userDir
+      cleanupUsersDirIfCreatedByTest usersDirCreatedByTest usersDir
+
+ensureUsersDir :: FilePath -> IO Bool
+ensureUsersDir usersDir = do
+    usersExists <- doesDirectoryExist usersDir
+    if usersExists
+      then pure False
+      else createDirectoryIfMissing True usersDir >> pure True
+
+cleanupUsersDirIfCreatedByTest :: Bool -> FilePath -> IO ()
+cleanupUsersDirIfCreatedByTest usersDirCreatedByTest usersDir =
+    if usersDirCreatedByTest
+      then removeDirectoryRecursive usersDir
+      else pure ()
+
+cleanupSignupUserDir :: FilePath -> IO ()
+cleanupSignupUserDir userDir = do
+    userExists <- doesDirectoryExist userDir
+    if userExists then removeDirectoryRecursive userDir else pure ()

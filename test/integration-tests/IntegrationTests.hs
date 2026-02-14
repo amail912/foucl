@@ -12,12 +12,15 @@ import Prelude hiding (id)
 import           Data.Aeson
 import           Data.ByteString       (ByteString)
 import           Data.ByteString.UTF8
+import qualified Data.ByteString.Char8 as BS
+import qualified Data.ByteString.Lazy as BL
 import           Data.Functor.Identity
 import           GHC.Exts
 import           GHC.Generics          (Generic)
 import           Network.HTTP.Simple
 import           Test.Hspec
 import           Test.HUnit
+import           Data.Time.Clock.POSIX (getPOSIXTime)
 import Model
 
 -- ===================== Constants ==============================
@@ -46,6 +49,33 @@ runIntegrationTests = hspec $ do
       modifyItem ChecklistEndpoint $ Identifiable (storageId firstChecklist) firstChecklistNewContent
       [modifiedChecklist :: Identifiable ChecklistContent] <- assertGetWithContent ChecklistEndpoint firstChecklistNewContent
       deleteItem ChecklistEndpoint $ (id.storageId) modifiedChecklist
+    it "should enforce signup body size and signup rate limiting" $ do
+      uniquenessSuffix <- round <$> getPOSIXTime
+      let oversizedPayload = BS.replicate 5000 'a'
+      oversizedReq <- parseRequest "POST http://localhost:8081/api/signup"
+      oversizedResponse <- httpBS $ setRequestMethod "POST" $ setRequestBodyLBS (BL.fromStrict oversizedPayload) oversizedReq
+      assertStatusCode "Oversized signup body should be rejected" 413 oversizedResponse
+
+      mapM_ (\i -> do
+          let signupPayload = object [ "username" .= ("ratelimit-user-" ++ show uniquenessSuffix ++ "-" ++ show i)
+                                     , "password" .= ("averystrongpass" :: String)
+                                     ]
+          signupReq <- parseRequest "POST http://localhost:8081/api/signup"
+          signupResponse <- httpNoBody $ setRequestMethod "POST"
+                                    $ setRequestHeader "Content-Type" ["application/json"]
+                                    $ setRequestBodyJSON signupPayload
+                                    $ signupReq
+          assertStatusCode "Signup should be allowed before rate-limit threshold" 200 signupResponse
+        ) [1..4]
+
+      blockedReq <- parseRequest "POST http://localhost:8081/api/signup"
+      blockedResponse <- httpBS $ setRequestMethod "POST"
+                              $ setRequestHeader "Content-Type" ["application/json"]
+                              $ setRequestBodyJSON (object [ "username" .= ("ratelimit-user-blocked-" ++ show uniquenessSuffix)
+                                                           , "password" .= ("averystrongpass" :: String)
+                                                           ])
+                              $ blockedReq
+      assertStatusCode "Signup should be blocked when rate limit is reached" 400 blockedResponse
         where
         firstChecklistContent    = ChecklistContent { name = "First checklist"
                                                      , items = [ ChecklistItem { label = "First item label unchecked", checked = False }
@@ -115,6 +145,9 @@ assertNoNoteInResponse errorPrefix response = do
 
 assertStatusCode200 :: String -> Response a -> Assertion
 assertStatusCode200 errorPrefix response = assertEqual (errorPrefix ++ "Expected 200 response status code") 200 (getResponseStatusCode response)
+
+assertStatusCode :: String -> Int -> Response a -> Assertion
+assertStatusCode errorPrefix expectedStatus response = assertEqual (errorPrefix ++ "Expected status code") expectedStatus (getResponseStatusCode response)
 
 modifyNote :: Content a => a -> Identifiable a -> Identifiable a
 modifyNote newContent previousNote = Identifiable (storageId previousNote) newContent

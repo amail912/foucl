@@ -10,6 +10,7 @@ import Data.Aeson (ToJSON(toJSON), FromJSON, decode, encode, decode')
 import Data.Function ((&))
 import Data.Functor ((<$>))
 import Data.Maybe (Maybe(..))
+import Data.Int (Int64)
 import Control.Monad (msum, mzero, join, foldM, when)
 import Control.Monad.Except (catchError, throwError)
 import Control.Monad.Trans.Class (lift, MonadTrans)
@@ -19,18 +20,19 @@ import Control.Monad.IO.Class (liftIO, MonadIO)
 import Data.Either (either)
 import Data.List (isPrefixOf)
 import qualified Data.Text as Text
-import Control.Concurrent.MVar (takeMVar)
-import qualified Data.ByteString.Lazy.Char8 as BL (unpack)
+import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
 import Happstack.Server (FilterMonad, Response, ServerPartT, RqBody, takeRequestBody, unBody, rqBody, decodeBody, askRq, defaultBodyPolicy, nullDir, path, serveFileFrom, guessContentTypeM, mimeTypes, uriRest, nullConf, simpleHTTP, toResponse, method, ok, internalServerError, notFound, dir, Method(GET, POST, DELETE, PUT), Conf(..))
 import qualified Happstack.Server as HServer
+import Happstack.Server.Internal.MessageWrap (bodyInput, BodyPolicy)
 import Model (NoteContent, ChecklistContent, Content, Identifiable(..))
 import qualified CrudStorage
 import Crud
 import NoteCrud (NoteServiceConfig(..), defaultNoteServiceConfig)
 import ChecklistCrud (ChecklistServiceConfig(..), defaultChecklistServiceConfig)
-import System.Directory (doesFileExist, getCurrentDirectory, canonicalizePath)
+import System.Directory (doesFileExist, getCurrentDirectory, canonicalizePath, getTemporaryDirectory)
 import System.FilePath ((</>), pathSeparator)
 import System.IO (hFlush, stdout)
+import Data.Time.Clock (UTCTime, getCurrentTime, addUTCTime)
 import GHC.Generics (Generic)
 import Data.ByteString.Lazy.Char8 (writeFile)
 import Filesystem.Path.CurrentOS    (commonPrefix, encodeString, decodeString, collapse, append)
@@ -59,25 +61,30 @@ instance ToServerResponse Auth.SignupError where
                      Auth.EmptyUsername -> "Username cannot be empty"
                      Auth.UsernameDoesNotRespectPattern -> "Username has forbidden characters"
                      Auth.EmptyPassword -> "Password cannot be empty"
+                     Auth.PasswordTooShort -> "Password is too short"
+                     Auth.UsernameTooShort -> "Username is too short"
+                     Auth.UsernameTooLong -> "Username is too long"
   toServerResponse Auth.UserAlreadyExists = badRequest "Unable to create user"
   toServerResponse (Auth.TechnicalError _) = internalServerError $ toResponse ("Unable to create user" :: String)
 
 runApp :: IO ()
 runApp = do
     putStrLn "running server"
+    signupRateLimitState <- newMVar []
+    tmpDir <- getTemporaryDirectory
     simpleHTTP nullConf { port = 8081 } $ do
-        askRq >>= log . show >> log "=========================END REQUEST====================\n"
+        log "Incoming request" >> log "=========================END REQUEST====================\n"
         msum [ homePage
-             , apiController
+             , apiController signupRateLimitState tmpDir
              , serveStaticResource
              , mzero
              ]
 
-apiController :: ServerPartT IO Response
-apiController = dir "api" $ msum [ noteController
-                                 , checklistController
-                                 , signupController
-                                 ]
+apiController :: MVar [UTCTime] -> FilePath -> ServerPartT IO Response
+apiController signupRateLimitState tmpDir = dir "api" $ msum [ noteController
+                                                              , checklistController
+                                                              , signupController signupRateLimitState tmpDir
+                                                              ]
 
 homePage :: ServerPartT IO Response
 homePage = do
@@ -85,17 +92,36 @@ homePage = do
     cd <- liftIO getCurrentDirectory
     serveFileFrom (cd </> "static/") (guessContentTypeM mimeTypes) "index.html"
 
-signupController :: ServerPartT IO Response
-signupController = dir "signup" $ do
+maxSignupBodyBytes :: Int64
+maxSignupBodyBytes = 4096
+
+signupBodyPolicy :: FilePath -> BodyPolicy
+signupBodyPolicy tmpDir = defaultBodyPolicy tmpDir 0 maxSignupBodyBytes maxSignupBodyBytes
+
+isTooLargeBodyError :: String -> Bool
+isTooLargeBodyError err = "x-www-form-urlencoded content longer than BodyPolicy.maxRAM=" `isPrefixOf` err
+
+signupController :: MVar [UTCTime] -> FilePath -> ServerPartT IO Response
+signupController signupRateLimitState tmpDir = dir "signup" $ do
     nullDir
     method POST
-    liftIO $ putStrLn "Reading signup body"
-    body <- askRq >>= takeRequestBody
-    maybe (badRequest "Empty body")
-          handleBody
-          body
+    allowed <- liftIO $ allowSignupRequest signupRateLimitState
+    if not allowed
+      then tooManyRequests "Too many signup attempts. Please retry later."
+      else do
+        rq <- askRq
+        (_, mBodyErr) <- liftIO $ bodyInput (signupBodyPolicy tmpDir) rq
+        case mBodyErr of
+          Just bodyErr | isTooLargeBodyError bodyErr -> HServer.requestEntityTooLarge $ toResponse ("Body too large" :: String)
+          Just _ -> badRequest "Unable to decode request body"
+          Nothing -> do
+            log "Reading signup body"
+            body <- askRq >>= takeRequestBody
+            maybe (badRequest "Empty body")
+                  handleBody
+                  body
     where handleBody :: RqBody -> ServerPartT IO Response --AppM Response
-          handleBody body = do
+          handleBody body =
             maybe (badRequest "Unable to decode the body as a SignupData")
                   doCreateUser
                   (decode $ unBody body)
@@ -106,6 +132,22 @@ signupController = dir "signup" $ do
             either toServerResponse
                    (ok . toResponse)
                    res
+
+
+
+tooManyRequests :: FilterMonad Response m => String -> m Response
+tooManyRequests = HServer.badRequest . toResponse
+
+allowSignupRequest :: MVar [UTCTime] -> IO Bool
+allowSignupRequest state = do
+  now <- getCurrentTime
+  let windowStart = addUTCTime (-60) now
+      maxRequests = 5
+  modifyMVar state $ \timestamps -> do
+    let recent = filter (> windowStart) timestamps
+    if length recent >= maxRequests
+      then pure (recent, False)
+      else pure (now : recent, True)
 
 withBusinessHandling :: (FromJSON a, ToServerResponse e) => (a -> ExceptT e IO r) -> ServerPartT IO Response
 withBusinessHandling handle = do

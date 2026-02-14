@@ -9,7 +9,7 @@ import Test.HUnit.Base(Counts(..), (@?), (~:), test, assertBool, assertFailure)
 import Test.HUnit.Text (runTestTT)
 import Crud (CRUDEngine(..), DiskFileStorageConfig(..), Error(..), CrudModificationException(..), CrudReadException(..), CrudWriteException(..))
 import Model (Identifiable(..), NoteContent(..), ChecklistContent(..), ChecklistItem(..), StorageId(..)) 
-import System.Directory (removeDirectoryRecursive, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, getCurrentDirectory)
+import System.Directory (removeDirectoryRecursive, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, getCurrentDirectory, getPermissions, Permissions(..))
 import Data.Maybe (fromJust)
 import Data.Either (isRight)
 import Data.List ((\\))
@@ -169,6 +169,7 @@ signupValidationTests = test [ "Signup should reject short passwords" ~: rejectS
                              , "Signup should reject invalid usernames" ~: rejectInvalidUsername
                              , "Signup should create a user profile on valid payload" ~: signupNominal
                              , "Signup should fail when user already exists" ~: signupAlreadyExistingUser
+                             , "Signup should create restricted file permissions" ~: signupUsesRestrictedPermissions
                              ]
 
 rejectShortPassword :: IO ()
@@ -209,6 +210,26 @@ signupAlreadyExistingUser = withCleanSignupUser "signup-existing-user" $ \userna
           Left Auth.UserAlreadyExists -> assertBool "UserAlreadyExists expected" True
           _ -> assertFailure "Expected UserAlreadyExists"
       _ -> assertFailure "Expected first signup to succeed"
+
+
+
+signupUsesRestrictedPermissions :: IO ()
+signupUsesRestrictedPermissions = withCleanSignupUser "signup-permissions-user" $ \username -> do
+    let validPassword = Text.pack "averystrongpass"
+    result <- runExceptT $ Auth.createUser $ Auth.SignupRequest { Auth.username = username, Auth.password = validPassword }
+    case result of
+      Right () -> do
+        cd <- getCurrentDirectory
+        let userDir = cd ++ "/data/users/" ++ username
+            profilePath = userDir ++ "/profile.json"
+        userDirPermissions <- getPermissions userDir
+        profilePermissions <- getPermissions profilePath
+        assertBool "Expected user dir to be owner-readable" (readable userDirPermissions)
+        assertBool "Expected user dir to be owner-writable" (writable userDirPermissions)
+        assertBool "Expected user dir to be searchable" (searchable userDirPermissions)
+        assertBool "Expected profile file to be owner-readable" (readable profilePermissions)
+        assertBool "Expected profile file to be owner-writable" (writable profilePermissions)
+      _ -> assertFailure "Expected signup success"
 
 withCleanSignupUser :: String -> (String -> IO ()) -> IO ()
 withCleanSignupUser username action = do

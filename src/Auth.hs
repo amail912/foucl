@@ -12,14 +12,15 @@ import Data.ByteString.Lazy.Char8 (writeFile)
 import Data.Char (isAlphaNum)
 import Data.Password.Argon2 (PasswordHash(..), Argon2, mkPassword, hashPassword)
 import qualified Data.Text as Text (Text, null, length)
-import System.Directory (doesDirectoryExist, createDirectory, getCurrentDirectory, canonicalizePath, makeAbsolute)
+import System.Directory (doesDirectoryExist, createDirectory, getCurrentDirectory, canonicalizePath, makeAbsolute, emptyPermissions, setOwnerReadable, setOwnerWritable, setOwnerSearchable, setPermissions)
 import System.FilePath ((</>), normalise, takeDirectory, takeFileName, addTrailingPathSeparator)
 import Data.List (isPrefixOf)
 import Control.Exception (try, IOException)
+import System.IO.Error (isAlreadyExistsError)
 
 data SignupError = BadRequest !SignupRequestError | UserAlreadyExists | TechnicalError !SignupTechnicalError
 data SignupRequestError = EmptyUsername | EmptyPassword | UsernameDoesNotRespectPattern | UsernameTooShort | UsernameTooLong | PasswordTooShort
-data SignupTechnicalError = UsersDirDoesNotExist
+data SignupTechnicalError = UsersDirDoesNotExist | UserStorageFailure
 type SignupAppM a = ExceptT SignupError IO a
 
 data SignupRequest = SignupRequest { username :: !String, password :: !Text.Text }
@@ -81,6 +82,16 @@ persistUser username passwordHash = do
       (Just realUserDir, Just realProfile) -> do
         creationResult <- liftIO $ try (createDirectory realUserDir) :: SignupAppM (Either IOException ())
         case creationResult of
-          Left _ -> throwError UserAlreadyExists
-          Right _ -> liftIO $ writeFile realProfile (encode $ PersistedUser {uname = username, passwordHash = passwordHash})
+          Left ioErr ->
+            if isAlreadyExistsError ioErr
+              then throwError UserAlreadyExists
+              else throwError $ TechnicalError UserStorageFailure
+          Right _ -> do
+            writeResult <- liftIO (try $ do
+              setPermissions realUserDir (setOwnerSearchable True $ setOwnerWritable True $ setOwnerReadable True emptyPermissions)
+              writeFile realProfile (encode $ PersistedUser {uname = username, passwordHash = passwordHash})
+              setPermissions realProfile (setOwnerWritable True $ setOwnerReadable True emptyPermissions)) :: SignupAppM (Either IOException ())
+            case writeResult of
+              Left _ -> throwError $ TechnicalError UserStorageFailure
+              Right _ -> pure ()
       _ -> throwError $ BadRequest UsernameDoesNotRespectPattern

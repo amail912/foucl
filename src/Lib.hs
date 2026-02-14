@@ -19,8 +19,8 @@ import Control.Monad.IO.Class (liftIO, MonadIO)
 import Data.Either (either)
 import Data.List (isPrefixOf)
 import qualified Data.Text as Text
-import Control.Concurrent.MVar (takeMVar)
-import qualified Data.ByteString.Lazy.Char8 as BL (unpack)
+import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
+import qualified Data.ByteString.Lazy as BSL (length)
 import Happstack.Server (FilterMonad, Response, ServerPartT, RqBody, takeRequestBody, unBody, rqBody, decodeBody, askRq, defaultBodyPolicy, nullDir, path, serveFileFrom, guessContentTypeM, mimeTypes, uriRest, nullConf, simpleHTTP, toResponse, method, ok, internalServerError, notFound, dir, Method(GET, POST, DELETE, PUT), Conf(..))
 import qualified Happstack.Server as HServer
 import Model (NoteContent, ChecklistContent, Content, Identifiable(..))
@@ -31,6 +31,7 @@ import ChecklistCrud (ChecklistServiceConfig(..), defaultChecklistServiceConfig)
 import System.Directory (doesFileExist, getCurrentDirectory, canonicalizePath)
 import System.FilePath ((</>), pathSeparator)
 import System.IO (hFlush, stdout)
+import Data.Time.Clock (UTCTime, getCurrentTime, addUTCTime)
 import GHC.Generics (Generic)
 import Data.ByteString.Lazy.Char8 (writeFile)
 import Filesystem.Path.CurrentOS    (commonPrefix, encodeString, decodeString, collapse, append)
@@ -68,19 +69,20 @@ instance ToServerResponse Auth.SignupError where
 runApp :: IO ()
 runApp = do
     putStrLn "running server"
+    signupRateLimitState <- newMVar []
     simpleHTTP nullConf { port = 8081 } $ do
         log "Incoming request" >> log "=========================END REQUEST====================\n"
         msum [ homePage
-             , apiController
+             , apiController signupRateLimitState
              , serveStaticResource
              , mzero
              ]
 
-apiController :: ServerPartT IO Response
-apiController = dir "api" $ msum [ noteController
-                                 , checklistController
-                                 , signupController
-                                 ]
+apiController :: MVar [UTCTime] -> ServerPartT IO Response
+apiController signupRateLimitState = dir "api" $ msum [ noteController
+                                                       , checklistController
+                                                       , signupController signupRateLimitState
+                                                       ]
 
 homePage :: ServerPartT IO Response
 homePage = do
@@ -88,20 +90,32 @@ homePage = do
     cd <- liftIO getCurrentDirectory
     serveFileFrom (cd </> "static/") (guessContentTypeM mimeTypes) "index.html"
 
-signupController :: ServerPartT IO Response
-signupController = dir "signup" $ do
+maxSignupBodyBytes :: Int
+maxSignupBodyBytes = 4096
+
+isSignupBodyTooLarge :: RqBody -> Bool
+isSignupBodyTooLarge body = fromIntegral (BSL.length $ unBody body) > maxSignupBodyBytes
+
+signupController :: MVar [UTCTime] -> ServerPartT IO Response
+signupController signupRateLimitState = dir "signup" $ do
     nullDir
     method POST
-    liftIO $ putStrLn "Reading signup body"
-    body <- askRq >>= takeRequestBody
-    maybe (badRequest "Empty body")
-          handleBody
-          body
+    allowed <- liftIO $ allowSignupRequest signupRateLimitState
+    if not allowed
+      then tooManyRequests "Too many signup attempts. Please retry later."
+      else do
+        liftIO $ putStrLn "Reading signup body"
+        body <- askRq >>= takeRequestBody
+        maybe (badRequest "Empty body")
+              handleBody
+              body
     where handleBody :: RqBody -> ServerPartT IO Response --AppM Response
-          handleBody body = do
-            maybe (badRequest "Unable to decode the body as a SignupData")
-                  doCreateUser
-                  (decode $ unBody body)
+          handleBody body =
+            if isSignupBodyTooLarge body
+              then badRequest "Body too large"
+              else maybe (badRequest "Unable to decode the body as a SignupData")
+                         doCreateUser
+                         (decode $ unBody body)
 
           doCreateUser :: Auth.SignupRequest -> ServerPartT IO Response --AppM Response
           doCreateUser signupRequest = do
@@ -109,6 +123,22 @@ signupController = dir "signup" $ do
             either toServerResponse
                    (ok . toResponse)
                    res
+
+
+
+tooManyRequests :: FilterMonad Response m => String -> m Response
+tooManyRequests = HServer.badRequest . toResponse
+
+allowSignupRequest :: MVar [UTCTime] -> IO Bool
+allowSignupRequest state = do
+  now <- getCurrentTime
+  let windowStart = addUTCTime (-60) now
+      maxRequests = 5
+  modifyMVar state $ \timestamps -> do
+    let recent = filter (> windowStart) timestamps
+    if length recent >= maxRequests
+      then pure (recent, False)
+      else pure (now : recent, True)
 
 withBusinessHandling :: (FromJSON a, ToServerResponse e) => (a -> ExceptT e IO r) -> ServerPartT IO Response
 withBusinessHandling handle = do

@@ -9,7 +9,7 @@ import Test.HUnit.Base(Counts(..), (@?), (~:), test, assertBool, assertFailure)
 import Test.HUnit.Text (runTestTT)
 import Crud (CRUDEngine(..), DiskFileStorageConfig(..), Error(..), CrudModificationException(..), CrudReadException(..), CrudWriteException(..))
 import Model (Identifiable(..), NoteContent(..), ChecklistContent(..), ChecklistItem(..), StorageId(..)) 
-import System.Directory (removeDirectoryRecursive, createDirectory,doesDirectoryExist, doesFileExist, listDirectory, getCurrentDirectory)
+import System.Directory (removeDirectoryRecursive, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, getCurrentDirectory)
 import Data.Maybe (fromJust)
 import Data.Either (isRight)
 import Data.List ((\\))
@@ -226,7 +226,7 @@ ensureUsersDir usersDir = do
     usersExists <- doesDirectoryExist usersDir
     if usersExists
       then pure False
-      else createDirectory usersDir >> pure True
+      else createDirectoryIfMissing True usersDir >> pure True
 
 cleanupUsersDirIfCreatedByTest :: Bool -> FilePath -> IO ()
 cleanupUsersDirIfCreatedByTest usersDirCreatedByTest usersDir =

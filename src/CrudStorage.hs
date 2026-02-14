@@ -45,7 +45,7 @@ type SimpleFileName = String
 -- FUNCTIONS
 createItem :: CRUDEngine crudConfig a => crudConfig -> a -> EitherT CrudWriteException IO StorageId
 createItem config nc = do
-    handleEitherT (IOWriteException)
+    handleEitherT IOWriteException
                   (createDirectoryIfMissing True (rootPath config))
     uuid <- firstEitherT IOWriteException $ generateNewUUID config
     writeContentToFile config nc uuid
@@ -73,7 +73,7 @@ writeContentToFile :: CRUDEngine crudConfig a => crudConfig -> a -> String -> Ei
 writeContentToFile storageConfig content fileId = do
     let storeId = StorageId { id = fileId, version = hash content }
     handleEitherT IOWriteException
-                  (writeFile (fileName storageConfig fileId) (encode $ (Identifiable storeId content)))
+                  (writeFile (fileName storageConfig fileId) (encode $ Identifiable storeId content))
     return storeId
 
 readItemFromFile :: CRUDEngine crudConfig a => crudConfig -> SimpleFileName -> EitherT CrudReadException IO (Identifiable a)
@@ -85,7 +85,7 @@ parseString :: CRUDEngine crudConfig a => crudConfig -> ByteString -> EitherT Pa
 parseString config strToParse = firstEitherT (ParsingException strToParse)
                                              (hoistEither $ eitherDecode strToParse)
 
-data ParsingException = ParsingException ParsedString ErrorMessage
+data ParsingException = ParsingException !ParsedString !ErrorMessage
 type ErrorMessage = String
 type ParsedString = ByteString
 
@@ -94,7 +94,7 @@ parsingExceptionToCrudException file (ParsingException parsedString errorMessage
     CrudParsingException parsedString errorMessage file
 
 listFiles :: DiskFileStorageConfig crudConfig => crudConfig -> EitherT IOError IO [String]
-listFiles config = handleEitherT (ioError)
+listFiles config = handleEitherT ioError
                                  (listDirectory (rootPath config))
   where ioError :: IOError -> IOError
         ioError = Prelude.id
@@ -123,8 +123,8 @@ txtExtension = ".txt"
 prefixWithStorageDir :: DiskFileStorageConfig crudConfig => crudConfig -> SimpleFileName -> String
 prefixWithStorageDir storageConfig s = postFixWithIfNeeded '/' (rootPath storageConfig) ++ s
     where
-        postFixWithIfNeeded c []     = c:[]
-        postFixWithIfNeeded c (x:[]) = if c == x then c:[] else x:c:[]
+        postFixWithIfNeeded c []     = [c]
+        postFixWithIfNeeded c [x] = if c == x then [c] else [x, c]
         postFixWithIfNeeded c (x:xs) = x:postFixWithIfNeeded c xs
 
 log :: MonadIO m => String -> m ()

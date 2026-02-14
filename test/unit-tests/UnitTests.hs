@@ -9,12 +9,13 @@ import Test.HUnit.Base(Counts(..), (@?), (~:), test, assertBool, assertFailure)
 import Test.HUnit.Text (runTestTT)
 import Crud (CRUDEngine(..), DiskFileStorageConfig(..), Error(..), CrudModificationException(..), CrudReadException(..), CrudWriteException(..))
 import Model (Identifiable(..), NoteContent(..), ChecklistContent(..), ChecklistItem(..), StorageId(..)) 
-import System.Directory (removeDirectoryRecursive, createDirectory,doesDirectoryExist, doesFileExist, listDirectory)
+import System.Directory (removeDirectoryRecursive, createDirectory,doesDirectoryExist, doesFileExist, listDirectory, getCurrentDirectory)
 import Data.Maybe (fromJust)
 import Data.Either (isRight)
 import Data.List ((\\))
 import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import Control.Monad.Trans.Except (runExceptT)
+import Control.Exception (finally)
 import System.Exit (exitSuccess, exitFailure)
 import NoteCrud (NoteServiceConfig(..))
 import ChecklistCrud (ChecklistServiceConfig(..))
@@ -166,6 +167,8 @@ instance ContentGen ChecklistServiceConfig ChecklistContent where
 
 signupValidationTests = test [ "Signup should reject short passwords" ~: rejectShortPassword
                              , "Signup should reject invalid usernames" ~: rejectInvalidUsername
+                             , "Signup should create a user profile on valid payload" ~: signupNominal
+                             , "Signup should fail when user already exists" ~: signupAlreadyExistingUser
                              ]
 
 rejectShortPassword :: IO ()
@@ -181,3 +184,45 @@ rejectInvalidUsername = do
     case result of
       Left (Auth.BadRequest Auth.UsernameDoesNotRespectPattern) -> assertBool "UsernameDoesNotRespectPattern expected" True
       _ -> assertFailure "Expected UsernameDoesNotRespectPattern"
+
+
+signupNominal :: IO ()
+signupNominal = withCleanSignupUser "signup-nominal-user" $ \username -> do
+    let validPassword = Text.pack "averystrongpass"
+    result <- runExceptT $ Auth.createUser $ Auth.SignupRequest { Auth.username = username, Auth.password = validPassword }
+    case result of
+      Right () -> do
+        cd <- getCurrentDirectory
+        let profilePath = cd ++ "/data/users/" ++ username ++ "/profile.json"
+        profileExists <- doesFileExist profilePath
+        assertBool "Expected signup profile file to exist" profileExists
+      _ -> assertFailure "Expected signup success"
+
+signupAlreadyExistingUser :: IO ()
+signupAlreadyExistingUser = withCleanSignupUser "signup-existing-user" $ \username -> do
+    let validPassword = Text.pack "averystrongpass"
+    firstTry <- runExceptT $ Auth.createUser $ Auth.SignupRequest { Auth.username = username, Auth.password = validPassword }
+    case firstTry of
+      Right () -> do
+        secondTry <- runExceptT $ Auth.createUser $ Auth.SignupRequest { Auth.username = username, Auth.password = validPassword }
+        case secondTry of
+          Left Auth.UserAlreadyExists -> assertBool "UserAlreadyExists expected" True
+          _ -> assertFailure "Expected UserAlreadyExists"
+      _ -> assertFailure "Expected first signup to succeed"
+
+withCleanSignupUser :: String -> (String -> IO ()) -> IO ()
+withCleanSignupUser username action = do
+    cd <- getCurrentDirectory
+    let usersDir = cd ++ "/data/users"
+        userDir = usersDir ++ "/" ++ username
+    usersExists <- doesDirectoryExist usersDir
+    if usersExists
+      then pure ()
+      else createDirectory usersDir
+    cleanupSignupUserDir userDir
+    action username `finally` cleanupSignupUserDir userDir
+
+cleanupSignupUserDir :: FilePath -> IO ()
+cleanupSignupUserDir userDir = do
+    userExists <- doesDirectoryExist userDir
+    if userExists then removeDirectoryRecursive userDir else pure ()

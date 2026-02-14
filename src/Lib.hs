@@ -20,7 +20,7 @@ import Data.Either (either)
 import Data.List (isPrefixOf)
 import qualified Data.Text as Text
 import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
-import qualified Data.ByteString.Lazy.Char8 as BL (unpack)
+import qualified Data.ByteString.Lazy as BSL (length)
 import Happstack.Server (FilterMonad, Response, ServerPartT, RqBody, takeRequestBody, unBody, rqBody, decodeBody, askRq, defaultBodyPolicy, nullDir, path, serveFileFrom, guessContentTypeM, mimeTypes, uriRest, nullConf, simpleHTTP, toResponse, method, ok, internalServerError, notFound, dir, Method(GET, POST, DELETE, PUT), Conf(..))
 import qualified Happstack.Server as HServer
 import Model (NoteContent, ChecklistContent, Content, Identifiable(..))
@@ -90,6 +90,12 @@ homePage = do
     cd <- liftIO getCurrentDirectory
     serveFileFrom (cd </> "static/") (guessContentTypeM mimeTypes) "index.html"
 
+maxSignupBodyBytes :: Int
+maxSignupBodyBytes = 4096
+
+isSignupBodyTooLarge :: RqBody -> Bool
+isSignupBodyTooLarge body = fromIntegral (BSL.length $ unBody body) > maxSignupBodyBytes
+
 signupController :: MVar [UTCTime] -> ServerPartT IO Response
 signupController signupRateLimitState = dir "signup" $ do
     nullDir
@@ -104,10 +110,12 @@ signupController signupRateLimitState = dir "signup" $ do
               handleBody
               body
     where handleBody :: RqBody -> ServerPartT IO Response --AppM Response
-          handleBody body = do
-            maybe (badRequest "Unable to decode the body as a SignupData")
-                  doCreateUser
-                  (decode $ unBody body)
+          handleBody body =
+            if isSignupBodyTooLarge body
+              then badRequest "Body too large"
+              else maybe (badRequest "Unable to decode the body as a SignupData")
+                         doCreateUser
+                         (decode $ unBody body)
 
           doCreateUser :: Auth.SignupRequest -> ServerPartT IO Response --AppM Response
           doCreateUser signupRequest = do

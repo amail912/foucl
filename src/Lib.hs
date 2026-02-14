@@ -32,6 +32,8 @@ import ChecklistCrud (ChecklistServiceConfig(..), defaultChecklistServiceConfig)
 import System.Directory (doesFileExist, getCurrentDirectory, canonicalizePath, getTemporaryDirectory)
 import System.FilePath ((</>), pathSeparator)
 import System.IO (hFlush, stdout)
+import System.Environment (lookupEnv)
+import System.Exit (exitFailure)
 import Data.Time.Clock (UTCTime, getCurrentTime, addUTCTime)
 import GHC.Generics (Generic)
 import Data.ByteString.Lazy.Char8 (writeFile)
@@ -69,21 +71,34 @@ instance ToServerResponse Auth.AuthError where
   toServerResponse Auth.InvalidCredentials = HServer.unauthorized $ toResponse ("Invalid credentials" :: String)
   toServerResponse (Auth.TechnicalError _) = internalServerError $ toResponse ("Unable to process authentication" :: String)
 
+loadSessionConfigFromEnv :: IO (Either String Session.SessionConfig)
+loadSessionConfigFromEnv = do
+  mSecret <- lookupEnv "FOUCL_SESSION_SECRET"
+  case mSecret of
+    Nothing -> pure $ Left "Missing required environment variable FOUCL_SESSION_SECRET"
+    Just secret | null secret -> pure $ Left "Environment variable FOUCL_SESSION_SECRET cannot be empty"
+    Just secret -> pure $ Right Session.defaultSessionConfig { Session.sessionSecret = secret }
+
 runApp :: IO ()
 runApp = do
     putStrLn "running server"
-    signupRateLimitState <- newMVar []
-    tmpDir <- getTemporaryDirectory
-    cd <- getCurrentDirectory
-    let sessionConfig = Session.defaultSessionConfig
-    sessionStore <- Session.mkFileSessionStore (cd </> "data" </> "sessions") sessionConfig
-    simpleHTTP nullConf { port = 8081 } $ do
-        log "Incoming request" >> log "=========================END REQUEST====================\n"
-        msum [ homePage
-             , apiController signupRateLimitState tmpDir sessionConfig sessionStore
-             , serveStaticResource
-             , mzero
-             ]
+    sessionConfigResult <- loadSessionConfigFromEnv
+    case sessionConfigResult of
+      Left err -> do
+        putStrLn $ "[startup-error] " ++ err
+        exitFailure
+      Right sessionConfig -> do
+        signupRateLimitState <- newMVar []
+        tmpDir <- getTemporaryDirectory
+        cd <- getCurrentDirectory
+        sessionStore <- Session.mkFileSessionStore (cd </> "data" </> "sessions") sessionConfig
+        simpleHTTP nullConf { port = 8081 } $ do
+            log "Incoming request" >> log "=========================END REQUEST====================\n"
+            msum [ homePage
+                 , apiController signupRateLimitState tmpDir sessionConfig sessionStore
+                 , serveStaticResource
+                 , mzero
+                 ]
 
 apiController :: MVar [UTCTime] -> FilePath -> Session.SessionConfig -> Session.SessionStore -> ServerPartT IO Response
 apiController signupRateLimitState tmpDir sessionConfig sessionStore = dir "api" $ msum [ requireAuth sessionConfig sessionStore noteController

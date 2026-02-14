@@ -9,14 +9,15 @@ import Control.Monad.Except (ExceptT, catchError, throwError)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (ToJSON(toJSON), FromJSON(parseJSON), decode, encode, (.:), withObject, object, (.=))
 import Data.ByteString.Lazy.Char8 (ByteString, writeFile)
-import Data.List (isPrefixOf)
+import Data.Char (isAlphaNum)
 import Data.Password.Argon2 (Password, PasswordHash(..), Argon2, mkPassword, hashPassword, checkPassword)
-import qualified Data.Text as Text (Text, null)
-import System.Directory (doesFileExist, doesDirectoryExist, getCurrentDirectory, canonicalizePath)
-import System.FilePath ((</>), pathSeparator)
+import qualified Data.Text as Text (Text, null, length)
+import System.Directory (doesDirectoryExist, createDirectory, getCurrentDirectory)
+import System.FilePath ((</>))
+import Control.Exception (try, IOException)
 
 data SignupError = BadRequest !SignupRequestError | UserAlreadyExists | TechnicalError !SignupTechnicalError
-data SignupRequestError = EmptyUsername | EmptyPassword | UsernameDoesNotRespectPattern
+data SignupRequestError = EmptyUsername | EmptyPassword | UsernameDoesNotRespectPattern | UsernameTooShort | UsernameTooLong | PasswordTooShort
 data SignupTechnicalError = UsersDirDoesNotExist
 type SignupAppM a = ExceptT SignupError IO a
 
@@ -28,11 +29,18 @@ instance FromJSON SignupRequest where
     <*> value .: "password"
 
 checkUsername :: String -> SignupAppM ()
-checkUsername u = when (null u) $ throwError $ BadRequest EmptyUsername
+checkUsername u = do
+  when (null u) $ throwError $ BadRequest EmptyUsername
+  when (length u < 3) $ throwError $ BadRequest UsernameTooShort
+  when (length u > 32) $ throwError $ BadRequest UsernameTooLong
+  when (not $ all isAllowedUsernameChar u) $ throwError $ BadRequest UsernameDoesNotRespectPattern
+  where
+    isAllowedUsernameChar c = isAlphaNum c || c `elem` ("._-" :: String)
 
 checkPasswordRules :: Text.Text -> SignupAppM ()
 checkPasswordRules p = do
   when (Text.null p) $ throwError $ BadRequest EmptyPassword
+  when (Text.length p < 12) $ throwError $ BadRequest PasswordTooShort
 
 createUser :: SignupRequest -> SignupAppM ()
 createUser (SignupRequest {username, password}) = do
@@ -46,26 +54,17 @@ instance ToJSON PersistedUser where
   toJSON (PersistedUser {uname, passwordHash}) =
     object [ "uname" .= uname, "passwordHash" .= unPasswordHash passwordHash ]
 
-ensureChild :: FilePath -> FilePath -> IO (Maybe FilePath)
-ensureChild parent child = do
-  isUnderParent <- isPrefixOf <$> canonicalizePath parent <*> canonicalizePath child
-  if isUnderParent then pure (Just child) else pure Nothing
-
 persistUser :: String -> PasswordHash Argon2 -> SignupAppM ()
 persistUser username passwordHash = do
   cd <- liftIO getCurrentDirectory
-  let filePath = cd </> "data" </> "users" </> username
-      dataDir = cd </> ("data" <> [pathSeparator])
-  userPath <- liftIO $ ensureChild dataDir filePath
-  maybe (throwError $ BadRequest UsernameDoesNotRespectPattern)
-        (writeUserFile cd)
-        userPath
-  where writeUserFile cd p = do
-          dirExists <- liftIO (doesDirectoryExist $ cd </> "data" </> "users")
-          if not dirExists
-            then throwError $ TechnicalError UsersDirDoesNotExist
-            else do
-              exists <- liftIO $ doesFileExist ("data" </> "users" </> username)
-              if exists
-                then throwError UserAlreadyExists
-                else liftIO $ writeFile p (encode $ PersistedUser {uname = username, passwordHash = passwordHash})
+  let usersDir = cd </> "data" </> "users"
+      userDir = usersDir </> username
+      profileFile = userDir </> "profile.json"
+  dirExists <- liftIO (doesDirectoryExist usersDir)
+  if not dirExists
+    then throwError $ TechnicalError UsersDirDoesNotExist
+    else do
+      creationResult <- liftIO $ try (createDirectory userDir) :: SignupAppM (Either IOException ())
+      case creationResult of
+        Left _ -> throwError UserAlreadyExists
+        Right _ -> liftIO $ writeFile profileFile (encode $ PersistedUser {uname = username, passwordHash = passwordHash})

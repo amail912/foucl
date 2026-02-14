@@ -18,9 +18,11 @@ import Control.Monad.Trans.Except (runExceptT)
 import System.Exit (exitSuccess, exitFailure)
 import NoteCrud (NoteServiceConfig(..))
 import ChecklistCrud (ChecklistServiceConfig(..))
+import qualified Auth
+import qualified Data.Text as Text
 
 runUnitTests :: IO ()
-runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests]
+runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, signupValidationTests]
 
 runTestTTAndExit tests = do
   c <- runTestTT tests
@@ -161,3 +163,21 @@ instance ContentGen NoteServiceConfig NoteContent where
 
 instance ContentGen ChecklistServiceConfig ChecklistContent where
     generateExample _ i = ChecklistContent { name = "ExampleNoteTitle " ++ show i, items = [ ChecklistItem { label = "Checklist label " ++ show i ++ "-" ++ show k, checked = k `rem` 2 == 0 } | k <- [1..5] ] }
+
+signupValidationTests = test [ "Signup should reject short passwords" ~: rejectShortPassword
+                             , "Signup should reject invalid usernames" ~: rejectInvalidUsername
+                             ]
+
+rejectShortPassword :: IO ()
+rejectShortPassword = do
+    result <- runExceptT $ Auth.createUser $ Auth.SignupRequest { Auth.username = "valid-user", Auth.password = Text.pack "short" }
+    case result of
+      Left (Auth.BadRequest Auth.PasswordTooShort) -> assertBool "PasswordTooShort expected" True
+      _ -> assertFailure "Expected PasswordTooShort"
+
+rejectInvalidUsername :: IO ()
+rejectInvalidUsername = do
+    result <- runExceptT $ Auth.createUser $ Auth.SignupRequest { Auth.username = "bad/name", Auth.password = Text.pack "averystrongpass" }
+    case result of
+      Left (Auth.BadRequest Auth.UsernameDoesNotRespectPattern) -> assertBool "UsernameDoesNotRespectPattern expected" True
+      _ -> assertFailure "Expected UsernameDoesNotRespectPattern"

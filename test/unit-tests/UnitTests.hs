@@ -215,12 +215,24 @@ withCleanSignupUser username action = do
     cd <- getCurrentDirectory
     let usersDir = cd ++ "/data/users"
         userDir = usersDir ++ "/" ++ username
+    usersDirCreatedByTest <- ensureUsersDir usersDir
+    cleanupSignupUserDir userDir
+    action username `finally` do
+      cleanupSignupUserDir userDir
+      cleanupUsersDirIfCreatedByTest usersDirCreatedByTest usersDir
+
+ensureUsersDir :: FilePath -> IO Bool
+ensureUsersDir usersDir = do
     usersExists <- doesDirectoryExist usersDir
     if usersExists
-      then pure ()
-      else createDirectory usersDir
-    cleanupSignupUserDir userDir
-    action username `finally` cleanupSignupUserDir userDir
+      then pure False
+      else createDirectory usersDir >> pure True
+
+cleanupUsersDirIfCreatedByTest :: Bool -> FilePath -> IO ()
+cleanupUsersDirIfCreatedByTest usersDirCreatedByTest usersDir =
+    if usersDirCreatedByTest
+      then removeDirectoryRecursive usersDir
+      else pure ()
 
 cleanupSignupUserDir :: FilePath -> IO ()
 cleanupSignupUserDir userDir = do

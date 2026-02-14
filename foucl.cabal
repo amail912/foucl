@@ -24,6 +24,7 @@ library
       , NoteCrud
       , ChecklistCrud
       , Auth
+      , Session
   other-modules:
       Paths_foucl
   hs-source-dirs:

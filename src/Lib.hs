@@ -59,6 +59,9 @@ instance ToServerResponse Auth.SignupError where
                      Auth.EmptyUsername -> "Username cannot be empty"
                      Auth.UsernameDoesNotRespectPattern -> "Username has forbidden characters"
                      Auth.EmptyPassword -> "Password cannot be empty"
+                     Auth.PasswordTooShort -> "Password is too short"
+                     Auth.UsernameTooShort -> "Username is too short"
+                     Auth.UsernameTooLong -> "Username is too long"
   toServerResponse Auth.UserAlreadyExists = badRequest "Unable to create user"
   toServerResponse (Auth.TechnicalError _) = internalServerError $ toResponse ("Unable to create user" :: String)
 
@@ -66,7 +69,7 @@ runApp :: IO ()
 runApp = do
     putStrLn "running server"
     simpleHTTP nullConf { port = 8081 } $ do
-        askRq >>= log . show >> log "=========================END REQUEST====================\n"
+        log "Incoming request" >> log "=========================END REQUEST====================\n"
         msum [ homePage
              , apiController
              , serveStaticResource

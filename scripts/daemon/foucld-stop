@@ -2,10 +2,51 @@
 # foucld-stop.sh
 
 foucld-stop() {
+    local pidfile="$HOME/.local/share/foucl/latest.pid"
 
-    foucl_daemon_dir="$HOME/.local/share/foucl"
-    foucl_server_pidfile="$foucl_daemon_dir/latest.pid"
-    pid=$(cat $foucl_server_pidfile)
-    echo "Killing process $pid"
-    kill -9 $pid
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --pidfile)
+                shift
+                pidfile="${1:-}"
+                ;;
+            *)
+                echo "Unknown option for foucld stop: $1" >&2
+                return 1
+                ;;
+        esac
+        shift
+    done
+
+    if [[ ! -f "$pidfile" ]]; then
+        echo "No pidfile found at $pidfile"
+        return 0
+    fi
+
+    pid="$(cat "$pidfile")"
+    if [[ -z "$pid" ]]; then
+        echo "Pidfile is empty: $pidfile"
+        rm -f "$pidfile"
+        return 0
+    fi
+
+    if ! kill -0 "$pid" >/dev/null 2>&1; then
+        echo "Process $pid is not running"
+        rm -f "$pidfile"
+        return 0
+    fi
+
+    echo "Stopping process $pid"
+    kill "$pid"
+    for _ in $(seq 1 20); do
+        if ! kill -0 "$pid" >/dev/null 2>&1; then
+            rm -f "$pidfile"
+            return 0
+        fi
+        sleep 0.25
+    done
+
+    echo "Process did not stop in time, forcing kill"
+    kill -9 "$pid" >/dev/null 2>&1 || true
+    rm -f "$pidfile"
 }

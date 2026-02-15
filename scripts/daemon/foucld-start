@@ -2,26 +2,54 @@
 # foucld-start.sh
 
 foucld-start() {
+    local bin_path=""
+    local pidfile="$HOME/.local/share/foucl/latest.pid"
+    local log_dir="./.foucl"
 
-    echo $(pwd)
-    potential_exe=$(stat -c "%n" * | grep foucl)
-    
-    if [[ -z $potential_exe ]]; then
-            echo "Unable to find a file corresponding to the foucl server executable. This script must be run in a folder containing an executable named foucl*" >&2
-            exit 1
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --bin)
+                shift
+                bin_path="${1:-}"
+                ;;
+            --pidfile)
+                shift
+                pidfile="${1:-}"
+                ;;
+            --log-dir)
+                shift
+                log_dir="${1:-}"
+                ;;
+            *)
+                echo "Unknown option for foucld start: $1" >&2
+                return 1
+                ;;
+        esac
+        shift
+    done
+
+    if [[ -z "$bin_path" ]]; then
+        mapfile -t candidates < <(find . -maxdepth 1 -type f -name 'foucl*' -perm -u+x -printf '%p\n')
+        if [[ "${#candidates[@]}" -eq 0 ]]; then
+            echo "Unable to find a foucl executable in $(pwd)" >&2
+            return 1
+        fi
+        if [[ "${#candidates[@]}" -gt 1 ]]; then
+            echo "Could not determine which foucl executable to run. Found:" >&2
+            printf '%s\n' "${candidates[@]}" >&2
+            return 1
+        fi
+        bin_path="${candidates[0]}"
     fi
-    
-    if [[ $(echo $potential_exe | wc -w) != 1  ]]; then
-            echo -e "Could not determine which foucl server executable to run. Found:\n" >&2
-            echo "$potential_exe" >&2
-            exit 1
+
+    if [[ ! -x "$bin_path" ]]; then
+        echo "Executable not found or not executable: $bin_path" >&2
+        return 1
     fi
-    
-    echo "Found $potential_exe as candidate to be started"
-    foucl_daemon_dir="$HOME/.local/share/foucl"
-    mkdir -p "$foucl_daemon_dir"
-    foucl_private_dir="./.foucl"
-    mkdir -p "$foucl_private_dir"
-    "./$potential_exe" > "$foucl_private_dir/.foucl.log" &
-    echo "$!" > "$foucl_daemon_dir/latest.pid"
+
+    mkdir -p "$(dirname "$pidfile")"
+    mkdir -p "$log_dir"
+    "$bin_path" > "$log_dir/.foucl.log" 2>&1 &
+    echo "$!" > "$pidfile"
+    echo "Started foucl (pid=$(cat "$pidfile"))"
 }

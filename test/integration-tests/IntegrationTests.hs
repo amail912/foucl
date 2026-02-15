@@ -32,146 +32,102 @@ noteEndpoint = "/note"
 checklistEndpoint = "/checklist"
 
 runIntegrationTests :: IO ()
-runIntegrationTests = hspec $ do
-  describe "Integration Tests" $ do
-    it "should satisfy the basics, in one session, of the Very First User's needs, note-wise" $ do
-      let
-        firstNoteContent = NoteContent { title = Just "First note", noteContent = "First note content" }
-        firstNoteNewContent = NoteContent { title = Just "First note new title", noteContent = "This is a new content for the first note" }
-      assertNoItemAtEndpoint NoteEndpoint
-      createNewContent NoteEndpoint firstNoteContent
-      [firstNote :: Identifiable NoteContent] <- assertGetWithContent NoteEndpoint firstNoteContent
-      modifyItem NoteEndpoint $ Identifiable (storageId firstNote) firstNoteNewContent
-      [modifiedNote] <- assertGetWithContent NoteEndpoint firstNoteNewContent
-      deleteItem NoteEndpoint $ (id.storageId) modifiedNote
-      assertNoItemAtEndpoint NoteEndpoint
-    it "should satisfy the basics, in one session of the Very Firsr User's needs, checklist-wise" $ do
-      assertNoItemAtEndpoint ChecklistEndpoint
-      createNewContent ChecklistEndpoint firstChecklistContent
-      [firstChecklist :: Identifiable ChecklistContent] <- assertGetWithContent ChecklistEndpoint firstChecklistContent
-      modifyItem ChecklistEndpoint $ Identifiable (storageId firstChecklist) firstChecklistNewContent
-      [modifiedChecklist :: Identifiable ChecklistContent] <- assertGetWithContent ChecklistEndpoint firstChecklistNewContent
-      deleteItem ChecklistEndpoint $ (id.storageId) modifiedChecklist
-    it "should enforce signup body size and signup rate limiting" $ do
-      uniquenessSuffix <- round <$> getPOSIXTime
-      let oversizedPayload = BS.replicate 5000 'a'
-      oversizedReq <- parseRequest "POST http://localhost:8081/api/signup"
-      oversizedResponse <- httpBS $ setRequestMethod "POST" $ setRequestBodyLBS (BL.fromStrict oversizedPayload) oversizedReq
-      assertStatusCode "Oversized signup body should be rejected" 413 oversizedResponse
+runIntegrationTests = do
+  let baseUsername = "integration-base-user"
+      basePassword = "averystrongpass" :: String
+  _ <- signupAndSignin baseUsername basePassword
+  hspec $ do
+    describe "Integration Tests" $ do
+      it "should satisfy the basics, in one session, of the Very First User's needs, note-wise" $ do
+        cookie <- signinOnly baseUsername basePassword
+        let
+          firstNoteContent = NoteContent { title = Just "First note", noteContent = "First note content" }
+          firstNoteNewContent = NoteContent { title = Just "First note new title", noteContent = "This is a new content for the first note" }
+        runCrudLifecycle cookie NoteEndpoint firstNoteContent firstNoteNewContent
 
-      mapM_ (\i -> do
-          let signupPayload = object [ "username" .= ("ratelimit-user-" ++ show uniquenessSuffix ++ "-" ++ show i)
-                                     , "password" .= ("averystrongpass" :: String)
-                                     ]
-          signupReq <- parseRequest "POST http://localhost:8081/api/signup"
-          signupResponse <- httpNoBody $ setRequestMethod "POST"
-                                    $ setRequestHeader "Content-Type" ["application/json"]
-                                    $ setRequestBodyJSON signupPayload
-                                    $ signupReq
-          assertStatusCode "Signup should be allowed before rate-limit threshold" 200 signupResponse
-        ) [1..4]
+      it "should satisfy the basics, in one session, of the Very First User's needs, checklist-wise" $ do
+        cookie <- signinOnly baseUsername basePassword
+        runCrudLifecycle cookie ChecklistEndpoint firstChecklistContent firstChecklistNewContent
 
-      blockedReq <- parseRequest "POST http://localhost:8081/api/signup"
-      blockedResponse <- httpBS $ setRequestMethod "POST"
-                              $ setRequestHeader "Content-Type" ["application/json"]
-                              $ setRequestBodyJSON (object [ "username" .= ("ratelimit-user-blocked-" ++ show uniquenessSuffix)
-                                                           , "password" .= ("averystrongpass" :: String)
-                                                           ])
-                              $ blockedReq
-      assertStatusCode "Signup should be blocked when rate limit is reached" 400 blockedResponse
+      it "should authenticate signin using stored signup password hash" $ do
+        signinResponse <- performSigninNoBody baseUsername basePassword
+        assertStatusCode "Signin should succeed with valid credentials" 200 signinResponse
 
-    it "should authenticate signin using stored signup password hash" $ do
-      uniquenessSuffix <- round <$> getPOSIXTime
-      let username = "signin-user-" ++ show uniquenessSuffix
-          password = "averystrongpass" :: String
-          signupPayload = object [ "username" .= username
-                                 , "password" .= password
-                                 ]
-      signupReq <- parseRequest "POST http://localhost:8081/api/signup"
-      signupResponse <- httpNoBody $ setRequestMethod "POST"
+        invalidSigninResponse <- performSignin baseUsername "wrongpasswordbad"
+        assertStatusCode "Signin should reject invalid password" 401 invalidSigninResponse
+
+      it "should set secure session cookie attributes on signin" $ do
+        signinResponse <- performSignin baseUsername basePassword
+        assertStatusCode "Signin should succeed" 200 signinResponse
+        let setCookie = BS.unpack <$> getFirstSetCookie signinResponse
+        case setCookie of
+          Nothing -> assertFailure "Expected Set-Cookie header"
+          Just cookieHeader -> do
+            assertBool "Cookie should be HttpOnly" ("HttpOnly" `isInfixOf` cookieHeader)
+            assertBool "Cookie should be Secure" ("Secure" `isInfixOf` cookieHeader)
+            assertBool "Cookie should set SameSite=Lax" ("SameSite=Lax" `isInfixOf` cookieHeader)
+
+      it "should expire cookie on signout and support all=true revocation" $ do
+        cookie1 <- signinOnly baseUsername basePassword
+        cookie2 <- signinOnly baseUsername basePassword
+
+        signoutReq <- parseRequest "POST http://localhost:8081/api/signout?all=true"
+        signoutResponse <- httpBS $ setRequestMethod "POST"
+                                  $ setRequestHeader "Cookie" [BS.pack cookie1]
+                                  $ signoutReq
+        assertStatusCode "Signout should succeed" 200 signoutResponse
+        let signoutSetCookie = BS.unpack <$> getFirstSetCookie signoutResponse
+        case signoutSetCookie of
+          Nothing -> assertFailure "Expected Set-Cookie header on signout"
+          Just cookieHeader -> do
+            assertBool "Expired cookie should set Max-Age=0" ("Max-Age=0" `isInfixOf` cookieHeader)
+
+        protectedReq <- parseRequest "GET http://localhost:8081/api/note"
+        protectedResponse <- httpBS $ setRequestMethod "GET"
+                                 $ setRequestHeader "Cookie" [BS.pack cookie2]
+                                 $ protectedReq
+        assertStatusCode "all=true should revoke sibling sessions" 401 protectedResponse
+
+      it "should enforce signup body size" $ do
+        let oversizedPayload = BS.replicate 5000 'a'
+        oversizedReq <- parseRequest "POST http://localhost:8081/api/signup"
+        oversizedResponse <- httpBS $ setRequestMethod "POST" $ setRequestBodyLBS (BL.fromStrict oversizedPayload) oversizedReq
+        assertStatusCode "Oversized signup body should be rejected" 413 oversizedResponse
+
+      it "should enforce signup rate limiting" $ do
+        uniquenessSuffix <- round <$> getPOSIXTime
+
+        mapM_ (\i -> do
+            let signupPayload = object [ "username" .= ("ratelimit-user-" ++ show uniquenessSuffix ++ "-" ++ show i)
+                                       , "password" .= ("averystrongpass" :: String)
+                                       ]
+            signupReq <- parseRequest "POST http://localhost:8081/api/signup"
+            signupResponse <- httpNoBody $ setRequestMethod "POST"
+                                      $ setRequestHeader "Content-Type" ["application/json"]
+                                      $ setRequestBodyJSON signupPayload
+                                      $ signupReq
+            assertStatusCode "Signup should be allowed before rate-limit threshold" 200 signupResponse
+          ) [1..4]
+
+        blockedReq <- parseRequest "POST http://localhost:8081/api/signup"
+        blockedResponse <- httpBS $ setRequestMethod "POST"
                                 $ setRequestHeader "Content-Type" ["application/json"]
-                                $ setRequestBodyJSON signupPayload
-                                $ signupReq
-      assertStatusCode "Signup before signin should succeed" 200 signupResponse
-
-      signinReq <- parseRequest "POST http://localhost:8081/api/signin"
-      signinResponse <- httpNoBody $ setRequestMethod "POST"
-                                $ setRequestHeader "Content-Type" ["application/json"]
-                                $ setRequestBodyJSON signupPayload
-                                $ signinReq
-      assertStatusCode "Signin should succeed with valid credentials" 200 signinResponse
-
-      invalidSigninReq <- parseRequest "POST http://localhost:8081/api/signin"
-      invalidSigninResponse <- httpBS $ setRequestMethod "POST"
-                               $ setRequestHeader "Content-Type" ["application/json"]
-                               $ setRequestBodyJSON (object [ "username" .= username
-                                                            , "password" .= ("wrongpasswordbad" :: String)
-                                                            ])
-                               $ invalidSigninReq
-      assertStatusCode "Signin should reject invalid password" 401 invalidSigninResponse
-
-
-    it "should set secure session cookie attributes on signin" $ do
-      uniquenessSuffix <- round <$> getPOSIXTime
-      let username = "signin-cookie-user-" ++ show uniquenessSuffix
-          password = "averystrongpass" :: String
-          signupPayload = object [ "username" .= username
-                                 , "password" .= password
-                                 ]
-      signupReq <- parseRequest "POST http://localhost:8081/api/signup"
-      _ <- httpNoBody $ setRequestMethod "POST"
-                    $ setRequestHeader "Content-Type" ["application/json"]
-                    $ setRequestBodyJSON signupPayload
-                    $ signupReq
-
-      signinReq <- parseRequest "POST http://localhost:8081/api/signin"
-      signinResponse <- httpBS $ setRequestMethod "POST"
-                               $ setRequestHeader "Content-Type" ["application/json"]
-                               $ setRequestBodyJSON signupPayload
-                               $ signinReq
-      assertStatusCode "Signin should succeed" 200 signinResponse
-      let setCookie = BS.unpack <$> getFirstSetCookie signinResponse
-      case setCookie of
-        Nothing -> assertFailure "Expected Set-Cookie header"
-        Just cookieHeader -> do
-          assertBool "Cookie should be HttpOnly" ("HttpOnly" `isInfixOf` cookieHeader)
-          assertBool "Cookie should be Secure" ("Secure" `isInfixOf` cookieHeader)
-          assertBool "Cookie should set SameSite=Lax" ("SameSite=Lax" `isInfixOf` cookieHeader)
-
-    it "should expire cookie on signout and support all=true revocation" $ do
-      uniquenessSuffix <- round <$> getPOSIXTime
-      let username = "signout-user-" ++ show uniquenessSuffix
-          password = "averystrongpass" :: String
-      cookie1 <- signupAndSignin username password
-      cookie2 <- signinOnly username password
-
-      signoutReq <- parseRequest "POST http://localhost:8081/api/signout?all=true"
-      signoutResponse <- httpBS $ setRequestMethod "POST"
-                                $ setRequestHeader "Cookie" [BS.pack cookie1]
-                                $ signoutReq
-      assertStatusCode "Signout should succeed" 200 signoutResponse
-      let signoutSetCookie = BS.unpack <$> getFirstSetCookie signoutResponse
-      case signoutSetCookie of
-        Nothing -> assertFailure "Expected Set-Cookie header on signout"
-        Just cookieHeader -> do
-          assertBool "Expired cookie should set Max-Age=0" ("Max-Age=0" `isInfixOf` cookieHeader)
-
-      protectedReq <- parseRequest "GET http://localhost:8081/note"
-      protectedResponse <- httpBS $ setRequestMethod "GET"
-                               $ setRequestHeader "Cookie" [BS.pack cookie2]
-                               $ protectedReq
-      assertStatusCode "all=true should revoke sibling sessions" 401 protectedResponse
-        where
-        firstChecklistContent    = ChecklistContent { name = "First checklist"
-                                                     , items = [ ChecklistItem { label = "First item label unchecked", checked = False }
-                                                               , ChecklistItem { label = "Second item label checked", checked = True }
-                                                               ]
-                                                     }
-        firstChecklistNewContent = ChecklistContent { name = "new checklist"
-                                                    , items = [ ChecklistItem { label = "Third item label checked", checked = True }
-                                                              , ChecklistItem { label = "Fourth item label checked", checked = True }
-                                                              ]
-                                                    }
+                                $ setRequestBodyJSON (object [ "username" .= ("ratelimit-user-blocked-" ++ show uniquenessSuffix)
+                                                             , "password" .= ("averystrongpass" :: String)
+                                                             ])
+                                $ blockedReq
+        assertStatusCode "Signup should be blocked when rate limit is reached" 400 blockedResponse
+  where
+    firstChecklistContent    = ChecklistContent { name = "First checklist"
+                                                 , items = [ ChecklistItem { label = "First item label unchecked", checked = False }
+                                                           , ChecklistItem { label = "Second item label checked", checked = True }
+                                                           ]
+                                                 }
+    firstChecklistNewContent = ChecklistContent { name = "new checklist"
+                                                , items = [ ChecklistItem { label = "Third item label checked", checked = True }
+                                                          , ChecklistItem { label = "Fourth item label checked", checked = True }
+                                                          ]
+                                                }
 
 
 
@@ -183,52 +139,99 @@ getFirstSetCookie response =
 
 extractCookiePair :: ByteString -> String
 extractCookiePair setCookieHeader =
-  BS.unpack $ BS.takeWhile (/= ';') setCookieHeader
+  BS.unpack (cookieName <> "=" <> unquotedCookieValue)
+  where
+    cookiePair = BS.takeWhile (/= ';') setCookieHeader
+    (cookieName, valueWithEq) = BS.break (== '=') cookiePair
+    cookieValue = BS.drop 1 valueWithEq
+    unquotedCookieValue
+      | BS.length cookieValue >= 2 && BS.head cookieValue == '"' && BS.last cookieValue == '"' = BS.init (BS.tail cookieValue)
+      | otherwise = cookieValue
 
 signupAndSignin :: String -> String -> IO String
 signupAndSignin username password = do
   signupReq <- parseRequest "POST http://localhost:8081/api/signup"
   _ <- httpNoBody $ setRequestMethod "POST"
                 $ setRequestHeader "Content-Type" ["application/json"]
-                $ setRequestBodyJSON (object [ "username" .= username, "password" .= password ])
+                $ setRequestBodyJSON (authPayload username password)
                 $ signupReq
   signinOnly username password
 
 signinOnly :: String -> String -> IO String
 signinOnly username password = do
-  signinReq <- parseRequest "POST http://localhost:8081/api/signin"
-  signinResponse <- httpBS $ setRequestMethod "POST"
-                           $ setRequestHeader "Content-Type" ["application/json"]
-                           $ setRequestBodyJSON (object [ "username" .= username, "password" .= password ])
-                           $ signinReq
+  signinResponse <- performSignin username password
   assertStatusCode "Signin should succeed" 200 signinResponse
   case getFirstSetCookie signinResponse of
     Nothing -> assertFailure "Expected Set-Cookie header" >> pure ""
     Just header -> pure (extractCookiePair header)
 
-assertNoItemAtEndpoint :: (Content contentType, RequestType GET endpointType () [Identifiable contentType]) => endpointType -> Expectation
-assertNoItemAtEndpoint endpoint = do
-  getResponse :: Response [Identifiable contentType] <- sendRequestWithJSONBodyImpl GET endpoint ()
+authPayload :: String -> String -> Value
+authPayload username password =
+  object [ "username" .= username
+         , "password" .= password
+         ]
+
+performSigninNoBody :: String -> String -> IO (Response ())
+performSigninNoBody = performSigninWith httpNoBody
+
+performSignin :: String -> String -> IO (Response ByteString)
+performSignin = performSigninWith httpBS
+
+performSigninWith :: (Request -> IO (Response a)) -> String -> String -> IO (Response a)
+performSigninWith send username password = do
+  signinReq <- parseRequest "POST http://localhost:8081/api/signin"
+  send $ setRequestMethod "POST"
+      $ setRequestHeader "Content-Type" ["application/json"]
+      $ setRequestBodyJSON (authPayload username password)
+      $ signinReq
+
+runCrudLifecycle
+  :: ( Content contentType
+     , RequestType GET endpointType () [Identifiable contentType]
+     , RequestType POST endpointType contentType StorageId
+     , RequestType PUT endpointType (Identifiable contentType) StorageId
+     )
+  => String
+  -> endpointType
+  -> contentType
+  -> contentType
+  -> Expectation
+runCrudLifecycle cookie endpoint initialContent updatedContent = do
+  assertNoItemAtEndpoint cookie endpoint
+  createNewContent cookie endpoint initialContent
+  [createdItem] <- assertGetWithContent cookie endpoint initialContent
+  modifyItem cookie endpoint $ Identifiable (storageId createdItem) updatedContent
+  [updatedItem] <- assertGetWithContent cookie endpoint updatedContent
+  deleteItem cookie endpoint $ (id . storageId) updatedItem
+  assertNoItemAtEndpoint cookie endpoint
+
+assertNoItemAtEndpoint :: (Content contentType, RequestType GET endpointType () [Identifiable contentType]) => String -> endpointType -> Expectation
+assertNoItemAtEndpoint cookie endpoint = do
+  getResponse :: Response [Identifiable contentType] <- sendRequestWithJSONBodyImplWithCookie (Just cookie) GET endpoint ()
   assertNoNoteInResponse "Failed to start with an empty server" getResponse
 
-createNewContent :: (Content contentType, RequestType POST endpointType contentType StorageId) => endpointType -> contentType -> Expectation
-createNewContent endpoint content = do
-  postResponse :: Response StorageId <- sendRequestWithJSONBodyImpl POST endpoint content
+createNewContent :: (Content contentType, RequestType POST endpointType contentType StorageId) => String -> endpointType -> contentType -> Expectation
+createNewContent cookie endpoint content = do
+  postResponse :: Response StorageId <- sendRequestWithJSONBodyImplWithCookie (Just cookie) POST endpoint content
   assertStatusCode200 ("Failed to create item" ++ show content) postResponse
 
-assertGetWithContent :: (Content contentType, RequestType GET endpointType () [Identifiable contentType]) => endpointType -> contentType -> IO [Identifiable contentType]
-assertGetWithContent endpoint expectedContent = do
-  getResponse <- sendRequestWithJSONBodyImpl GET endpoint ()
+assertGetWithContent :: (Content contentType, RequestType GET endpointType () [Identifiable contentType]) => String -> endpointType -> contentType -> IO [Identifiable contentType]
+assertGetWithContent cookie endpoint expectedContent = do
+  getResponse <- sendRequestWithJSONBodyImplWithCookie (Just cookie) GET endpoint ()
   assertWithFoundContent ("Failed to retrieve created content " ++ show expectedContent) [expectedContent] getResponse
 
-modifyItem :: (Content contentType, RequestType PUT endpointType (Identifiable contentType) StorageId) => endpointType -> Identifiable contentType -> Expectation
-modifyItem endpoint update = do
-  putResponse :: Response StorageId <- sendRequestWithJSONBodyImpl PUT endpoint update
+modifyItem :: (Content contentType, RequestType PUT endpointType (Identifiable contentType) StorageId) => String -> endpointType -> Identifiable contentType -> Expectation
+modifyItem cookie endpoint update = do
+  putResponse :: Response StorageId <- sendRequestWithJSONBodyImplWithCookie (Just cookie) PUT endpoint update
   assertStatusCode200 ("Failed to apply modification " ++ show update) putResponse
 
-deleteItem :: Endpoint a => a -> String -> Expectation
-deleteItem endpoint idToDelete = do
-  deleteResponse <- parseRequest ("DELETE http://localhost:8081" ++ getEndpoint endpoint ++ "/" ++ idToDelete) >>= httpBS
+deleteItem :: Endpoint a => String -> a -> String -> Expectation
+deleteItem cookie endpoint idToDelete = do
+  req <- parseRequest ("DELETE http://localhost:8081" ++ getEndpoint endpoint ++ "/" ++ idToDelete)
+  let deleteReq = setRequestMethod "DELETE"
+                $ setRequestHeader "Cookie" [BS.pack cookie]
+                $ req
+  deleteResponse <- httpBS deleteReq
   assertStatusCode200 ("Failed to delete item" ++ show idToDelete) deleteResponse
 
 assertWithFoundContent :: Content a => String -> [a] -> Response [Identifiable a] -> IO [Identifiable a]
@@ -241,9 +244,16 @@ assertWithFoundContent errorPrefix expectedContents response = do
 
 sendRequestWithJSONBodyImpl :: (RequestType methodType endpointType requestType responseType) =>
   methodType -> endpointType -> requestType -> IO (Response responseType)
-sendRequestWithJSONBodyImpl method endpoint body = do
-    req <- parseRequest ("http://localhost:8081" ++ getEndpoint endpoint) 
-    httpJSON $ (setRequestMethod (getMethod method) . (setRequestHeader "Content-Type" ["application/json"]) . (setRequestBodyJSON body)) req
+sendRequestWithJSONBodyImpl method endpoint body =
+    sendRequestWithJSONBodyImplWithCookie Nothing method endpoint body
+
+sendRequestWithJSONBodyImplWithCookie :: (RequestType methodType endpointType requestType responseType) =>
+  Maybe String -> methodType -> endpointType -> requestType -> IO (Response responseType)
+sendRequestWithJSONBodyImplWithCookie mCookie method endpoint body = do
+    req <- parseRequest ("http://localhost:8081" ++ getEndpoint endpoint)
+    let withCookie :: Request -> Request
+        withCookie = maybe (\r -> r) (\cookie -> setRequestHeader "Cookie" [BS.pack cookie]) mCookie
+    httpJSON $ (setRequestMethod (getMethod method) . withCookie . (setRequestHeader "Content-Type" ["application/json"]) . (setRequestBodyJSON body)) req
 
 
 -- sendRequestWithJSONBodyImpl endpoint method body = httpJSON <$>
@@ -295,11 +305,11 @@ class Endpoint a where
 
 data NoteEndpoint = NoteEndpoint
 instance Endpoint NoteEndpoint where
-    getEndpoint NoteEndpoint = "/note"
+    getEndpoint NoteEndpoint = "/api/note"
 
 data ChecklistEndpoint = ChecklistEndpoint
 instance Endpoint ChecklistEndpoint where
-    getEndpoint ChecklistEndpoint = "/checklist"
+    getEndpoint ChecklistEndpoint = "/api/checklist"
 
 class (ToJSON requestType, FromJSON responseType, Endpoint endpoint, Method methodType) => RequestType methodType endpoint requestType responseType | endpoint methodType -> requestType, endpoint methodType requestType -> responseType where
     sendRequestWithJSONBody :: endpoint -> methodType -> requestType -> IO (Response responseType)

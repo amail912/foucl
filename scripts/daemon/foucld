@@ -1,34 +1,37 @@
 #!/bin/bash
 # foucld.sh
 
+set -euo pipefail
+
 # This script is meant to be a wrapper around the foucl web application.
 # Its role is to control the starting and stopping of the application, passing options to the server
 
-. foucld-usage
-. foucld-start
-. foucld-stop
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-case $1 in
+. "$SCRIPT_DIR/foucld-usage"
+. "$SCRIPT_DIR/foucld-start"
+. "$SCRIPT_DIR/foucld-stop"
+
+case "${1:-}" in
 
         start)
                 shift
-                foucld-start
+                foucld-start "$@"
                 ;;
 
         stop)
                 shift
-                foucld-stop
+                foucld-stop "$@"
                 ;;
                 
         restart)
                 shift
-                foucld-stop
-                foucld-start
+                foucld-stop "$@" || true
+                foucld-start "$@"
                 ;;
         *)
-                echo "Unknown command $1" >&2
+                echo "Unknown command ${1:-}" >&2
                 foucld-usage >&2
                 exit 1
                 ;;
 esac
-

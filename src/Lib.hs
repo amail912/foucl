@@ -150,11 +150,11 @@ runApp = do
                  ]
 
 apiController :: MVar [UTCTime] -> FilePath -> Session.SessionConfig -> Session.SessionStore -> ServerPartT IO Response
-apiController signupRateLimitState tmpDir sessionConfig sessionStore = dir "api" $ msum [ requireAuth sessionConfig sessionStore noteController
-                                                                                          , requireAuth sessionConfig sessionStore checklistController
-                                                                                          , signupController signupRateLimitState tmpDir
+apiController signupRateLimitState tmpDir sessionConfig sessionStore = dir "api" $ msum [ signupController signupRateLimitState tmpDir
                                                                                           , signinController sessionConfig sessionStore
                                                                                           , signoutController sessionConfig sessionStore
+                                                                                          , requireAuth sessionConfig sessionStore noteController
+                                                                                          , requireAuth sessionConfig sessionStore checklistController
                                                                                           ]
 
 homePage :: ServerPartT IO Response
@@ -176,16 +176,16 @@ signupController :: MVar [UTCTime] -> FilePath -> ServerPartT IO Response
 signupController signupRateLimitState tmpDir = dir "signup" $ do
     nullDir
     method POST
-    allowed <- liftIO $ allowSignupRequest signupRateLimitState
-    if not allowed
-      then tooManyRequests "Too many signup attempts. Please retry later."
-      else do
-        rq <- askRq
-        (_, mBodyErr) <- liftIO $ bodyInput (signupBodyPolicy tmpDir) rq
-        case mBodyErr of
-          Just bodyErr | isTooLargeBodyError bodyErr -> HServer.requestEntityTooLarge $ toResponse ("Body too large" :: String)
-          Just _ -> badRequest "Unable to decode request body"
-          Nothing -> do
+    rq <- askRq
+    (_, mBodyErr) <- liftIO $ bodyInput (signupBodyPolicy tmpDir) rq
+    case mBodyErr of
+      Just bodyErr | isTooLargeBodyError bodyErr -> HServer.requestEntityTooLarge $ toResponse ("Body too large" :: String)
+      Just _ -> badRequest "Unable to decode request body"
+      Nothing -> do
+        allowed <- liftIO $ allowSignupRequest signupRateLimitState
+        if not allowed
+          then tooManyRequests "Too many signup attempts. Please retry later."
+          else do
             log "Reading signup body"
             body <- askRq >>= takeRequestBody
             maybe (badRequest "Empty body")

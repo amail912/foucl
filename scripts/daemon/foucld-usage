@@ -3,7 +3,7 @@
 
 foucld-usage() {
     cat <<EOF
-USAGE: foucl [COMMAND] [OPTIONS]
+USAGE: foucld [COMMAND] [OPTIONS]
 
 Wrapper around the foucl web application. Its role is to control the starting and stopping of the application, passing options to the server
 
@@ -11,7 +11,8 @@ Options:
   -h    Displays this usage
 
 Commands:
-  start    Starts the foucl server
+  start [--bin <path>] [--pidfile <path>] [--log-dir <path>]
+  stop [--pidfile <path>]
+  restart [--bin <path>] [--pidfile <path>] [--log-dir <path>]
 EOF
 }
-

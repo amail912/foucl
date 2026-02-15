@@ -46,6 +46,8 @@ library
     , mtl
     , base64-bytestring
     , SHA
+    , crypton
+    , memory
     , time
   default-language: Haskell2010
 

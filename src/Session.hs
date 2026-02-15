@@ -13,13 +13,16 @@ module Session
 
 import Data.Aeson (FromJSON(..), ToJSON(..), (.:), (.=), encode, decode, object, withObject)
 import qualified Data.ByteString.Char8 as BS8
-import Data.Digest.Pure.SHA (sha256, showDigest)
+import qualified Data.ByteArray as BA
+import Data.ByteArray.Encoding (Base(Base16), convertToBase)
+import qualified Data.ByteString.Lazy as BL
+import Crypto.Hash.Algorithms (SHA256)
+import Crypto.MAC.HMAC (HMAC, hmac)
 import Data.Char (isHexDigit, toLower)
 import Data.Maybe (isJust)
 import Data.Time.Clock (UTCTime, NominalDiffTime, addUTCTime, getCurrentTime)
 import Data.UUID (toString)
 import Data.UUID.V4 (nextRandom)
-import qualified Data.ByteString.Lazy as BL
 import System.Directory (createDirectoryIfMissing, doesFileExist, renameFile)
 import System.FilePath ((</>), takeDirectory)
 import System.IO (openTempFile, hClose)
@@ -232,11 +235,20 @@ signSessionId secret sid = sid ++ "." ++ signature
 verifyAndExtractSessionId :: String -> String -> Maybe String
 verifyAndExtractSessionId secret token =
   case break (== '.') token of
-    (sid, '.':sig) | not (null sid) && isHex sig && map toLower sig == expected -> Just sid
+    (sid, '.':sig)
+      | not (null sid)
+      , isHex sig
+      , constantTimeEq (map toLower sig) expected -> Just sid
       where expected = digestFor secret sid
     _ -> Nothing
   where
     isHex = all isHexDigit
 
+constantTimeEq :: String -> String -> Bool
+constantTimeEq a b = BA.constEq (BS8.pack a) (BS8.pack b)
+
 digestFor :: String -> String -> String
-digestFor secret sid = showDigest $ sha256 $ BL.fromStrict $ BS8.pack (secret ++ ":" ++ sid)
+digestFor secret sid = BS8.unpack $ convertToBase Base16 mac
+  where
+    mac :: HMAC SHA256
+    mac = hmac (BS8.pack secret) (BS8.pack sid)

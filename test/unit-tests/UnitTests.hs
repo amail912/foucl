@@ -16,14 +16,18 @@ import Data.List ((\\))
 import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import Control.Monad.Trans.Except (runExceptT)
 import Control.Exception (finally)
+import Control.Concurrent (threadDelay)
 import System.Exit (exitSuccess, exitFailure)
 import NoteCrud (NoteServiceConfig(..))
 import ChecklistCrud (ChecklistServiceConfig(..))
 import qualified Auth
+import qualified Session
 import qualified Data.Text as Text
+import Data.Time.Clock.POSIX (getPOSIXTime)
+import qualified Data.ByteString.Lazy.Char8 as BL8
 
 runUnitTests :: IO ()
-runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, signupValidationTests, signinValidationTests]
+runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, signupValidationTests, signinValidationTests, sessionTests]
 
 runTestTTAndExit tests = do
   c <- runTestTT tests
@@ -296,3 +300,97 @@ cleanupSignupUserDir :: FilePath -> IO ()
 cleanupSignupUserDir userDir = do
     userExists <- doesDirectoryExist userDir
     if userExists then removeDirectoryRecursive userDir else pure ()
+
+
+sessionTests = test [ "Signed token should reject tampering" ~: signedTokenRejectsTampering
+                    , "Revoked session should be rejected" ~: revokedSessionIsRejected
+                    , "Idle timeout should expire session" ~: idleTimeoutExpiresSession
+                    , "Sliding renewal should extend idle session" ~: slidingRenewalExtendsIdleSession
+                    , "Revoking all sessions from one session should revoke sibling sessions" ~: revokeAllSessionsFromSession
+                    , "Corrupted session handle should be rejected gracefully" ~: corruptedSessionHandleIsRejected
+                    ]
+
+signedTokenRejectsTampering :: IO ()
+signedTokenRejectsTampering = do
+    let token = Session.signSessionId "secret" "sid-1"
+        tampered = token ++ "00"
+    case Session.verifyAndExtractSessionId "secret" tampered of
+      Nothing -> assertBool "Tampered token should be rejected" True
+      Just _ -> assertFailure "Tampered token should not validate"
+
+revokedSessionIsRejected :: IO ()
+revokedSessionIsRejected = withSessionStore "revoked" 30 30 $ \store -> do
+    sid <- Session.createSessionForUser store "user-revoked"
+    _ <- Session.revokeSession store sid
+    resolved <- Session.resolveSession store sid
+    case resolved of
+      Nothing -> assertBool "Revoked session should not resolve" True
+      Just _ -> assertFailure "Expected revoked session to be rejected"
+
+idleTimeoutExpiresSession :: IO ()
+idleTimeoutExpiresSession = withSessionStore "idle-expiry" 30 1 $ \store -> do
+    sid <- Session.createSessionForUser store "user-idle-expiry"
+    threadDelay 1300000
+    resolved <- Session.resolveSession store sid
+    case resolved of
+      Nothing -> assertBool "Session should expire on idle timeout" True
+      Just _ -> assertFailure "Expected idle-expired session to be rejected"
+
+slidingRenewalExtendsIdleSession :: IO ()
+slidingRenewalExtendsIdleSession = withSessionStore "sliding" 30 1 $ \store -> do
+    sid <- Session.createSessionForUser store "user-sliding"
+    threadDelay 600000
+    firstResolution <- Session.resolveSession store sid
+    case firstResolution of
+      Nothing -> assertFailure "Expected first session resolution to succeed"
+      Just _ -> do
+        threadDelay 600000
+        secondResolution <- Session.resolveSession store sid
+        case secondResolution of
+          Nothing -> assertFailure "Expected sliding renewal to keep session active"
+          Just _ -> assertBool "Sliding renewal should extend session" True
+
+withSessionStore :: String -> Integer -> Integer -> (Session.SessionStore -> IO ()) -> IO ()
+withSessionStore label absoluteTtl idleTtl action =
+    withSessionStoreAndDir label absoluteTtl idleTtl (\_ store -> action store)
+
+cleanupSessionDir :: FilePath -> IO ()
+cleanupSessionDir baseDir = do
+    exists <- doesDirectoryExist baseDir
+    if exists then removeDirectoryRecursive baseDir else pure ()
+
+
+revokeAllSessionsFromSession :: IO ()
+revokeAllSessionsFromSession = withSessionStore "revoke-all" 30 30 $ \store -> do
+    sid1 <- Session.createSessionForUser store "user-revoke-all"
+    sid2 <- Session.createSessionForUser store "user-revoke-all"
+    _ <- Session.revokeAllForSession store sid1
+    resolved1 <- Session.resolveSession store sid1
+    resolved2 <- Session.resolveSession store sid2
+    case (resolved1, resolved2) of
+      (Nothing, Nothing) -> assertBool "All sibling sessions should be revoked" True
+      _ -> assertFailure "Expected both sessions to be revoked"
+
+corruptedSessionHandleIsRejected :: IO ()
+corruptedSessionHandleIsRejected = withSessionStoreAndDir "corrupted-handle" 30 30 $ \baseDir store -> do
+    sid <- Session.createSessionForUser store "user-corrupted-handle"
+    let handleFile = baseDir ++ "/handles/" ++ sid ++ ".json"
+    BL8.writeFile handleFile (BL8.pack "{not-valid-json")
+    resolved <- Session.resolveSession store sid
+    case resolved of
+      Nothing -> assertBool "Corrupted handle should be treated as invalid" True
+      Just _ -> assertFailure "Expected corrupted session handle to be rejected"
+
+withSessionStoreAndDir :: String -> Integer -> Integer -> (FilePath -> Session.SessionStore -> IO ()) -> IO ()
+withSessionStoreAndDir label absoluteTtl idleTtl action = do
+    cd <- getCurrentDirectory
+    nonce <- round . (* 1000000) <$> getPOSIXTime
+    let baseDir = cd ++ "/data/test-sessions/" ++ label ++ "-" ++ show (nonce :: Integer)
+        sessionConfig = Session.defaultSessionConfig
+          { Session.sessionSecret = "unit-test-secret"
+          , Session.sessionAbsoluteTtlSeconds = fromInteger absoluteTtl
+          , Session.sessionIdleTtlSeconds = fromInteger idleTtl
+          }
+    cleanupSessionDir baseDir
+    store <- Session.mkFileSessionStore baseDir sessionConfig
+    action baseDir store `finally` cleanupSessionDir baseDir

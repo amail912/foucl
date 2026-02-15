@@ -1,4 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE FlexibleContexts #-}
 
 module Lib
@@ -6,22 +8,25 @@ module Lib
     ) where
 
 import Prelude hiding (log, writeFile)
-import Data.Aeson (ToJSON(toJSON), FromJSON, decode, encode, decode')
+import Data.Aeson (ToJSON(toJSON), FromJSON(parseJSON), decode, encode, decode', eitherDecodeFileStrict', (.:), (.:?), withObject)
 import Data.Function ((&))
 import Data.Functor ((<$>))
-import Data.Maybe (Maybe(..))
+import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Int (Int64)
-import Control.Monad (msum, mzero, join, foldM, when)
+import Control.Monad (msum, mzero, join, foldM, when, mplus)
 import Control.Monad.Except (catchError, throwError)
 import Control.Monad.Trans.Class (lift, MonadTrans)
 import Control.Monad.Trans.Except (ExceptT, catchE, runExceptT, withExceptT)
 import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import Control.Monad.IO.Class (liftIO, MonadIO)
 import Data.Either (either)
+import qualified Data.ByteString.Char8 as BS8
 import Data.List (isPrefixOf)
+import Data.Char (toLower)
 import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
-import Happstack.Server (FilterMonad, Response, ServerPartT, RqBody, takeRequestBody, unBody, rqBody, decodeBody, askRq, defaultBodyPolicy, nullDir, path, serveFileFrom, guessContentTypeM, mimeTypes, uriRest, nullConf, simpleHTTP, toResponse, method, ok, internalServerError, notFound, dir, Method(GET, POST, DELETE, PUT), Conf(..))
+import Happstack.Server (FilterMonad, Response, ServerPartT, RqBody, takeRequestBody, unBody, rqBody, decodeBody, askRq, defaultBodyPolicy, nullDir, path, serveFileFrom, guessContentTypeM, mimeTypes, uriRest, nullConf, simpleHTTP, toResponse, method, ok, internalServerError, notFound, dir, Method(GET, POST, DELETE, PUT), Conf(..), addCookie, mkCookie, CookieLife(Session, Expired), getHeaderM)
 import qualified Happstack.Server as HServer
+import qualified Happstack.Server.Internal.Cookie as HCookie
 import Happstack.Server.Internal.MessageWrap (bodyInput, BodyPolicy)
 import Model (NoteContent, ChecklistContent, Content, Identifiable(..))
 import qualified CrudStorage
@@ -31,13 +36,41 @@ import ChecklistCrud (ChecklistServiceConfig(..), defaultChecklistServiceConfig)
 import System.Directory (doesFileExist, getCurrentDirectory, canonicalizePath, getTemporaryDirectory)
 import System.FilePath ((</>), pathSeparator)
 import System.IO (hFlush, stdout)
+import System.Environment (lookupEnv)
+import System.Exit (exitFailure)
 import Data.Time.Clock (UTCTime, getCurrentTime, addUTCTime)
 import GHC.Generics (Generic)
 import Data.ByteString.Lazy.Char8 (writeFile)
 import Filesystem.Path.CurrentOS    (commonPrefix, encodeString, decodeString, collapse, append)
 import qualified Auth (AuthRequest(..), AuthRequestError(..), AuthError(..), createUser, signinUser)
+import qualified Session
 
 type AppM a = ExceptT String (ServerPartT IO) a
+
+
+data SessionConfigFile = SessionConfigFile
+  { sessionCookieNameFile :: !(Maybe String)
+  , sessionAbsoluteTtlSecondsFile :: !(Maybe Int)
+  , sessionIdleTtlSecondsFile :: !(Maybe Int)
+  } deriving (Generic)
+
+instance FromJSON SessionConfigFile where
+  parseJSON = withObject "SessionConfigFile" $ \v -> SessionConfigFile
+    <$> v .:? "cookieName"
+    <*> v .:? "absoluteTtlSeconds"
+    <*> v .:? "idleTtlSeconds"
+
+newtype AppConfigFile = AppConfigFile
+  { appSession :: SessionConfigFile
+  } deriving (Generic)
+
+instance FromJSON AppConfigFile where
+  parseJSON = withObject "AppConfigFile" $ \v -> AppConfigFile
+    <$> v .: "session"
+
+newtype AppContext = AppContext
+  { sessionPrincipal :: Session.SessionPrincipal
+  }
 
 badRequest :: FilterMonad Response m => String -> m Response
 badRequest =  HServer.badRequest . toResponse
@@ -67,25 +100,62 @@ instance ToServerResponse Auth.AuthError where
   toServerResponse Auth.InvalidCredentials = HServer.unauthorized $ toResponse ("Invalid credentials" :: String)
   toServerResponse (Auth.TechnicalError _) = internalServerError $ toResponse ("Unable to process authentication" :: String)
 
+loadSessionConfigFromFile :: IO (Either String Session.SessionConfig)
+loadSessionConfigFromFile = do
+  mSecret <- lookupEnv "FOUCL_SESSION_SECRET"
+  mConfigPath <- lookupEnv "FOUCL_CONFIG_FILE"
+  let configPath = fromMaybe "config/app-config.json" mConfigPath
+  case mSecret of
+    Nothing -> pure $ Left "Missing required environment variable FOUCL_SESSION_SECRET"
+    Just secret | null secret -> pure $ Left "Environment variable FOUCL_SESSION_SECRET cannot be empty"
+    Just secret -> do
+      exists <- doesFileExist configPath
+      if not exists
+        then pure $ Left ("Missing configuration file " ++ configPath)
+        else do
+          decoded <- eitherDecodeFileStrict' configPath :: IO (Either String AppConfigFile)
+          case decoded of
+            Left err -> pure $ Left ("Unable to parse configuration file: " ++ err)
+            Right fileConfig -> pure $ Right (toSessionConfig secret fileConfig)
+
+
+toSessionConfig :: String -> AppConfigFile -> Session.SessionConfig
+toSessionConfig secret AppConfigFile {appSession = SessionConfigFile {sessionCookieNameFile, sessionAbsoluteTtlSecondsFile, sessionIdleTtlSecondsFile}} =
+  Session.defaultSessionConfig
+    { Session.sessionSecret = secret
+    , Session.sessionCookieName = fromMaybe (Session.sessionCookieName Session.defaultSessionConfig) sessionCookieNameFile
+    , Session.sessionAbsoluteTtlSeconds = fromIntegral (fromMaybe (round (Session.sessionAbsoluteTtlSeconds Session.defaultSessionConfig)) sessionAbsoluteTtlSecondsFile)
+    , Session.sessionIdleTtlSeconds = fromIntegral (fromMaybe (round (Session.sessionIdleTtlSeconds Session.defaultSessionConfig)) sessionIdleTtlSecondsFile)
+    }
+
 runApp :: IO ()
 runApp = do
     putStrLn "running server"
-    signupRateLimitState <- newMVar []
-    tmpDir <- getTemporaryDirectory
-    simpleHTTP nullConf { port = 8081 } $ do
-        log "Incoming request" >> log "=========================END REQUEST====================\n"
-        msum [ homePage
-             , apiController signupRateLimitState tmpDir
-             , serveStaticResource
-             , mzero
-             ]
+    sessionConfigResult <- loadSessionConfigFromFile
+    case sessionConfigResult of
+      Left err -> do
+        putStrLn $ "[startup-error] " ++ err
+        exitFailure
+      Right sessionConfig -> do
+        signupRateLimitState <- newMVar []
+        tmpDir <- getTemporaryDirectory
+        cd <- getCurrentDirectory
+        sessionStore <- Session.mkFileSessionStore (cd </> "data" </> "sessions") sessionConfig
+        simpleHTTP nullConf { port = 8081 } $ do
+            log "Incoming request" >> log "=========================END REQUEST====================\n"
+            msum [ homePage
+                 , apiController signupRateLimitState tmpDir sessionConfig sessionStore
+                 , serveStaticResource
+                 , mzero
+                 ]
 
-apiController :: MVar [UTCTime] -> FilePath -> ServerPartT IO Response
-apiController signupRateLimitState tmpDir = dir "api" $ msum [ noteController
-                                                              , checklistController
-                                                              , signupController signupRateLimitState tmpDir
-                                                              , signinController
-                                                              ]
+apiController :: MVar [UTCTime] -> FilePath -> Session.SessionConfig -> Session.SessionStore -> ServerPartT IO Response
+apiController signupRateLimitState tmpDir sessionConfig sessionStore = dir "api" $ msum [ requireAuth sessionConfig sessionStore noteController
+                                                                                          , requireAuth sessionConfig sessionStore checklistController
+                                                                                          , signupController signupRateLimitState tmpDir
+                                                                                          , signinController sessionConfig sessionStore
+                                                                                          , signoutController sessionConfig sessionStore
+                                                                                          ]
 
 homePage :: ServerPartT IO Response
 homePage = do
@@ -134,13 +204,40 @@ signupController signupRateLimitState tmpDir = dir "signup" $ do
                    (ok . toResponse)
                    res
 
-signinController :: ServerPartT IO Response
-signinController = dir "signin" $ do
+signinController :: Session.SessionConfig -> Session.SessionStore -> ServerPartT IO Response
+signinController sessionConfig sessionStore = dir "signin" $ do
   nullDir
   method POST
-  withBusinessHandling Auth.signinUser
+  withBusinessHandlingAndInput Auth.signinUser $ \authReq -> do
+    sid <- liftIO $ Session.createSessionForUser sessionStore (Auth.username authReq)
+    let cookieValue = Session.signSessionId (Session.sessionSecret sessionConfig) sid
+    addCookie Session (buildSessionCookie sessionConfig cookieValue)
+    ok $ toResponse ()
+
+signoutController :: Session.SessionConfig -> Session.SessionStore -> ServerPartT IO Response
+signoutController sessionConfig sessionStore = dir "signout" $ do
+  nullDir
+  method POST
+  revokeAll <- isSignoutAllRequested
+  mToken <- getSessionCookieValue sessionConfig
+  case mToken >>= Session.verifyAndExtractSessionId (Session.sessionSecret sessionConfig) of
+    Nothing -> HServer.unauthorized $ toResponse ("Not authenticated" :: String)
+    Just sid -> do
+      _ <- liftIO $ if revokeAll then Session.revokeAllForSession sessionStore sid else Session.revokeSession sessionStore sid
+      addCookie Expired (buildSessionCookie sessionConfig "")
+      ok $ toResponse ()
 
 
+
+isSignoutAllRequested :: ServerPartT IO Bool
+isSignoutAllRequested = do
+  mRaw <- (Just <$> HServer.look "all") `mplus` pure Nothing
+  pure $ case fmap (map toLower) mRaw of
+    Just "true" -> True
+    Just "1" -> True
+    Just "false" -> False
+    Just "0" -> False
+    _ -> False
 
 tooManyRequests :: FilterMonad Response m => String -> m Response
 tooManyRequests = HServer.badRequest . toResponse
@@ -175,16 +272,77 @@ withBusinessHandling handle = do
                    res
 
 
-noteController :: ServerPartT IO Response
-noteController = dir "note" noteHandlers
+withBusinessHandlingAndInput :: (FromJSON a, ToServerResponse e) => (a -> ExceptT e IO r) -> (a -> ServerPartT IO Response) -> ServerPartT IO Response
+withBusinessHandlingAndInput handle onSuccess = do
+    body <- askRq >>= takeRequestBody
+    maybe (badRequest "Empty body")
+          handleBody
+          body
+    where
+      handleBody :: RqBody -> ServerPartT IO Response
+      handleBody body = maybe (badRequest "Unable to decode the body as a SignupData")
+                             process
+                             (decode' $ unBody body)
+      process input = do
+        res <- liftIO $ runExceptT $ handle input
+        either toServerResponse
+               (const $ onSuccess input)
+               res
+
+buildSessionCookie :: Session.SessionConfig -> String -> HCookie.Cookie
+buildSessionCookie sessionConfig cookieValue =
+  (mkCookie (Session.sessionCookieName sessionConfig) cookieValue)
+    { HCookie.secure = True
+    , HCookie.httpOnly = True
+    , HCookie.sameSite = HCookie.SameSiteLax
+    }
+
+getSessionCookieValue :: Session.SessionConfig -> ServerPartT IO (Maybe String)
+getSessionCookieValue sessionConfig = do
+  mCookieHeader <- getHeaderM "cookie"
+  pure $ mCookieHeader >>= extractCookie (Session.sessionCookieName sessionConfig) . BS8.unpack
+
+extractCookie :: String -> String -> Maybe String
+extractCookie cookieName rawCookieHeader =
+  let chunks = splitOn ';' rawCookieHeader
+      normalized = map trim chunks
+      targetPrefix = cookieName ++ "="
+      matches = filter (isPrefixOf targetPrefix) normalized
+  in case matches of
+       [] -> Nothing
+       (x:_) -> Just $ drop (length targetPrefix) x
+
+splitOn :: Char -> String -> [String]
+splitOn sep s =
+  case break (== sep) s of
+    (before, []) -> [before]
+    (before, _:after) -> before : splitOn sep after
+
+trim :: String -> String
+trim = dropWhile (== ' ')
+
+requireAuth :: Session.SessionConfig -> Session.SessionStore -> (AppContext -> ServerPartT IO Response) -> ServerPartT IO Response
+requireAuth sessionConfig sessionStore handler = do
+  mToken <- getSessionCookieValue sessionConfig
+  case mToken >>= Session.verifyAndExtractSessionId (Session.sessionSecret sessionConfig) of
+    Nothing -> HServer.unauthorized $ toResponse ("Not authenticated" :: String)
+    Just sid -> do
+      mPrincipal <- liftIO $ Session.resolveSession sessionStore sid
+      case mPrincipal of
+        Nothing -> HServer.unauthorized $ toResponse ("Not authenticated" :: String)
+        Just principal -> handler AppContext { sessionPrincipal = principal }
+
+
+noteController :: AppContext -> ServerPartT IO Response
+noteController _ = dir "note" noteHandlers
     where
         noteHandlers = msum $ defaultNoteServiceConfig <%> [ crudGet
                                                            , crudPost
                                                            , crudDelete
                                                            , crudPut
                                                            ]
-checklistController :: ServerPartT IO Response
-checklistController = dir "checklist" $
+checklistController :: AppContext -> ServerPartT IO Response
+checklistController _ = dir "checklist" $
   msum $ defaultChecklistServiceConfig <%> [ crudGet
                                            , crudPost
                                            , crudDelete

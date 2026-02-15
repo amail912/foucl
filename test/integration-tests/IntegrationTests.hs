@@ -15,12 +15,15 @@ import           Data.ByteString.UTF8
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Lazy as BL
 import           Data.Functor.Identity
+import           Data.CaseInsensitive (original)
 import           GHC.Exts
 import           GHC.Generics          (Generic)
 import           Network.HTTP.Simple
 import           Test.Hspec
 import           Test.HUnit
 import           Data.Time.Clock.POSIX (getPOSIXTime)
+import           Data.List (isInfixOf)
+import           Data.Char (toLower)
 import Model
 
 -- ===================== Constants ==============================
@@ -105,7 +108,59 @@ runIntegrationTests = hspec $ do
                                                             , "password" .= ("wrongpasswordbad" :: String)
                                                             ])
                                $ invalidSigninReq
-      assertStatusCode "Signin should reject invalid password" 400 invalidSigninResponse
+      assertStatusCode "Signin should reject invalid password" 401 invalidSigninResponse
+
+
+    it "should set secure session cookie attributes on signin" $ do
+      uniquenessSuffix <- round <$> getPOSIXTime
+      let username = "signin-cookie-user-" ++ show uniquenessSuffix
+          password = "averystrongpass" :: String
+          signupPayload = object [ "username" .= username
+                                 , "password" .= password
+                                 ]
+      signupReq <- parseRequest "POST http://localhost:8081/api/signup"
+      _ <- httpNoBody $ setRequestMethod "POST"
+                    $ setRequestHeader "Content-Type" ["application/json"]
+                    $ setRequestBodyJSON signupPayload
+                    $ signupReq
+
+      signinReq <- parseRequest "POST http://localhost:8081/api/signin"
+      signinResponse <- httpBS $ setRequestMethod "POST"
+                               $ setRequestHeader "Content-Type" ["application/json"]
+                               $ setRequestBodyJSON signupPayload
+                               $ signinReq
+      assertStatusCode "Signin should succeed" 200 signinResponse
+      let setCookie = BS.unpack <$> getFirstSetCookie signinResponse
+      case setCookie of
+        Nothing -> assertFailure "Expected Set-Cookie header"
+        Just cookieHeader -> do
+          assertBool "Cookie should be HttpOnly" ("HttpOnly" `isInfixOf` cookieHeader)
+          assertBool "Cookie should be Secure" ("Secure" `isInfixOf` cookieHeader)
+          assertBool "Cookie should set SameSite=Lax" ("SameSite=Lax" `isInfixOf` cookieHeader)
+
+    it "should expire cookie on signout and support all=true revocation" $ do
+      uniquenessSuffix <- round <$> getPOSIXTime
+      let username = "signout-user-" ++ show uniquenessSuffix
+          password = "averystrongpass" :: String
+      cookie1 <- signupAndSignin username password
+      cookie2 <- signinOnly username password
+
+      signoutReq <- parseRequest "POST http://localhost:8081/api/signout?all=true"
+      signoutResponse <- httpBS $ setRequestMethod "POST"
+                                $ setRequestHeader "Cookie" [BS.pack cookie1]
+                                $ signoutReq
+      assertStatusCode "Signout should succeed" 200 signoutResponse
+      let signoutSetCookie = BS.unpack <$> getFirstSetCookie signoutResponse
+      case signoutSetCookie of
+        Nothing -> assertFailure "Expected Set-Cookie header on signout"
+        Just cookieHeader -> do
+          assertBool "Expired cookie should set Max-Age=0" ("Max-Age=0" `isInfixOf` cookieHeader)
+
+      protectedReq <- parseRequest "GET http://localhost:8081/note"
+      protectedResponse <- httpBS $ setRequestMethod "GET"
+                               $ setRequestHeader "Cookie" [BS.pack cookie2]
+                               $ protectedReq
+      assertStatusCode "all=true should revoke sibling sessions" 401 protectedResponse
         where
         firstChecklistContent    = ChecklistContent { name = "First checklist"
                                                      , items = [ ChecklistItem { label = "First item label unchecked", checked = False }
@@ -117,6 +172,39 @@ runIntegrationTests = hspec $ do
                                                               , ChecklistItem { label = "Fourth item label checked", checked = True }
                                                               ]
                                                     }
+
+
+
+getFirstSetCookie :: Response a -> Maybe ByteString
+getFirstSetCookie response =
+  case [v | (k, v) <- getResponseHeaders response, BS.map toLower (original k) == "set-cookie"] of
+    [] -> Nothing
+    (x:_) -> Just x
+
+extractCookiePair :: ByteString -> String
+extractCookiePair setCookieHeader =
+  BS.unpack $ BS.takeWhile (/= ';') setCookieHeader
+
+signupAndSignin :: String -> String -> IO String
+signupAndSignin username password = do
+  signupReq <- parseRequest "POST http://localhost:8081/api/signup"
+  _ <- httpNoBody $ setRequestMethod "POST"
+                $ setRequestHeader "Content-Type" ["application/json"]
+                $ setRequestBodyJSON (object [ "username" .= username, "password" .= password ])
+                $ signupReq
+  signinOnly username password
+
+signinOnly :: String -> String -> IO String
+signinOnly username password = do
+  signinReq <- parseRequest "POST http://localhost:8081/api/signin"
+  signinResponse <- httpBS $ setRequestMethod "POST"
+                           $ setRequestHeader "Content-Type" ["application/json"]
+                           $ setRequestBodyJSON (object [ "username" .= username, "password" .= password ])
+                           $ signinReq
+  assertStatusCode "Signin should succeed" 200 signinResponse
+  case getFirstSetCookie signinResponse of
+    Nothing -> assertFailure "Expected Set-Cookie header" >> pure ""
+    Just header -> pure (extractCookiePair header)
 
 assertNoItemAtEndpoint :: (Content contentType, RequestType GET endpointType () [Identifiable contentType]) => endpointType -> Expectation
 assertNoItemAtEndpoint endpoint = do

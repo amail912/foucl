@@ -375,7 +375,7 @@ corruptedSessionHandleIsRejected :: IO ()
 corruptedSessionHandleIsRejected = withSessionStoreAndDir "corrupted-handle" 30 30 $ \baseDir store -> do
     sid <- Session.createSessionForUser store "user-corrupted-handle"
     let handleFile = baseDir ++ "/handles/" ++ sid ++ ".json"
-    BL8.writeFile handleFile "{not-valid-json"
+    BL8.writeFile handleFile (BL8.pack "{not-valid-json")
     resolved <- Session.resolveSession store sid
     case resolved of
       Nothing -> assertBool "Corrupted handle should be treated as invalid" True

@@ -147,7 +147,7 @@ runIntegrationTests = hspec $ do
 
       signoutReq <- parseRequest "POST http://localhost:8081/api/signout?all=true"
       signoutResponse <- httpBS $ setRequestMethod "POST"
-                                $ setRequestHeader "Cookie" [encodeString cookie1]
+                                $ setRequestHeader "Cookie" [BS.pack cookie1]
                                 $ signoutReq
       assertStatusCode "Signout should succeed" 200 signoutResponse
       let signoutSetCookie = BS.unpack <$> getFirstSetCookie signoutResponse
@@ -158,7 +158,7 @@ runIntegrationTests = hspec $ do
 
       protectedReq <- parseRequest "GET http://localhost:8081/note"
       protectedResponse <- httpBS $ setRequestMethod "GET"
-                               $ setRequestHeader "Cookie" [encodeString cookie2]
+                               $ setRequestHeader "Cookie" [BS.pack cookie2]
                                $ protectedReq
       assertStatusCode "all=true should revoke sibling sessions" 401 protectedResponse
         where

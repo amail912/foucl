@@ -1,6 +1,5 @@
 {
   "session": {
-    "secret": "dev-session-secret-change-me",
     "cookieName": "foucl_session",
     "absoluteTtlSeconds": 604800,
     "idleTtlSeconds": 86400

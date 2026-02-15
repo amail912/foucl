@@ -47,16 +47,14 @@ type AppM a = ExceptT String (ServerPartT IO) a
 
 
 data SessionConfigFile = SessionConfigFile
-  { sessionSecretFile :: !String
-  , sessionCookieNameFile :: !(Maybe String)
+  { sessionCookieNameFile :: !(Maybe String)
   , sessionAbsoluteTtlSecondsFile :: !(Maybe Int)
   , sessionIdleTtlSecondsFile :: !(Maybe Int)
   } deriving (Generic)
 
 instance FromJSON SessionConfigFile where
   parseJSON = withObject "SessionConfigFile" $ \v -> SessionConfigFile
-    <$> v .: "secret"
-    <*> v .:? "cookieName"
+    <$> v .:? "cookieName"
     <*> v .:? "absoluteTtlSeconds"
     <*> v .:? "idleTtlSeconds"
 
@@ -102,28 +100,31 @@ instance ToServerResponse Auth.AuthError where
 
 loadSessionConfigFromFile :: IO (Either String Session.SessionConfig)
 loadSessionConfigFromFile = do
+  mSecret <- lookupEnv "FOUCL_SESSION_SECRET"
   mConfigPath <- lookupEnv "FOUCL_CONFIG_FILE"
   let configPath = fromMaybe "config/app-config.json" mConfigPath
-  exists <- doesFileExist configPath
-  if not exists
-    then pure $ Left ("Missing configuration file " ++ configPath)
-    else do
-      decoded <- eitherDecodeFileStrict' configPath :: IO (Either String AppConfigFile)
-      case decoded of
-        Left err -> pure $ Left ("Unable to parse configuration file: " ++ err)
-        Right fileConfig -> pure $ toSessionConfig fileConfig
+  case mSecret of
+    Nothing -> pure $ Left "Missing required environment variable FOUCL_SESSION_SECRET"
+    Just secret | null secret -> pure $ Left "Environment variable FOUCL_SESSION_SECRET cannot be empty"
+    Just secret -> do
+      exists <- doesFileExist configPath
+      if not exists
+        then pure $ Left ("Missing configuration file " ++ configPath)
+        else do
+          decoded <- eitherDecodeFileStrict' configPath :: IO (Either String AppConfigFile)
+          case decoded of
+            Left err -> pure $ Left ("Unable to parse configuration file: " ++ err)
+            Right fileConfig -> pure $ Right (toSessionConfig secret fileConfig)
 
 
-toSessionConfig :: AppConfigFile -> Either String Session.SessionConfig
-toSessionConfig AppConfigFile {appSession = SessionConfigFile {sessionSecretFile, sessionCookieNameFile, sessionAbsoluteTtlSecondsFile, sessionIdleTtlSecondsFile}} =
-  if null sessionSecretFile
-    then Left "session.secret cannot be empty"
-    else Right Session.defaultSessionConfig
-      { Session.sessionSecret = sessionSecretFile
-      , Session.sessionCookieName = fromMaybe (Session.sessionCookieName Session.defaultSessionConfig) sessionCookieNameFile
-      , Session.sessionAbsoluteTtlSeconds = fromIntegral (fromMaybe (round (Session.sessionAbsoluteTtlSeconds Session.defaultSessionConfig)) sessionAbsoluteTtlSecondsFile)
-      , Session.sessionIdleTtlSeconds = fromIntegral (fromMaybe (round (Session.sessionIdleTtlSeconds Session.defaultSessionConfig)) sessionIdleTtlSecondsFile)
-      }
+toSessionConfig :: String -> AppConfigFile -> Session.SessionConfig
+toSessionConfig secret AppConfigFile {appSession = SessionConfigFile {sessionCookieNameFile, sessionAbsoluteTtlSecondsFile, sessionIdleTtlSecondsFile}} =
+  Session.defaultSessionConfig
+    { Session.sessionSecret = secret
+    , Session.sessionCookieName = fromMaybe (Session.sessionCookieName Session.defaultSessionConfig) sessionCookieNameFile
+    , Session.sessionAbsoluteTtlSeconds = fromIntegral (fromMaybe (round (Session.sessionAbsoluteTtlSeconds Session.defaultSessionConfig)) sessionAbsoluteTtlSecondsFile)
+    , Session.sessionIdleTtlSeconds = fromIntegral (fromMaybe (round (Session.sessionIdleTtlSeconds Session.defaultSessionConfig)) sessionIdleTtlSecondsFile)
+    }
 
 runApp :: IO ()
 runApp = do

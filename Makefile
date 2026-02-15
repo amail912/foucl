@@ -1,4 +1,4 @@
-.PHONY: help build test ci start-sandbox restart-sandbox stop-sandbox integration-test _prepare-sandbox _wait-server
+.PHONY: help lint build test ci start-sandbox restart-sandbox stop-sandbox integration-test _prepare-sandbox _wait-server
 
 SHELL := /bin/bash
 
@@ -10,6 +10,7 @@ FOUCL_CONFIG_FILE_DEFAULT := $(CURDIR)/config/app-config.json
 
 help:
 	@echo "Available targets:"
+	@echo "  make lint             Run Haskell linter (hlint)"
 	@echo "  make build            Build executable"
 	@echo "  make test             Run unit tests"
 	@echo "  make ci               Run build + unit + integration tests"
@@ -18,13 +19,16 @@ help:
 	@echo "  make stop-sandbox     Stop sandbox server"
 	@echo "  make integration-test Run integration tests against sandbox server"
 
+lint:
+	./scripts/lint.sh
+
 build:
 	cabal build exe:foucl
 
 test:
 	cabal test foucl-unit-tests
 
-ci: build test integration-test
+ci: lint build test integration-test
 
 _prepare-sandbox:
 	@set -euo pipefail; \

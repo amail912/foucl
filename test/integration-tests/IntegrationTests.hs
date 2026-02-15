@@ -3,7 +3,6 @@
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FunctionalDependencies #-}
 
 module IntegrationTests (runIntegrationTests) where
@@ -74,7 +73,7 @@ runIntegrationTests = do
         signoutReq <- parseRequest "POST http://localhost:8081/api/signout?all=true"
         signoutResponse <- httpBS $ setRequestMethod "POST"
                                   $ setRequestHeader "Cookie" [BS.pack cookie1]
-                                  $ signoutReq
+                                  signoutReq
         assertStatusCode "Signout should succeed" 200 signoutResponse
         let signoutSetCookie = BS.unpack <$> getFirstSetCookie signoutResponse
         case signoutSetCookie of
@@ -85,7 +84,7 @@ runIntegrationTests = do
         protectedReq <- parseRequest "GET http://localhost:8081/api/note"
         protectedResponse <- httpBS $ setRequestMethod "GET"
                                  $ setRequestHeader "Cookie" [BS.pack cookie2]
-                                 $ protectedReq
+                                 protectedReq
         assertStatusCode "all=true should revoke sibling sessions" 401 protectedResponse
 
       it "should enforce signup body size" $ do
@@ -104,8 +103,7 @@ runIntegrationTests = do
             signupReq <- parseRequest "POST http://localhost:8081/api/signup"
             signupResponse <- httpNoBody $ setRequestMethod "POST"
                                       $ setRequestHeader "Content-Type" ["application/json"]
-                                      $ setRequestBodyJSON signupPayload
-                                      $ signupReq
+                                      $ setRequestBodyJSON signupPayload signupReq
             assertStatusCode "Signup should be allowed before rate-limit threshold" 200 signupResponse
           ) [1..4]
 
@@ -115,7 +113,7 @@ runIntegrationTests = do
                                 $ setRequestBodyJSON (object [ "username" .= ("ratelimit-user-blocked-" ++ show uniquenessSuffix)
                                                              , "password" .= ("averystrongpass" :: String)
                                                              ])
-                                $ blockedReq
+                                blockedReq
         assertStatusCode "Signup should be blocked when rate limit is reached" 400 blockedResponse
   where
     firstChecklistContent    = ChecklistContent { name = "First checklist"
@@ -153,8 +151,7 @@ signupAndSignin username password = do
   signupReq <- parseRequest "POST http://localhost:8081/api/signup"
   _ <- httpNoBody $ setRequestMethod "POST"
                 $ setRequestHeader "Content-Type" ["application/json"]
-                $ setRequestBodyJSON (authPayload username password)
-                $ signupReq
+                $ setRequestBodyJSON (authPayload username password) signupReq
   signinOnly username password
 
 signinOnly :: String -> String -> IO String
@@ -182,8 +179,7 @@ performSigninWith send username password = do
   signinReq <- parseRequest "POST http://localhost:8081/api/signin"
   send $ setRequestMethod "POST"
       $ setRequestHeader "Content-Type" ["application/json"]
-      $ setRequestBodyJSON (authPayload username password)
-      $ signinReq
+      $ setRequestBodyJSON (authPayload username password) signinReq
 
 runCrudLifecycle
   :: ( Content contentType
@@ -229,8 +225,7 @@ deleteItem :: Endpoint a => String -> a -> String -> Expectation
 deleteItem cookie endpoint idToDelete = do
   req <- parseRequest ("DELETE http://localhost:8081" ++ getEndpoint endpoint ++ "/" ++ idToDelete)
   let deleteReq = setRequestMethod "DELETE"
-                $ setRequestHeader "Cookie" [BS.pack cookie]
-                $ req
+                $ setRequestHeader "Cookie" [BS.pack cookie] req
   deleteResponse <- httpBS deleteReq
   assertStatusCode200 ("Failed to delete item" ++ show idToDelete) deleteResponse
 
@@ -244,16 +239,16 @@ assertWithFoundContent errorPrefix expectedContents response = do
 
 sendRequestWithJSONBodyImpl :: (RequestType methodType endpointType requestType responseType) =>
   methodType -> endpointType -> requestType -> IO (Response responseType)
-sendRequestWithJSONBodyImpl method endpoint body =
-    sendRequestWithJSONBodyImplWithCookie Nothing method endpoint body
+sendRequestWithJSONBodyImpl =
+    sendRequestWithJSONBodyImplWithCookie Nothing
 
 sendRequestWithJSONBodyImplWithCookie :: (RequestType methodType endpointType requestType responseType) =>
   Maybe String -> methodType -> endpointType -> requestType -> IO (Response responseType)
 sendRequestWithJSONBodyImplWithCookie mCookie method endpoint body = do
     req <- parseRequest ("http://localhost:8081" ++ getEndpoint endpoint)
     let withCookie :: Request -> Request
-        withCookie = maybe (\r -> r) (\cookie -> setRequestHeader "Cookie" [BS.pack cookie]) mCookie
-    httpJSON $ (setRequestMethod (getMethod method) . withCookie . (setRequestHeader "Content-Type" ["application/json"]) . (setRequestBodyJSON body)) req
+        withCookie = maybe id (\cookie -> setRequestHeader "Cookie" [BS.pack cookie]) mCookie
+    httpJSON $ (setRequestMethod (getMethod method) . withCookie . setRequestHeader "Content-Type" ["application/json"] . setRequestBodyJSON body) req
 
 
 -- sendRequestWithJSONBodyImpl endpoint method body = httpJSON <$>
@@ -315,19 +310,19 @@ class (ToJSON requestType, FromJSON responseType, Endpoint endpoint, Method meth
     sendRequestWithJSONBody :: endpoint -> methodType -> requestType -> IO (Response responseType)
 
 instance RequestType GET NoteEndpoint () [Identifiable NoteContent] where
-    sendRequestWithJSONBody endpoint _ req = sendRequestWithJSONBodyImpl GET endpoint req
+    sendRequestWithJSONBody endpoint _ = sendRequestWithJSONBodyImpl GET endpoint
 
 instance RequestType POST NoteEndpoint NoteContent StorageId where
-    sendRequestWithJSONBody endpoint _ req = sendRequestWithJSONBodyImpl POST endpoint req
+    sendRequestWithJSONBody endpoint _ = sendRequestWithJSONBodyImpl POST endpoint
 
 instance RequestType PUT NoteEndpoint (Identifiable NoteContent) StorageId where
-    sendRequestWithJSONBody endpoint _ req = sendRequestWithJSONBodyImpl PUT endpoint req
+    sendRequestWithJSONBody endpoint _ = sendRequestWithJSONBodyImpl PUT endpoint
 
 instance RequestType GET ChecklistEndpoint () [Identifiable ChecklistContent] where
-    sendRequestWithJSONBody endpoint _ req = sendRequestWithJSONBodyImpl GET endpoint req
+    sendRequestWithJSONBody endpoint _ = sendRequestWithJSONBodyImpl GET endpoint
 
 instance RequestType POST ChecklistEndpoint ChecklistContent StorageId where
-    sendRequestWithJSONBody endpoint _ req = sendRequestWithJSONBodyImpl POST endpoint req
+    sendRequestWithJSONBody endpoint _ = sendRequestWithJSONBodyImpl POST endpoint
 
 instance RequestType PUT ChecklistEndpoint (Identifiable ChecklistContent) StorageId where
-    sendRequestWithJSONBody endpoint _ req = sendRequestWithJSONBodyImpl PUT endpoint req
+    sendRequestWithJSONBody endpoint _ = sendRequestWithJSONBodyImpl PUT endpoint

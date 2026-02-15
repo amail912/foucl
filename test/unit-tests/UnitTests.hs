@@ -13,6 +13,7 @@ import System.Directory (removeDirectoryRecursive, createDirectory, createDirect
 import Data.Maybe (fromJust)
 import Data.Either (isRight)
 import Data.List ((\\))
+import Control.Monad (when)
 import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import Control.Monad.Trans.Except (runExceptT)
 import Control.Exception (finally)
@@ -59,10 +60,12 @@ createTest :: ContentGen crudConfig a => crudConfig -> IO ()
 createTest config = do
     Right storageId <- runExceptT $ postItem config (generateExample config 1)
     dirContent <- retrieveContentInDir config
-    filePath config storageId `elem` dirContent @? "expected " ++ show dirContent ++ " to contain " ++ show (id storageId ++ ".txt")
+    let sid = case storageId of
+                StorageId { id = sid' } -> sid'
+    filePath config storageId `elem` dirContent @? "expected " ++ show dirContent ++ " to contain " ++ show (sid ++ ".txt")
 
 getEmptyDirTest :: CRUDEngine crudConfig a => crudConfig -> IO ()
-getEmptyDirTest config = withEmptyDir config $ (\conf ->do
+getEmptyDirTest config = withEmptyDir config (\conf ->do
     Right [] <- runExceptT $ getItems config
     return ())
 
@@ -71,7 +74,7 @@ createManyThenGetTest config = do
     maybecreationIds <- mapM (runExceptT . postItem config) itemExamples
     let creationIds = map fromRight maybecreationIds
     Right potentialItems <- runExceptT $ getItems config
-    items <- sequence $ map (fmap fromRight . runExceptT) potentialItems
+    items <- mapM (fmap fromRight . runExceptT) potentialItems
     assertEqual "Their should be one note retrieved" (length creationIds) (length items)
     assertEqualWithoutOrder "RetrievedNote should have the same id as the created note" creationIds (map storageId items)
     assertEqualWithoutOrder "RetrievedNote should have the same content as the created note"  itemExamples (map content items)
@@ -79,8 +82,8 @@ createManyThenGetTest config = do
 
 createManyThenDeleteAllTest :: ContentGen crudConfig a => crudConfig -> IO ()
 createManyThenDeleteAllTest config = do
-    eitherCreationIds <- mapM (runExceptT . postItem config) (map (generateExample config) [1..5])
-    let noteIds = map (id . fromRight) eitherCreationIds
+    eitherCreationIds <- mapM ((runExceptT . postItem config) . generateExample config) [1..5]
+    let noteIds = map fromRight eitherCreationIds
     results <- mapM (runExceptT . delItem config) noteIds
     assertBool "all deletions should be a success" (all isRight results)
     dirContent <- retrieveContentInDir config
@@ -90,7 +93,7 @@ fromRight (Right a) = a
 fromRight (Left _) = undefined
 
 deleteNoteOnEmptyDir :: CRUDEngine crudConfig a => crudConfig -> IO ()
-deleteNoteOnEmptyDir config = withEmptyDir noteServiceConfig $ (\conf -> do
+deleteNoteOnEmptyDir config = withEmptyDir noteServiceConfig (\conf -> do
         Right () <- runExceptT $ delItem conf "ArbitraryNoteId"
         return ())
 
@@ -167,7 +170,7 @@ instance ContentGen NoteServiceConfig NoteContent where
     generateExample _ i = NoteContent { title = Just ("ExampleNoteTitle " ++ show i), noteContent = "Arbitrary note content " ++ show i } 
 
 instance ContentGen ChecklistServiceConfig ChecklistContent where
-    generateExample _ i = ChecklistContent { name = "ExampleNoteTitle " ++ show i, items = [ ChecklistItem { label = "Checklist label " ++ show i ++ "-" ++ show k, checked = k `rem` 2 == 0 } | k <- [1..5] ] }
+    generateExample _ i = ChecklistContent { name = "ExampleNoteTitle " ++ show i, items = [ ChecklistItem { label = "Checklist label " ++ show i ++ "-" ++ show k, checked = even k } | k <- [1..5] ] }
 
 signupValidationTests = test [ "Signup should reject short passwords" ~: rejectShortPassword
                              , "Signup should reject invalid usernames" ~: rejectInvalidUsername
@@ -292,14 +295,12 @@ ensureUsersDir usersDir = do
 
 cleanupUsersDirIfCreatedByTest :: Bool -> FilePath -> IO ()
 cleanupUsersDirIfCreatedByTest usersDirCreatedByTest usersDir =
-    if usersDirCreatedByTest
-      then removeDirectoryRecursive usersDir
-      else pure ()
+    when usersDirCreatedByTest $ removeDirectoryRecursive usersDir
 
 cleanupSignupUserDir :: FilePath -> IO ()
 cleanupSignupUserDir userDir = do
     userExists <- doesDirectoryExist userDir
-    if userExists then removeDirectoryRecursive userDir else pure ()
+    when userExists $ removeDirectoryRecursive userDir
 
 
 sessionTests = test [ "Signed token should reject tampering" ~: signedTokenRejectsTampering
@@ -357,7 +358,7 @@ withSessionStore label absoluteTtl idleTtl action =
 cleanupSessionDir :: FilePath -> IO ()
 cleanupSessionDir baseDir = do
     exists <- doesDirectoryExist baseDir
-    if exists then removeDirectoryRecursive baseDir else pure ()
+    when exists $ removeDirectoryRecursive baseDir
 
 
 revokeAllSessionsFromSession :: IO ()

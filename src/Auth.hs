@@ -4,7 +4,7 @@
 module Auth (AuthRequest(..), AuthError(..), AuthRequestError(..), createUser, signinUser) where
 
 import Prelude hiding (writeFile)
-import Control.Monad (when)
+import Control.Monad (when, unless)
 import Control.Monad.Except (ExceptT, throwError)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (ToJSON(toJSON), FromJSON(parseJSON), encode, decode, (.:), withObject, object, (.=))
@@ -36,7 +36,7 @@ checkUsername u = do
   when (null u) $ throwError $ BadRequest EmptyUsername
   when (length u < 3) $ throwError $ BadRequest UsernameTooShort
   when (length u > 32) $ throwError $ BadRequest UsernameTooLong
-  when (not $ all isAllowedUsernameChar u) $ throwError $ BadRequest UsernameDoesNotRespectPattern
+  unless (all isAllowedUsernameChar u) $ throwError $ BadRequest UsernameDoesNotRespectPattern
   where
     isAllowedUsernameChar c = isAlphaNum c || c `elem` ("._-" :: String)
 

@@ -20,7 +20,7 @@ import Crypto.Hash.Algorithms (SHA256)
 import Crypto.MAC.HMAC (HMAC, hmac)
 import Data.Char (isHexDigit, toLower)
 import Data.List (isSuffixOf)
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, isNothing)
 import Data.Time.Clock (UTCTime, NominalDiffTime, addUTCTime, getCurrentTime)
 import Data.UUID (toString)
 import Data.UUID.V4 (nextRandom)
@@ -104,7 +104,7 @@ instance FromJSON SessionHandle where
     <*> v .: "handleRevokedAt"
 
 
-data UserStateBinding = UserStateBinding { boundStateId :: !String }
+newtype UserStateBinding = UserStateBinding { boundStateId :: String }
 
 instance ToJSON UserStateBinding where
   toJSON UserStateBinding {boundStateId} = object ["boundStateId" .= boundStateId]
@@ -183,7 +183,7 @@ revokeAllForSessionImpl baseDir sid = do
 handleIdsForState :: FilePath -> String -> IO [String]
 handleIdsForState baseDir targetStateId = do
   entries <- listDirectory (baseDir </> "handles")
-  fmap concat $ mapM (matchHandle targetStateId) entries
+  concat <$> mapM (matchHandle targetStateId) entries
   where
     matchHandle stateId fileName =
       case stripJsonExt fileName of
@@ -210,7 +210,7 @@ revokeHandle baseDir now sid = do
 
 isStateValid :: UTCTime -> SessionState -> Bool
 isStateValid now st =
-  stateExpiresAt st > now && stateIdleExpiresAt st > now && not (isJust $ stateRevokedAt st)
+  stateExpiresAt st > now && stateIdleExpiresAt st > now && isNothing (stateRevokedAt st)
 
 touchState :: FilePath -> SessionConfig -> UTCTime -> SessionState -> IO ()
 touchState baseDir SessionConfig {sessionIdleTtlSeconds} now st = do

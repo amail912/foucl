@@ -21,8 +21,9 @@ import Data.Either (either)
 import qualified Data.ByteString.Char8 as BS8
 import Data.List (isPrefixOf)
 import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
-import Happstack.Server (FilterMonad, Response, ServerPartT, RqBody, takeRequestBody, unBody, rqBody, decodeBody, askRq, defaultBodyPolicy, nullDir, path, serveFileFrom, guessContentTypeM, mimeTypes, uriRest, nullConf, simpleHTTP, toResponse, method, ok, internalServerError, notFound, dir, Method(GET, POST, DELETE, PUT), Conf(..), addCookie, mkCookie, CookieLife(Session), getHeaderM)
+import Happstack.Server (FilterMonad, Response, ServerPartT, RqBody, takeRequestBody, unBody, rqBody, decodeBody, askRq, defaultBodyPolicy, nullDir, path, serveFileFrom, guessContentTypeM, mimeTypes, uriRest, nullConf, simpleHTTP, toResponse, method, ok, internalServerError, notFound, dir, Method(GET, POST, DELETE, PUT), Conf(..), addCookie, mkCookie, CookieLife(Session, Expired), getHeaderM)
 import qualified Happstack.Server as HServer
+import qualified Happstack.Server.Internal.Cookie as HCookie
 import Happstack.Server.Internal.MessageWrap (bodyInput, BodyPolicy)
 import Model (NoteContent, ChecklistContent, Content, Identifiable(..))
 import qualified CrudStorage
@@ -162,7 +163,7 @@ signinController sessionConfig sessionStore = dir "signin" $ do
   withBusinessHandlingAndInput Auth.signinUser $ \authReq -> do
     sid <- liftIO $ Session.createSessionForUser sessionStore (Auth.username authReq)
     let cookieValue = Session.signSessionId (Session.sessionSecret sessionConfig) sid
-    addCookie Session (mkCookie (Session.sessionCookieName sessionConfig) cookieValue)
+    addCookie Session (buildSessionCookie sessionConfig cookieValue)
     ok $ toResponse ()
 
 signoutController :: Session.SessionConfig -> Session.SessionStore -> ServerPartT IO Response
@@ -174,6 +175,7 @@ signoutController sessionConfig sessionStore = dir "signout" $ do
     Nothing -> HServer.unauthorized $ toResponse ("Not authenticated" :: String)
     Just sid -> do
       _ <- liftIO $ Session.revokeSession sessionStore sid
+      addCookie Expired (buildSessionCookie sessionConfig "")
       ok $ toResponse ()
 
 
@@ -227,6 +229,14 @@ withBusinessHandlingAndInput handle onSuccess = do
         either toServerResponse
                (const $ onSuccess input)
                res
+
+buildSessionCookie :: Session.SessionConfig -> String -> HCookie.Cookie
+buildSessionCookie sessionConfig cookieValue =
+  (mkCookie (Session.sessionCookieName sessionConfig) cookieValue)
+    { HCookie.secure = True
+    , HCookie.httpOnly = True
+    , HCookie.sameSite = HCookie.SameSiteLax
+    }
 
 getSessionCookieValue :: Session.SessionConfig -> ServerPartT IO (Maybe String)
 getSessionCookieValue sessionConfig = do

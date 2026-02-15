@@ -16,14 +16,17 @@ import Data.List ((\\))
 import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import Control.Monad.Trans.Except (runExceptT)
 import Control.Exception (finally)
+import Control.Concurrent (threadDelay)
 import System.Exit (exitSuccess, exitFailure)
 import NoteCrud (NoteServiceConfig(..))
 import ChecklistCrud (ChecklistServiceConfig(..))
 import qualified Auth
+import qualified Session
 import qualified Data.Text as Text
+import Data.Time.Clock.POSIX (getPOSIXTime)
 
 runUnitTests :: IO ()
-runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, signupValidationTests, signinValidationTests]
+runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, signupValidationTests, signinValidationTests, sessionTests]
 
 runTestTTAndExit tests = do
   c <- runTestTT tests
@@ -296,3 +299,69 @@ cleanupSignupUserDir :: FilePath -> IO ()
 cleanupSignupUserDir userDir = do
     userExists <- doesDirectoryExist userDir
     if userExists then removeDirectoryRecursive userDir else pure ()
+
+
+sessionTests = test [ "Signed token should reject tampering" ~: signedTokenRejectsTampering
+                    , "Revoked session should be rejected" ~: revokedSessionIsRejected
+                    , "Idle timeout should expire session" ~: idleTimeoutExpiresSession
+                    , "Sliding renewal should extend idle session" ~: slidingRenewalExtendsIdleSession
+                    ]
+
+signedTokenRejectsTampering :: IO ()
+signedTokenRejectsTampering = do
+    let token = Session.signSessionId "secret" "sid-1"
+        tampered = token ++ "00"
+    case Session.verifyAndExtractSessionId "secret" tampered of
+      Nothing -> assertBool "Tampered token should be rejected" True
+      Just _ -> assertFailure "Tampered token should not validate"
+
+revokedSessionIsRejected :: IO ()
+revokedSessionIsRejected = withSessionStore "revoked" 30 30 $ \store -> do
+    sid <- Session.createSessionForUser store "user-revoked"
+    _ <- Session.revokeSession store sid
+    resolved <- Session.resolveSession store sid
+    case resolved of
+      Nothing -> assertBool "Revoked session should not resolve" True
+      Just _ -> assertFailure "Expected revoked session to be rejected"
+
+idleTimeoutExpiresSession :: IO ()
+idleTimeoutExpiresSession = withSessionStore "idle-expiry" 30 1 $ \store -> do
+    sid <- Session.createSessionForUser store "user-idle-expiry"
+    threadDelay 1300000
+    resolved <- Session.resolveSession store sid
+    case resolved of
+      Nothing -> assertBool "Session should expire on idle timeout" True
+      Just _ -> assertFailure "Expected idle-expired session to be rejected"
+
+slidingRenewalExtendsIdleSession :: IO ()
+slidingRenewalExtendsIdleSession = withSessionStore "sliding" 30 1 $ \store -> do
+    sid <- Session.createSessionForUser store "user-sliding"
+    threadDelay 600000
+    firstResolution <- Session.resolveSession store sid
+    case firstResolution of
+      Nothing -> assertFailure "Expected first session resolution to succeed"
+      Just _ -> do
+        threadDelay 600000
+        secondResolution <- Session.resolveSession store sid
+        case secondResolution of
+          Nothing -> assertFailure "Expected sliding renewal to keep session active"
+          Just _ -> assertBool "Sliding renewal should extend session" True
+
+withSessionStore :: String -> Integer -> Integer -> (Session.SessionStore -> IO ()) -> IO ()
+withSessionStore label absoluteTtl idleTtl action = do
+    cd <- getCurrentDirectory
+    nonce <- round . (* 1000000) <$> getPOSIXTime
+    let baseDir = cd ++ "/data/test-sessions/" ++ label ++ "-" ++ show (nonce :: Integer)
+        sessionConfig = Session.defaultSessionConfig
+          { Session.sessionSecret = "unit-test-secret"
+          , Session.sessionAbsoluteTtlSeconds = fromInteger absoluteTtl
+          , Session.sessionIdleTtlSeconds = fromInteger idleTtl
+          }
+    cleanupSessionDir baseDir
+    store <- Session.mkFileSessionStore baseDir sessionConfig
+    action store `finally` cleanupSessionDir baseDir
+
+cleanupSessionDir :: FilePath -> IO ()
+cleanupSessionDir baseDir = do
+    exists <- doesDirectoryExist baseDir
+    if exists then removeDirectoryRecursive baseDir else pure ()

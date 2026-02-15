@@ -79,6 +79,7 @@ test-suite foucl-unit-tests
     , directory
     , transformers
     , text
+    , time
   default-language: Haskell2010
 
 test-suite foucl-integration-tests

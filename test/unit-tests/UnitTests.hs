@@ -305,6 +305,7 @@ sessionTests = test [ "Signed token should reject tampering" ~: signedTokenRejec
                     , "Revoked session should be rejected" ~: revokedSessionIsRejected
                     , "Idle timeout should expire session" ~: idleTimeoutExpiresSession
                     , "Sliding renewal should extend idle session" ~: slidingRenewalExtendsIdleSession
+                    , "Revoking all sessions from one session should revoke sibling sessions" ~: revokeAllSessionsFromSession
                     ]
 
 signedTokenRejectsTampering :: IO ()
@@ -365,3 +366,15 @@ cleanupSessionDir :: FilePath -> IO ()
 cleanupSessionDir baseDir = do
     exists <- doesDirectoryExist baseDir
     if exists then removeDirectoryRecursive baseDir else pure ()
+
+
+revokeAllSessionsFromSession :: IO ()
+revokeAllSessionsFromSession = withSessionStore "revoke-all" 30 30 $ \store -> do
+    sid1 <- Session.createSessionForUser store "user-revoke-all"
+    sid2 <- Session.createSessionForUser store "user-revoke-all"
+    _ <- Session.revokeAllForSession store sid1
+    resolved1 <- Session.resolveSession store sid1
+    resolved2 <- Session.resolveSession store sid2
+    case (resolved1, resolved2) of
+      (Nothing, Nothing) -> assertBool "All sibling sessions should be revoked" True
+      _ -> assertFailure "Expected both sessions to be revoked"

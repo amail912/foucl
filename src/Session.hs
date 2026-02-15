@@ -19,11 +19,12 @@ import qualified Data.ByteString.Lazy as BL
 import Crypto.Hash.Algorithms (SHA256)
 import Crypto.MAC.HMAC (HMAC, hmac)
 import Data.Char (isHexDigit, toLower)
+import Data.List (isSuffixOf)
 import Data.Maybe (isJust)
 import Data.Time.Clock (UTCTime, NominalDiffTime, addUTCTime, getCurrentTime)
 import Data.UUID (toString)
 import Data.UUID.V4 (nextRandom)
-import System.Directory (createDirectoryIfMissing, doesFileExist, renameFile)
+import System.Directory (createDirectoryIfMissing, doesFileExist, renameFile, listDirectory)
 import System.FilePath ((</>), takeDirectory)
 import System.IO (openTempFile, hClose)
 
@@ -116,6 +117,7 @@ data SessionStore = SessionStore
   { createSessionForUser :: String -> IO String
   , resolveSession :: String -> IO (Maybe SessionPrincipal)
   , revokeSession :: String -> IO Bool
+  , revokeAllForSession :: String -> IO Bool
   }
 
 mkFileSessionStore :: FilePath -> SessionConfig -> IO SessionStore
@@ -127,6 +129,7 @@ mkFileSessionStore baseDir config = do
     { createSessionForUser = createSessionForUserImpl baseDir config
     , resolveSession = resolveSessionImpl baseDir config
     , revokeSession = revokeSessionImpl baseDir
+    , revokeAllForSession = revokeAllForSessionImpl baseDir
     }
 
 createSessionForUserImpl :: FilePath -> SessionConfig -> String -> IO String
@@ -165,6 +168,45 @@ revokeSessionImpl baseDir sid = do
       now <- getCurrentTime
       writeJsonAtomic (handlePath baseDir sid) h { handleRevokedAt = Just now }
       pure True
+
+revokeAllForSessionImpl :: FilePath -> String -> IO Bool
+revokeAllForSessionImpl baseDir sid = do
+  mHandle <- readJsonFile (handlePath baseDir sid)
+  case mHandle of
+    Nothing -> pure False
+    Just h -> do
+      now <- getCurrentTime
+      sessionIds <- handleIdsForState baseDir (handleStateId h)
+      mapM_ (revokeHandle baseDir now) sessionIds
+      pure True
+
+handleIdsForState :: FilePath -> String -> IO [String]
+handleIdsForState baseDir targetStateId = do
+  entries <- listDirectory (baseDir </> "handles")
+  fmap concat $ mapM (matchHandle targetStateId) entries
+  where
+    matchHandle stateId fileName =
+      case stripJsonExt fileName of
+        Nothing -> pure []
+        Just sid -> do
+          mHandle <- readJsonFile (handlePath baseDir sid)
+          case mHandle of
+            Just h | handleStateId h == stateId -> pure [sid]
+            _ -> pure []
+
+stripJsonExt :: String -> Maybe String
+stripJsonExt fileName =
+  if ".json" `isSuffixOf` fileName
+    then Just (take (length fileName - 5) fileName)
+    else Nothing
+
+revokeHandle :: FilePath -> UTCTime -> String -> IO ()
+revokeHandle baseDir now sid = do
+  mHandle <- readJsonFile (handlePath baseDir sid)
+  case mHandle of
+    Nothing -> pure ()
+    Just h -> writeJsonAtomic (handlePath baseDir sid) h { handleRevokedAt = Just now }
+
 
 isStateValid :: UTCTime -> SessionState -> Bool
 isStateValid now st =

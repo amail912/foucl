@@ -11,7 +11,7 @@ import Data.Function ((&))
 import Data.Functor ((<$>))
 import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Int (Int64)
-import Control.Monad (msum, mzero, join, foldM, when)
+import Control.Monad (msum, mzero, join, foldM, when, mplus)
 import Control.Monad.Except (catchError, throwError)
 import Control.Monad.Trans.Class (lift, MonadTrans)
 import Control.Monad.Trans.Except (ExceptT, catchE, runExceptT, withExceptT)
@@ -229,7 +229,7 @@ signoutController sessionConfig sessionStore = dir "signout" $ do
 
 isSignoutAllRequested :: ServerPartT IO Bool
 isSignoutAllRequested = do
-  mRaw <- HServer.optional (HServer.look "all")
+  mRaw <- (Just <$> HServer.look "all") `mplus` pure Nothing
   pure $ case fmap (map toLower) mRaw of
     Just "true" -> True
     Just "1" -> True

@@ -69,3 +69,8 @@ Chaque state porte:
 
 - store fichier: simple et robuste pour démarrer, mais parcours de fichiers pour certaines opérations (`all=true`).
 - pour montée en charge, prévoir backend dédié (Redis/SQL) et index plus efficaces.
+
+
+## Exploitation
+
+Voir aussi le runbook d'exploitation: `docs/session-runbook.md`.

@@ -24,6 +24,7 @@ import qualified Auth
 import qualified Session
 import qualified Data.Text as Text
 import Data.Time.Clock.POSIX (getPOSIXTime)
+import qualified Data.ByteString.Lazy.Char8 as BL8
 
 runUnitTests :: IO ()
 runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, signupValidationTests, signinValidationTests, sessionTests]
@@ -306,6 +307,7 @@ sessionTests = test [ "Signed token should reject tampering" ~: signedTokenRejec
                     , "Idle timeout should expire session" ~: idleTimeoutExpiresSession
                     , "Sliding renewal should extend idle session" ~: slidingRenewalExtendsIdleSession
                     , "Revoking all sessions from one session should revoke sibling sessions" ~: revokeAllSessionsFromSession
+                    , "Corrupted session handle should be rejected gracefully" ~: corruptedSessionHandleIsRejected
                     ]
 
 signedTokenRejectsTampering :: IO ()
@@ -349,18 +351,8 @@ slidingRenewalExtendsIdleSession = withSessionStore "sliding" 30 1 $ \store -> d
           Just _ -> assertBool "Sliding renewal should extend session" True
 
 withSessionStore :: String -> Integer -> Integer -> (Session.SessionStore -> IO ()) -> IO ()
-withSessionStore label absoluteTtl idleTtl action = do
-    cd <- getCurrentDirectory
-    nonce <- round . (* 1000000) <$> getPOSIXTime
-    let baseDir = cd ++ "/data/test-sessions/" ++ label ++ "-" ++ show (nonce :: Integer)
-        sessionConfig = Session.defaultSessionConfig
-          { Session.sessionSecret = "unit-test-secret"
-          , Session.sessionAbsoluteTtlSeconds = fromInteger absoluteTtl
-          , Session.sessionIdleTtlSeconds = fromInteger idleTtl
-          }
-    cleanupSessionDir baseDir
-    store <- Session.mkFileSessionStore baseDir sessionConfig
-    action store `finally` cleanupSessionDir baseDir
+withSessionStore label absoluteTtl idleTtl action =
+    withSessionStoreAndDir label absoluteTtl idleTtl (\_ store -> action store)
 
 cleanupSessionDir :: FilePath -> IO ()
 cleanupSessionDir baseDir = do
@@ -378,3 +370,27 @@ revokeAllSessionsFromSession = withSessionStore "revoke-all" 30 30 $ \store -> d
     case (resolved1, resolved2) of
       (Nothing, Nothing) -> assertBool "All sibling sessions should be revoked" True
       _ -> assertFailure "Expected both sessions to be revoked"
+
+corruptedSessionHandleIsRejected :: IO ()
+corruptedSessionHandleIsRejected = withSessionStoreAndDir "corrupted-handle" 30 30 $ \baseDir store -> do
+    sid <- Session.createSessionForUser store "user-corrupted-handle"
+    let handleFile = baseDir ++ "/handles/" ++ sid ++ ".json"
+    BL8.writeFile handleFile "{not-valid-json"
+    resolved <- Session.resolveSession store sid
+    case resolved of
+      Nothing -> assertBool "Corrupted handle should be treated as invalid" True
+      Just _ -> assertFailure "Expected corrupted session handle to be rejected"
+
+withSessionStoreAndDir :: String -> Integer -> Integer -> (FilePath -> Session.SessionStore -> IO ()) -> IO ()
+withSessionStoreAndDir label absoluteTtl idleTtl action = do
+    cd <- getCurrentDirectory
+    nonce <- round . (* 1000000) <$> getPOSIXTime
+    let baseDir = cd ++ "/data/test-sessions/" ++ label ++ "-" ++ show (nonce :: Integer)
+        sessionConfig = Session.defaultSessionConfig
+          { Session.sessionSecret = "unit-test-secret"
+          , Session.sessionAbsoluteTtlSeconds = fromInteger absoluteTtl
+          , Session.sessionIdleTtlSeconds = fromInteger idleTtl
+          }
+    cleanupSessionDir baseDir
+    store <- Session.mkFileSessionStore baseDir sessionConfig
+    action baseDir store `finally` cleanupSessionDir baseDir

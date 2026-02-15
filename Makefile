@@ -28,7 +28,11 @@ build:
 test:
 	cabal test foucl-unit-tests
 
-ci: lint build test integration-test
+ci:
+	-$(MAKE) --no-print-directory lint
+	$(MAKE) --no-print-directory build
+	$(MAKE) --no-print-directory test
+	$(MAKE) --no-print-directory integration-test
 
 _prepare-sandbox:
 	@set -euo pipefail; \

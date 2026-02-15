@@ -247,7 +247,7 @@ sendRequestWithJSONBodyImplWithCookie :: (RequestType methodType endpointType re
 sendRequestWithJSONBodyImplWithCookie mCookie method endpoint body = do
     req <- parseRequest ("http://localhost:8081" ++ getEndpoint endpoint)
     let withCookie :: Request -> Request
-        withCookie = maybe id (\cookie -> setRequestHeader "Cookie" [BS.pack cookie]) mCookie
+        withCookie = maybe (\req' -> req') (\cookie -> setRequestHeader "Cookie" [BS.pack cookie]) mCookie
     httpJSON $ (setRequestMethod (getMethod method) . withCookie . setRequestHeader "Content-Type" ["application/json"] . setRequestBodyJSON body) req
 
 

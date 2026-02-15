@@ -8,7 +8,7 @@ module Lib
     ) where
 
 import Prelude hiding (log, writeFile)
-import Data.Aeson (ToJSON(toJSON), FromJSON(parseJSON), decode, encode, decode', eitherDecodeFileStrict', (.:), (.:?), withObject)
+import Data.Aeson (ToJSON(toJSON), FromJSON(parseJSON), decode, encode, decode', eitherDecodeFileStrict', (.:), (.:?), (.=), withObject, object)
 import Data.Function ((&))
 import Data.Functor ((<$>))
 import Data.Maybe (Maybe(..), fromMaybe)
@@ -73,16 +73,16 @@ newtype AppContext = AppContext
   }
 
 badRequest :: FilterMonad Response m => String -> m Response
-badRequest =  HServer.badRequest . toResponse
+badRequest = HServer.badRequest . jsonMessage
 
 jsonResponse :: ToJSON a => a -> Response
 jsonResponse = toResponse . encode
 
-stringResponse :: String -> Response
-stringResponse = toResponse
+jsonMessage :: String -> Response
+jsonMessage msg = jsonResponse $ object ["message" .= msg]
 
 emptyResponse :: Response
-emptyResponse = toResponse ()
+emptyResponse = jsonResponse $ object []
 
 class ToServerResponse e where
   toServerResponse :: Monad m => e -> ServerPartT m Response
@@ -97,8 +97,8 @@ instance ToServerResponse Auth.AuthError where
                      Auth.UsernameTooShort -> "Username is too short"
                      Auth.UsernameTooLong -> "Username is too long"
   toServerResponse Auth.UserAlreadyExists = badRequest "Unable to create user"
-  toServerResponse Auth.InvalidCredentials = HServer.unauthorized $ toResponse ("Invalid credentials" :: String)
-  toServerResponse (Auth.TechnicalError _) = internalServerError $ toResponse ("Unable to process authentication" :: String)
+  toServerResponse Auth.InvalidCredentials = HServer.unauthorized $ jsonMessage "Invalid credentials"
+  toServerResponse (Auth.TechnicalError _) = internalServerError $ jsonMessage "Unable to process authentication"
 
 loadSessionConfigFromFile :: IO (Either String Session.SessionConfig)
 loadSessionConfigFromFile = do
@@ -179,7 +179,7 @@ signupController signupRateLimitState tmpDir = dir "signup" $ do
     rq <- askRq
     (_, mBodyErr) <- liftIO $ bodyInput (signupBodyPolicy tmpDir) rq
     case mBodyErr of
-      Just bodyErr | isTooLargeBodyError bodyErr -> HServer.requestEntityTooLarge $ toResponse ("Body too large" :: String)
+      Just bodyErr | isTooLargeBodyError bodyErr -> HServer.requestEntityTooLarge $ jsonMessage "Body too large"
       Just _ -> badRequest "Unable to decode request body"
       Nothing -> do
         allowed <- liftIO $ allowSignupRequest signupRateLimitState
@@ -201,7 +201,7 @@ signupController signupRateLimitState tmpDir = dir "signup" $ do
           doCreateUser signupRequest = do
             res <- liftIO $ runExceptT $ Auth.createUser signupRequest
             either toServerResponse
-                   (ok . toResponse)
+                   (const $ ok emptyResponse)
                    res
 
 signinController :: Session.SessionConfig -> Session.SessionStore -> ServerPartT IO Response
@@ -212,7 +212,7 @@ signinController sessionConfig sessionStore = dir "signin" $ do
     sid <- liftIO $ Session.createSessionForUser sessionStore (Auth.username authReq)
     let cookieValue = Session.signSessionId (Session.sessionSecret sessionConfig) sid
     addCookie Session (buildSessionCookie sessionConfig cookieValue)
-    ok $ toResponse ()
+    ok emptyResponse
 
 signoutController :: Session.SessionConfig -> Session.SessionStore -> ServerPartT IO Response
 signoutController sessionConfig sessionStore = dir "signout" $ do
@@ -221,11 +221,11 @@ signoutController sessionConfig sessionStore = dir "signout" $ do
   revokeAll <- isSignoutAllRequested
   mToken <- getSessionCookieValue sessionConfig
   case mToken >>= Session.verifyAndExtractSessionId (Session.sessionSecret sessionConfig) of
-    Nothing -> HServer.unauthorized $ toResponse ("Not authenticated" :: String)
+    Nothing -> HServer.unauthorized $ jsonMessage "Not authenticated"
     Just sid -> do
       _ <- liftIO $ if revokeAll then Session.revokeAllForSession sessionStore sid else Session.revokeSession sessionStore sid
       addCookie Expired (buildSessionCookie sessionConfig "")
-      ok $ toResponse ()
+      ok emptyResponse
 
 
 
@@ -261,14 +261,14 @@ withBusinessHandling handle = do
           body
     where handleBody :: RqBody -> ServerPartT IO Response --AppM Response
           handleBody body = maybe (badRequest "Unable to decode the body as a SignupData")
-                                  (processDecodedBody handle)
+                  (processDecodedBody handle)
                                   (decode' $ unBody body)
 
           processDecodedBody :: ToServerResponse e => (a -> ExceptT e IO r) -> a -> ServerPartT IO Response
           processDecodedBody handle input = do
             res <- liftIO $ runExceptT $ handle input
             either toServerResponse
-                   (const $ ok $ toResponse ())
+                   (const $ ok emptyResponse)
                    res
 
 
@@ -325,11 +325,11 @@ requireAuth :: Session.SessionConfig -> Session.SessionStore -> (AppContext -> S
 requireAuth sessionConfig sessionStore handler = do
   mToken <- getSessionCookieValue sessionConfig
   case mToken >>= Session.verifyAndExtractSessionId (Session.sessionSecret sessionConfig) of
-    Nothing -> HServer.unauthorized $ toResponse ("Not authenticated" :: String)
+    Nothing -> HServer.unauthorized $ jsonMessage "Not authenticated"
     Just sid -> do
       mPrincipal <- liftIO $ Session.resolveSession sessionStore sid
       case mPrincipal of
-        Nothing -> HServer.unauthorized $ toResponse ("Not authenticated" :: String)
+        Nothing -> HServer.unauthorized $ jsonMessage "Not authenticated"
         Just principal -> handler AppContext { sessionPrincipal = principal }
 
 
@@ -387,7 +387,7 @@ crudPost crudConfig = do
             log ("Getting body bytestrings: " ++ show bodyBS)
             log ("Getting deserialized content: " ++ show noteContent)
             fmap (createNoteContent crudConfig) noteContent `orElse` genericInternalError "Unexpected problem during note creation"
-    fmap handleBody body `orElse` ok (stringResponse "NoBody")
+    fmap handleBody body `orElse` ok emptyResponse
 
 createNoteContent :: CRUDEngine crudType a => crudType -> a -> ServerPartT IO Response
 createNoteContent crudConfig noteContent = do
@@ -427,11 +427,11 @@ crudPut crudConfig = do
             log ("Getting body bytestrings: " ++ show bodyBS)
             log ("Getting deserialized content: " ++ show noteUpdate)
             fmap (handleUpdate crudConfig) noteUpdate `orElse` genericInternalError "Unable to parse body as a NoteUpdate"
-    fmap handleBody body `orElse` ok (stringResponse "NoBody") -- do not send back ok when there is no body
+    fmap handleBody body `orElse` ok emptyResponse -- do not send back ok when there is no body
 
 handleUpdate :: CRUDEngine crudType a => crudType -> Identifiable a -> ServerPartT IO Response
 handleUpdate crudConfig update =
-    recoverWith (const.notFound.stringResponse $ "Unable to find storage dir")
+    recoverWith (const . notFound $ jsonMessage "Unable to find storage dir")
                 (ok.jsonResponse <$> CrudStorage.modifyItem crudConfig update)
 
 serveStaticResource :: ServerPartT IO Response

@@ -84,7 +84,7 @@ createManyThenDeleteAllTest :: ContentGen crudConfig a => crudConfig -> IO ()
 createManyThenDeleteAllTest config = do
     eitherCreationIds <- mapM ((runExceptT . postItem config) . generateExample config) [1..5]
     let noteIds = map fromRight eitherCreationIds
-    results <- mapM (runExceptT . delItem config) noteIds
+    results <- mapM (runExceptT . delItem config . id) noteIds
     assertBool "all deletions should be a success" (all isRight results)
     dirContent <- retrieveContentInDir config
     assertEqual "note storage should be empty" [] dirContent

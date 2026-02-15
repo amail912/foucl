@@ -1,4 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE FlexibleContexts #-}
 
 module Lib
@@ -6,7 +8,7 @@ module Lib
     ) where
 
 import Prelude hiding (log, writeFile)
-import Data.Aeson (ToJSON(toJSON), FromJSON, decode, encode, decode', eitherDecodeFileStrict', (.:), (.:?), withObject)
+import Data.Aeson (ToJSON(toJSON), FromJSON(parseJSON), decode, encode, decode', eitherDecodeFileStrict', (.:), (.:?), withObject)
 import Data.Function ((&))
 import Data.Functor ((<$>))
 import Data.Maybe (Maybe(..), fromMaybe)
@@ -58,16 +60,16 @@ instance FromJSON SessionConfigFile where
     <*> v .:? "absoluteTtlSeconds"
     <*> v .:? "idleTtlSeconds"
 
-data AppConfigFile = AppConfigFile
-  { appSession :: !SessionConfigFile
+newtype AppConfigFile = AppConfigFile
+  { appSession :: SessionConfigFile
   } deriving (Generic)
 
 instance FromJSON AppConfigFile where
   parseJSON = withObject "AppConfigFile" $ \v -> AppConfigFile
     <$> v .: "session"
 
-data AppContext = AppContext
-  { sessionPrincipal :: !Session.SessionPrincipal
+newtype AppContext = AppContext
+  { sessionPrincipal :: Session.SessionPrincipal
   }
 
 badRequest :: FilterMonad Response m => String -> m Response

@@ -12,7 +12,7 @@ import           Data.Aeson
 import           Data.ByteString       (ByteString)
 import           Data.ByteString.UTF8
 import qualified Data.ByteString.Char8 as BS
-import qualified Data.ByteString.Lazy as BL
+import Data.ByteString.Lazy (fromStrict)
 import           Data.Functor.Identity
 import           Data.CaseInsensitive (original)
 import           GHC.Exts
@@ -23,6 +23,9 @@ import           Test.HUnit
 import           Data.Time.Clock.POSIX (getPOSIXTime)
 import           Data.List (isInfixOf)
 import           Data.Char (toLower)
+import           System.Environment (lookupEnv)
+import AgendaModel (ItemStatus(..), ItemType(..))
+import qualified AgendaModel as Agenda (CalendarItem(..), CalendarItemContent(..))
 import Model
 
 -- ===================== Constants ==============================
@@ -35,6 +38,7 @@ runIntegrationTests = do
   let baseUsername = "integration-base-user"
       basePassword = "averystrongpass" :: String
   _ <- signupAndSignin baseUsername basePassword
+  expectedCookieSecure <- resolveCookieSecureExpectation
   hspec $ do
     describe "Integration Tests" $ do
       it "should satisfy the basics, in one session, of the Very First User's needs, note-wise" $ do
@@ -55,7 +59,7 @@ runIntegrationTests = do
         invalidSigninResponse <- performSignin baseUsername "wrongpasswordbad"
         assertStatusCode "Signin should reject invalid password" 401 invalidSigninResponse
 
-      it "should set secure session cookie attributes on signin" $ do
+      it "should set session cookie attributes on signin" $ do
         signinResponse <- performSignin baseUsername basePassword
         assertStatusCode "Signin should succeed" 200 signinResponse
         let setCookie = BS.unpack <$> getFirstSetCookie signinResponse
@@ -63,7 +67,9 @@ runIntegrationTests = do
           Nothing -> assertFailure "Expected Set-Cookie header"
           Just cookieHeader -> do
             assertBool "Cookie should be HttpOnly" ("HttpOnly" `isInfixOf` cookieHeader)
-            assertBool "Cookie should be Secure" ("Secure" `isInfixOf` cookieHeader)
+            if expectedCookieSecure
+              then assertBool "Cookie should be Secure" ("Secure" `isInfixOf` cookieHeader)
+              else assertBool "Cookie should not be Secure" (not ("Secure" `isInfixOf` cookieHeader))
             assertBool "Cookie should set SameSite=Lax" ("SameSite=Lax" `isInfixOf` cookieHeader)
 
       it "should expire cookie on signout and support all=true revocation" $ do
@@ -90,7 +96,7 @@ runIntegrationTests = do
       it "should enforce signup body size" $ do
         let oversizedPayload = BS.replicate 5000 'a'
         oversizedReq <- parseRequest "POST http://localhost:8081/api/signup"
-        oversizedResponse <- httpBS $ setRequestMethod "POST" $ setRequestBodyLBS (BL.fromStrict oversizedPayload) oversizedReq
+        oversizedResponse <- httpBS $ setRequestMethod "POST" $ setRequestBodyLBS (fromStrict oversizedPayload) oversizedReq
         assertStatusCode "Oversized signup body should be rejected" 413 oversizedResponse
 
       it "should enforce signup rate limiting" $ do
@@ -115,6 +121,31 @@ runIntegrationTests = do
                                                              ])
                                 blockedReq
         assertStatusCode "Signup should be blocked when rate limit is reached" 400 blockedResponse
+
+      it "should require auth for agenda endpoints" $ do
+        unauthReq <- parseRequest "GET http://localhost:8081/api/v1/calendar-items"
+        unauthResponse <- httpBS $ setRequestMethod "GET" unauthReq
+        assertStatusCode "Agenda should require auth" 401 unauthResponse
+
+      it "should support agenda create/list/validate lifecycle" $ do
+        cookie <- signinOnly baseUsername basePassword
+        assertNoAgendaItems cookie
+        created <- createAgendaItem cookie agendaItemContent
+        case created of
+          Agenda.ServerCalendarItem {} -> do
+            let sid = Agenda.itemId created
+            assertBool "Created agenda item should have id" (not (null sid))
+          _ -> assertFailure "Expected ServerCalendarItem response"
+        items <- getAgendaItems cookie
+        assertEqual "Agenda list should contain created item" [created] items
+        case created of
+          Agenda.ServerCalendarItem {} -> do
+            let sid = Agenda.itemId created
+            validateAgendaItem cookie sid 42
+            updatedItems <- getAgendaItems cookie
+            let expected = applyDuration 42 created
+            assertEqual "Agenda item should be updated with duration" [expected] updatedItems
+          _ -> assertFailure "Expected ServerCalendarItem response"
   where
     firstChecklistContent    = ChecklistContent { name = "First checklist"
                                                  , items = [ ChecklistItem { label = "First item label unchecked", checked = False }
@@ -126,6 +157,35 @@ runIntegrationTests = do
                                                           , ChecklistItem { label = "Fourth item label checked", checked = True }
                                                           ]
                                                 }
+    agendaItemContent = Agenda.CalendarItemContent
+      { Agenda.itemType = Intention
+      , Agenda.title = "Test agenda item"
+      , Agenda.windowStart = "2025-01-01T09:00"
+      , Agenda.windowEnd = "2025-01-01T10:00"
+      , Agenda.status = Todo
+      , Agenda.sourceItemId = Nothing
+      , Agenda.actualDurationMinutes = Nothing
+      , Agenda.category = Nothing
+      , Agenda.recurrenceRule = Nothing
+      , Agenda.recurrenceExceptionDates = []
+      }
+    applyDuration minutes item =
+      case item of
+        Agenda.ServerCalendarItem {} ->
+          let storedContent = Agenda.content item
+              storedId = Agenda.itemId item
+          in Agenda.ServerCalendarItem { Agenda.content = storedContent { Agenda.actualDurationMinutes = Just minutes }, Agenda.itemId = storedId }
+        Agenda.NewCalendarItem {} ->
+          let storedContent = Agenda.content item
+          in Agenda.NewCalendarItem { Agenda.content = storedContent { Agenda.actualDurationMinutes = Just minutes } }
+
+resolveCookieSecureExpectation :: IO Bool
+resolveCookieSecureExpectation = do
+  mRaw <- lookupEnv "FOUCL_SESSION_COOKIE_SECURE"
+  pure $ case fmap (map toLower) mRaw of
+    Just "false" -> False
+    Just "0" -> False
+    _ -> True
 
 
 
@@ -306,6 +366,10 @@ data ChecklistEndpoint = ChecklistEndpoint
 instance Endpoint ChecklistEndpoint where
     getEndpoint ChecklistEndpoint = "/api/checklist"
 
+data CalendarItemsEndpoint = CalendarItemsEndpoint
+instance Endpoint CalendarItemsEndpoint where
+    getEndpoint CalendarItemsEndpoint = "/api/v1/calendar-items"
+
 class (ToJSON requestType, FromJSON responseType, Endpoint endpoint, Method methodType) => RequestType methodType endpoint requestType responseType | endpoint methodType -> requestType, endpoint methodType requestType -> responseType where
     sendRequestWithJSONBody :: endpoint -> methodType -> requestType -> IO (Response responseType)
 
@@ -326,3 +390,37 @@ instance RequestType POST ChecklistEndpoint ChecklistContent StorageId where
 
 instance RequestType PUT ChecklistEndpoint (Identifiable ChecklistContent) StorageId where
     sendRequestWithJSONBody endpoint _ = sendRequestWithJSONBodyImpl PUT endpoint
+
+instance RequestType GET CalendarItemsEndpoint () [Agenda.CalendarItem] where
+    sendRequestWithJSONBody endpoint _ = sendRequestWithJSONBodyImpl GET endpoint
+
+instance RequestType POST CalendarItemsEndpoint Agenda.CalendarItem Agenda.CalendarItem where
+    sendRequestWithJSONBody endpoint _ = sendRequestWithJSONBodyImpl POST endpoint
+
+assertNoAgendaItems :: String -> Expectation
+assertNoAgendaItems cookie = do
+  getResponse :: Response [Agenda.CalendarItem] <- sendRequestWithJSONBodyImplWithCookie (Just cookie) GET CalendarItemsEndpoint ()
+  assertStatusCode200 "Agenda should start empty" getResponse
+  assertEqual "Expected no agenda items" [] (getResponseBody getResponse)
+
+getAgendaItems :: String -> IO [Agenda.CalendarItem]
+getAgendaItems cookie = do
+  getResponse :: Response [Agenda.CalendarItem] <- sendRequestWithJSONBodyImplWithCookie (Just cookie) GET CalendarItemsEndpoint ()
+  assertStatusCode200 "Agenda list should succeed" getResponse
+  pure (getResponseBody getResponse)
+
+createAgendaItem :: String -> Agenda.CalendarItemContent -> IO Agenda.CalendarItem
+createAgendaItem cookie content = do
+  postResponse :: Response Agenda.CalendarItem <- sendRequestWithJSONBodyImplWithCookie (Just cookie) POST CalendarItemsEndpoint (Agenda.NewCalendarItem { Agenda.content = content })
+  assertStatusCode200 "Agenda create should succeed" postResponse
+  pure (getResponseBody postResponse)
+
+validateAgendaItem :: String -> String -> Int -> IO ()
+validateAgendaItem cookie itemId minutes = do
+  req <- parseRequest ("POST http://localhost:8081/api/v1/calendar-items/" ++ itemId ++ "/validate")
+  let body = object [ "duree_reelle_minutes" .= minutes ]
+  resp <- httpNoBody $ setRequestMethod "POST"
+                   $ setRequestHeader "Cookie" [BS.pack cookie]
+                   $ setRequestHeader "Content-Type" ["application/json"]
+                   $ setRequestBodyJSON body req
+  assertStatusCode "Agenda validate should succeed" 200 resp

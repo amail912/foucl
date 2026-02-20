@@ -12,11 +12,11 @@ module Model (
 
 
 import Control.Monad.IO.Class (liftIO)
-import           Data.Aeson
-import qualified Data.ByteString.Base64.Lazy as Base64 (encode)
+import Data.Aeson (ToJSON(..), FromJSON(..), (.:), (.=), object, withObject)
+import Data.ByteString.Base64.Lazy (encode)
 import           Data.ByteString.Lazy.Char8  as BL
-import qualified Data.UUID.V4               as UUID (nextRandom)
-import qualified Data.UUID                  as UUID (toString)
+import Data.UUID.V4 (nextRandom)
+import Data.UUID (toString)
 import           Data.Digest.Pure.SHA        (bytestringDigest, sha256)
 import           GHC.Generics                (Generic)
 
@@ -44,7 +44,7 @@ instance Content a => FromJSON (Identifiable a) where
 
 mkIdentifiable :: (Content a) => a -> IO (Identifiable a)
 mkIdentifiable content = do
-    uuid <- liftIO $ fmap UUID.toString UUID.nextRandom
+    uuid <- liftIO $ fmap toString nextRandom
     return $ Identifiable (StorageId { id = uuid, version = hash content }) content
 
 -- ===================== Note =============================================
@@ -81,4 +81,4 @@ instance Content ChecklistContent where
 -- =============================== Utils ==========================================
 
 base64Sha256 :: String -> String
-base64Sha256 contentToHash = BL.unpack . Base64.encode . bytestringDigest . sha256 $ BL.pack contentToHash
+base64Sha256 contentToHash = BL.unpack . encode . bytestringDigest . sha256 $ BL.pack contentToHash

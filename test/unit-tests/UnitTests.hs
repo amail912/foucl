@@ -21,14 +21,17 @@ import Control.Concurrent (threadDelay)
 import System.Exit (exitSuccess, exitFailure)
 import NoteCrud (NoteServiceConfig(..))
 import ChecklistCrud (ChecklistServiceConfig(..))
-import qualified Auth
-import qualified Session
-import qualified Data.Text as Text
+import AgendaModel (ItemStatus(..), ItemType(..))
+import qualified AgendaModel as Agenda (CalendarItem(..), CalendarItemContent(..))
+import AgendaStorage
+import Auth
+import Session
+import Data.Text (Text, pack)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import qualified Data.ByteString.Lazy.Char8 as BL8
 
 runUnitTests :: IO ()
-runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, signupValidationTests, signinValidationTests, sessionTests]
+runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, agendaStorageTests, signupValidationTests, signinValidationTests, sessionTests]
 
 runTestTTAndExit tests = do
   c <- runTestTT tests
@@ -55,6 +58,11 @@ checklistServiceTests = test [ "Creating a checklist should create a new file in
                              , "Modifying an non-existing checklist should give back a NotFoundError" ~: withEmptyDir checklistServiceConfig modifyANonExistingNote
                              , "Modifying an existing checklist but with wrong current version should give back a NotCurrentVersion error" ~: withEmptyDir checklistServiceConfig modifyWrongCurrentVersion
                              ]
+
+agendaStorageTests = test [ "Creating an agenda item should persist it and return an id" ~: agendaCreateAndList
+                          , "Validating an agenda item should update duration only" ~: agendaValidateUpdatesDuration
+                          , "Validating an unknown agenda item should fail" ~: agendaValidateMissing
+                          ]
 
 createTest :: ContentGen crudConfig a => crudConfig -> IO ()
 createTest config = do
@@ -149,6 +157,9 @@ checklistServiceConfig = ChecklistServiceConfig "target/.foucl/data/checklist/"
 noteServiceConfig :: NoteServiceConfig
 noteServiceConfig = NoteServiceConfig "target/.foucl/data/note/"
 
+calendarStorageConfig :: CalendarStorageConfig
+calendarStorageConfig = CalendarStorageConfig "target/.foucl/data/calendar-items/"
+
 withEmptyDir :: CRUDEngine crudConfig a => crudConfig -> (crudConfig -> IO ()) -> IO ()
 withEmptyDir config _test = do
     exists <- doesDirectoryExist dirPath
@@ -172,6 +183,68 @@ instance ContentGen NoteServiceConfig NoteContent where
 instance ContentGen ChecklistServiceConfig ChecklistContent where
     generateExample _ i = ChecklistContent { name = "ExampleNoteTitle " ++ show i, items = [ ChecklistItem { label = "Checklist label " ++ show i ++ "-" ++ show k, checked = even k } | k <- [1..5] ] }
 
+agendaCreateAndList :: IO ()
+agendaCreateAndList = withEmptyCalendarDir $ \config -> do
+    let content = sampleAgendaContent
+    created <- createCalendarItem config content
+    items <- getCalendarItems config
+    case created of
+      Agenda.ServerCalendarItem {} -> do
+        let sid = Agenda.itemId created
+            storedContent = Agenda.content created
+        assertBool "Expected created agenda item to have id" (not (null sid))
+        assertEqual "Expected stored content to match input" content storedContent
+        assertEqual "Expected agenda list to contain created item" [created] items
+      _ -> assertFailure "Expected ServerCalendarItem from create"
+
+agendaValidateUpdatesDuration :: IO ()
+agendaValidateUpdatesDuration = withEmptyCalendarDir $ \config -> do
+    created <- createCalendarItem config sampleAgendaContent
+    case created of
+      Agenda.ServerCalendarItem {} -> do
+        let sid = Agenda.itemId created
+            storedContent = Agenda.content created
+        result <- updateCalendarItemDuration config sid 55
+        case result of
+          Left err -> assertFailure ("Expected successful validation, got " ++ show err)
+          Right updated -> do
+            let expectedContent = storedContent { Agenda.actualDurationMinutes = Just 55 }
+            assertEqual "Expected duration to update" expectedContent (Agenda.content updated)
+      _ -> assertFailure "Expected ServerCalendarItem from create"
+
+agendaValidateMissing :: IO ()
+agendaValidateMissing = withEmptyCalendarDir $ \config -> do
+    result <- updateCalendarItemDuration config "missing-id" 30
+    case result of
+      Left CalendarItemNotFound -> assertBool "Expected not found error" True
+      _ -> assertFailure "Expected CalendarItemNotFound error"
+
+sampleAgendaContent :: Agenda.CalendarItemContent
+sampleAgendaContent = Agenda.CalendarItemContent
+  { Agenda.itemType = Intention
+  , Agenda.title = "Sample"
+  , Agenda.windowStart = "2025-01-01T08:00"
+  , Agenda.windowEnd = "2025-01-01T09:00"
+  , Agenda.status = Todo
+  , Agenda.sourceItemId = Nothing
+  , Agenda.actualDurationMinutes = Nothing
+  , Agenda.category = Nothing
+  , Agenda.recurrenceRule = Nothing
+  , Agenda.recurrenceExceptionDates = []
+  }
+
+withEmptyCalendarDir :: (CalendarStorageConfig -> IO ()) -> IO ()
+withEmptyCalendarDir action = do
+    exists <- doesDirectoryExist calendarDir
+    when exists $ removeDirectoryRecursive calendarDir
+    action calendarStorageConfig
+    cleanup
+  where
+    calendarDir = calendarRootPath calendarStorageConfig
+    cleanup = do
+      exists <- doesDirectoryExist calendarDir
+      when exists $ removeDirectoryRecursive calendarDir
+
 signupValidationTests = test [ "Signup should reject short passwords" ~: rejectShortPassword
                              , "Signup should reject invalid usernames" ~: rejectInvalidUsername
                              , "Signup should create a user profile on valid payload" ~: signupNominal
@@ -181,23 +254,23 @@ signupValidationTests = test [ "Signup should reject short passwords" ~: rejectS
 
 rejectShortPassword :: IO ()
 rejectShortPassword = do
-    result <- runExceptT $ Auth.createUser $ Auth.AuthRequest { Auth.username = "valid-user", Auth.password = Text.pack "short" }
+    result <- runExceptT $ createUser $ AuthRequest { username = "valid-user", password = pack "short" }
     case result of
-      Left (Auth.BadRequest Auth.PasswordTooShort) -> assertBool "PasswordTooShort expected" True
+      Left (BadRequest PasswordTooShort) -> assertBool "PasswordTooShort expected" True
       _ -> assertFailure "Expected PasswordTooShort"
 
 rejectInvalidUsername :: IO ()
 rejectInvalidUsername = do
-    result <- runExceptT $ Auth.createUser $ Auth.AuthRequest { Auth.username = "bad/name", Auth.password = Text.pack "averystrongpass" }
+    result <- runExceptT $ createUser $ AuthRequest { username = "bad/name", password = pack "averystrongpass" }
     case result of
-      Left (Auth.BadRequest Auth.UsernameDoesNotRespectPattern) -> assertBool "UsernameDoesNotRespectPattern expected" True
+      Left (BadRequest UsernameDoesNotRespectPattern) -> assertBool "UsernameDoesNotRespectPattern expected" True
       _ -> assertFailure "Expected UsernameDoesNotRespectPattern"
 
 
 signupNominal :: IO ()
 signupNominal = withCleanSignupUser "signup-nominal-user" $ \username -> do
-    let validPassword = Text.pack "averystrongpass"
-    result <- runExceptT $ Auth.createUser $ Auth.AuthRequest { Auth.username = username, Auth.password = validPassword }
+    let validPassword = pack "averystrongpass"
+    result <- runExceptT $ createUser $ AuthRequest { username = username, password = validPassword }
     case result of
       Right () -> do
         cd <- getCurrentDirectory
@@ -208,13 +281,13 @@ signupNominal = withCleanSignupUser "signup-nominal-user" $ \username -> do
 
 signupAlreadyExistingUser :: IO ()
 signupAlreadyExistingUser = withCleanSignupUser "signup-existing-user" $ \username -> do
-    let validPassword = Text.pack "averystrongpass"
-    firstTry <- runExceptT $ Auth.createUser $ Auth.AuthRequest { Auth.username = username, Auth.password = validPassword }
+    let validPassword = pack "averystrongpass"
+    firstTry <- runExceptT $ createUser $ AuthRequest { username = username, password = validPassword }
     case firstTry of
       Right () -> do
-        secondTry <- runExceptT $ Auth.createUser $ Auth.AuthRequest { Auth.username = username, Auth.password = validPassword }
+        secondTry <- runExceptT $ createUser $ AuthRequest { username = username, password = validPassword }
         case secondTry of
-          Left Auth.UserAlreadyExists -> assertBool "UserAlreadyExists expected" True
+          Left UserAlreadyExists -> assertBool "UserAlreadyExists expected" True
           _ -> assertFailure "Expected UserAlreadyExists"
       _ -> assertFailure "Expected first signup to succeed"
 
@@ -222,8 +295,8 @@ signupAlreadyExistingUser = withCleanSignupUser "signup-existing-user" $ \userna
 
 signupUsesRestrictedPermissions :: IO ()
 signupUsesRestrictedPermissions = withCleanSignupUser "signup-permissions-user" $ \username -> do
-    let validPassword = Text.pack "averystrongpass"
-    result <- runExceptT $ Auth.createUser $ Auth.AuthRequest { Auth.username = username, Auth.password = validPassword }
+    let validPassword = pack "averystrongpass"
+    result <- runExceptT $ createUser $ AuthRequest { username = username, password = validPassword }
     case result of
       Right () -> do
         cd <- getCurrentDirectory
@@ -246,11 +319,11 @@ signinValidationTests = test [ "Signin should authenticate with valid credential
 
 signinNominal :: IO ()
 signinNominal = withCleanSignupUser "signin-nominal-user" $ \username -> do
-    let validPassword = Text.pack "averystrongpass"
-    signupResult <- runExceptT $ Auth.createUser $ Auth.AuthRequest { Auth.username = username, Auth.password = validPassword }
+    let validPassword = pack "averystrongpass"
+    signupResult <- runExceptT $ createUser $ AuthRequest { username = username, password = validPassword }
     case signupResult of
       Right () -> do
-        signinResult <- runExceptT $ Auth.signinUser $ Auth.AuthRequest { Auth.username = username, Auth.password = validPassword }
+        signinResult <- runExceptT $ signinUser $ AuthRequest { username = username, password = validPassword }
         case signinResult of
           Right () -> assertBool "Signin should succeed" True
           _ -> assertFailure "Expected successful signin"
@@ -258,21 +331,21 @@ signinNominal = withCleanSignupUser "signin-nominal-user" $ \username -> do
 
 signinRejectsInvalidPassword :: IO ()
 signinRejectsInvalidPassword = withCleanSignupUser "signin-invalid-password-user" $ \username -> do
-    let validPassword = Text.pack "averystrongpass"
-    signupResult <- runExceptT $ Auth.createUser $ Auth.AuthRequest { Auth.username = username, Auth.password = validPassword }
+    let validPassword = pack "averystrongpass"
+    signupResult <- runExceptT $ createUser $ AuthRequest { username = username, password = validPassword }
     case signupResult of
       Right () -> do
-        signinResult <- runExceptT $ Auth.signinUser $ Auth.AuthRequest { Auth.username = username, Auth.password = Text.pack "wrongpassword!!" }
+        signinResult <- runExceptT $ signinUser $ AuthRequest { username = username, password = pack "wrongpassword!!" }
         case signinResult of
-          Left Auth.InvalidCredentials -> assertBool "InvalidCredentials expected" True
+          Left InvalidCredentials -> assertBool "InvalidCredentials expected" True
           _ -> assertFailure "Expected InvalidCredentials"
       _ -> assertFailure "Expected signup success"
 
 signinRejectsUnknownUser :: IO ()
 signinRejectsUnknownUser = do
-    signinResult <- runExceptT $ Auth.signinUser $ Auth.AuthRequest { Auth.username = "signin-unknown-user", Auth.password = Text.pack "averystrongpass" }
+    signinResult <- runExceptT $ signinUser $ AuthRequest { username = "signin-unknown-user", password = pack "averystrongpass" }
     case signinResult of
-      Left Auth.InvalidCredentials -> assertBool "InvalidCredentials expected" True
+      Left InvalidCredentials -> assertBool "InvalidCredentials expected" True
       _ -> assertFailure "Expected InvalidCredentials"
 
 withCleanSignupUser :: String -> (String -> IO ()) -> IO ()
@@ -313,45 +386,45 @@ sessionTests = test [ "Signed token should reject tampering" ~: signedTokenRejec
 
 signedTokenRejectsTampering :: IO ()
 signedTokenRejectsTampering = do
-    let token = Session.signSessionId "secret" "sid-1"
+    let token = signSessionId "secret" "sid-1"
         tampered = token ++ "00"
-    case Session.verifyAndExtractSessionId "secret" tampered of
+    case verifyAndExtractSessionId "secret" tampered of
       Nothing -> assertBool "Tampered token should be rejected" True
       Just _ -> assertFailure "Tampered token should not validate"
 
 revokedSessionIsRejected :: IO ()
 revokedSessionIsRejected = withSessionStore "revoked" 30 30 $ \store -> do
-    sid <- Session.createSessionForUser store "user-revoked"
-    _ <- Session.revokeSession store sid
-    resolved <- Session.resolveSession store sid
+    sid <- createSessionForUser store "user-revoked"
+    _ <- revokeSession store sid
+    resolved <- resolveSession store sid
     case resolved of
       Nothing -> assertBool "Revoked session should not resolve" True
       Just _ -> assertFailure "Expected revoked session to be rejected"
 
 idleTimeoutExpiresSession :: IO ()
 idleTimeoutExpiresSession = withSessionStore "idle-expiry" 30 1 $ \store -> do
-    sid <- Session.createSessionForUser store "user-idle-expiry"
+    sid <- createSessionForUser store "user-idle-expiry"
     threadDelay 1300000
-    resolved <- Session.resolveSession store sid
+    resolved <- resolveSession store sid
     case resolved of
       Nothing -> assertBool "Session should expire on idle timeout" True
       Just _ -> assertFailure "Expected idle-expired session to be rejected"
 
 slidingRenewalExtendsIdleSession :: IO ()
 slidingRenewalExtendsIdleSession = withSessionStore "sliding" 30 1 $ \store -> do
-    sid <- Session.createSessionForUser store "user-sliding"
+    sid <- createSessionForUser store "user-sliding"
     threadDelay 600000
-    firstResolution <- Session.resolveSession store sid
+    firstResolution <- resolveSession store sid
     case firstResolution of
       Nothing -> assertFailure "Expected first session resolution to succeed"
       Just _ -> do
         threadDelay 600000
-        secondResolution <- Session.resolveSession store sid
+        secondResolution <- resolveSession store sid
         case secondResolution of
           Nothing -> assertFailure "Expected sliding renewal to keep session active"
           Just _ -> assertBool "Sliding renewal should extend session" True
 
-withSessionStore :: String -> Integer -> Integer -> (Session.SessionStore -> IO ()) -> IO ()
+withSessionStore :: String -> Integer -> Integer -> (SessionStore -> IO ()) -> IO ()
 withSessionStore label absoluteTtl idleTtl action =
     withSessionStoreAndDir label absoluteTtl idleTtl (\_ store -> action store)
 
@@ -363,35 +436,35 @@ cleanupSessionDir baseDir = do
 
 revokeAllSessionsFromSession :: IO ()
 revokeAllSessionsFromSession = withSessionStore "revoke-all" 30 30 $ \store -> do
-    sid1 <- Session.createSessionForUser store "user-revoke-all"
-    sid2 <- Session.createSessionForUser store "user-revoke-all"
-    _ <- Session.revokeAllForSession store sid1
-    resolved1 <- Session.resolveSession store sid1
-    resolved2 <- Session.resolveSession store sid2
+    sid1 <- createSessionForUser store "user-revoke-all"
+    sid2 <- createSessionForUser store "user-revoke-all"
+    _ <- revokeAllForSession store sid1
+    resolved1 <- resolveSession store sid1
+    resolved2 <- resolveSession store sid2
     case (resolved1, resolved2) of
       (Nothing, Nothing) -> assertBool "All sibling sessions should be revoked" True
       _ -> assertFailure "Expected both sessions to be revoked"
 
 corruptedSessionHandleIsRejected :: IO ()
 corruptedSessionHandleIsRejected = withSessionStoreAndDir "corrupted-handle" 30 30 $ \baseDir store -> do
-    sid <- Session.createSessionForUser store "user-corrupted-handle"
+    sid <- createSessionForUser store "user-corrupted-handle"
     let handleFile = baseDir ++ "/handles/" ++ sid ++ ".json"
     BL8.writeFile handleFile (BL8.pack "{not-valid-json")
-    resolved <- Session.resolveSession store sid
+    resolved <- resolveSession store sid
     case resolved of
       Nothing -> assertBool "Corrupted handle should be treated as invalid" True
       Just _ -> assertFailure "Expected corrupted session handle to be rejected"
 
-withSessionStoreAndDir :: String -> Integer -> Integer -> (FilePath -> Session.SessionStore -> IO ()) -> IO ()
+withSessionStoreAndDir :: String -> Integer -> Integer -> (FilePath -> SessionStore -> IO ()) -> IO ()
 withSessionStoreAndDir label absoluteTtl idleTtl action = do
     cd <- getCurrentDirectory
     nonce <- round . (* 1000000) <$> getPOSIXTime
     let baseDir = cd ++ "/data/test-sessions/" ++ label ++ "-" ++ show (nonce :: Integer)
-        sessionConfig = Session.defaultSessionConfig
-          { Session.sessionSecret = "unit-test-secret"
-          , Session.sessionAbsoluteTtlSeconds = fromInteger absoluteTtl
-          , Session.sessionIdleTtlSeconds = fromInteger idleTtl
+        sessionConfig = defaultSessionConfig
+          { sessionSecret = "unit-test-secret"
+          , sessionAbsoluteTtlSeconds = fromInteger absoluteTtl
+          , sessionIdleTtlSeconds = fromInteger idleTtl
           }
     cleanupSessionDir baseDir
-    store <- Session.mkFileSessionStore baseDir sessionConfig
+    store <- mkFileSessionStore baseDir sessionConfig
     action baseDir store `finally` cleanupSessionDir baseDir

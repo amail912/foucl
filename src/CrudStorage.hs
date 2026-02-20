@@ -22,8 +22,8 @@ import           Data.Aeson                 (FromJSON, ToJSON, eitherDecode,
 import           Data.ByteString.Lazy.Char8 as BL hiding (appendFile, filter,
                                                    map, putStrLn)
 import           Data.Maybe                 (fromJust)
-import qualified Data.UUID                  as UUID (toString)
-import qualified Data.UUID.V4               as UUID (nextRandom)
+import Data.UUID (toString)
+import Data.UUID.V4 (nextRandom)
 import           Model                      (ChecklistContent (..), Content,
                                              Identifiable (..),
                                              NoteContent (..), StorageId (..),
@@ -106,7 +106,7 @@ readFileImpl file = handleEitherT IOReadException
 
 generateNewUUID :: DiskFileStorageConfig crudConfig => crudConfig -> EitherT IOError IO String
 generateNewUUID config = do
-  newUUID <- liftIO $ fmap UUID.toString UUID.nextRandom
+  newUUID <- liftIO $ fmap toString nextRandom
   fileExists <- liftIO $ doesFileExist (fileName config newUUID)
   if fileExists
     then do
@@ -129,4 +129,3 @@ prefixWithStorageDir storageConfig s = postFixWithIfNeeded '/' (rootPath storage
 
 log :: MonadIO m => String -> m ()
 log s = liftIO $ appendFile  "./server.log" $ s ++ "\n"
-

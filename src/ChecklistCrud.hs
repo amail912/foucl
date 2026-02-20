@@ -4,7 +4,7 @@ module ChecklistCrud (ChecklistServiceConfig(..), defaultChecklistServiceConfig)
 
 import           Crud        (CRUDEngine (..), DiskFileStorageConfig (..))
 import           Model       (ChecklistContent (..))
-import qualified CrudStorage
+import CrudStorage (getAllItems, createItem, deleteItem, modifyItem)
 
 newtype ChecklistServiceConfig = ChecklistServiceConfig String
 
@@ -12,10 +12,10 @@ instance DiskFileStorageConfig ChecklistServiceConfig where
     rootPath (ChecklistServiceConfig path) = path
 
 instance CRUDEngine ChecklistServiceConfig ChecklistContent where
-  getItems = CrudStorage.getAllItems
-  postItem = CrudStorage.createItem
-  delItem = CrudStorage.deleteItem
-  putItem = CrudStorage.modifyItem
+  getItems = getAllItems
+  postItem = createItem
+  delItem = deleteItem
+  putItem = modifyItem
   crudTypeDenomination _ = "checklist"
 
 defaultChecklistServiceConfig = ChecklistServiceConfig "data/checklist"

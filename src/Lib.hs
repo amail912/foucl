@@ -20,18 +20,18 @@ import Control.Monad.Trans.Except (ExceptT, catchE, runExceptT, withExceptT)
 import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import Control.Monad.IO.Class (liftIO, MonadIO)
 import Data.Either (either)
-import qualified Data.ByteString.Char8 as BS8
+import Data.ByteString.Char8 (unpack)
 import Data.List (isPrefixOf)
 import Data.Char (toLower)
 import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
-import Happstack.Server (FilterMonad, Response, ServerPartT, RqBody, takeRequestBody, unBody, rqBody, decodeBody, askRq, defaultBodyPolicy, nullDir, path, serveFileFrom, guessContentTypeM, mimeTypes, uriRest, nullConf, simpleHTTP, toResponse, method, ok, internalServerError, notFound, dir, Method(GET, POST, DELETE, PUT), Conf(..), addCookie, mkCookie, CookieLife(Session, Expired), getHeaderM)
+import Happstack.Server (FilterMonad, Response, ServerPartT, RqBody, takeRequestBody, unBody, rqBody, decodeBody, askRq, defaultBodyPolicy, nullDir, path, serveFileFrom, guessContentTypeM, mimeTypes, uriRest, nullConf, simpleHTTP, toResponse, method, ok, internalServerError, notFound, dir, Method(GET, POST, DELETE, PUT), Conf(..), addCookie, mkCookie, CookieLife(Session, Expired), getHeaderM, unauthorized, requestEntityTooLarge, look)
 import qualified Happstack.Server as HServer
-import qualified Happstack.Server.Internal.Cookie as HCookie
+import Happstack.Server.Internal.Cookie (Cookie(..), SameSite(..))
 import Happstack.Server.Internal.MessageWrap (bodyInput, BodyPolicy)
 import Model (NoteContent, ChecklistContent, Content, Identifiable(..))
-import AgendaModel (CalendarItem(..), ValidateRequest(..))
-import qualified AgendaStorage
-import qualified CrudStorage
+import qualified AgendaModel as Agenda
+import AgendaStorage (createCalendarItem, defaultCalendarStorageConfig, getCalendarItems, updateCalendarItemDuration, CalendarStorageError(..))
+import CrudStorage (createItem, getAllItems, deleteItem, modifyItem)
 import Crud
 import NoteCrud (NoteServiceConfig(..), defaultNoteServiceConfig)
 import ChecklistCrud (ChecklistServiceConfig(..), defaultChecklistServiceConfig)
@@ -44,8 +44,8 @@ import Data.Time.Clock (UTCTime, getCurrentTime, addUTCTime)
 import GHC.Generics (Generic)
 import Data.ByteString.Lazy.Char8 (writeFile)
 import Filesystem.Path.CurrentOS    (commonPrefix, encodeString, decodeString, collapse, append)
-import qualified Auth (AuthRequest(..), AuthRequestError(..), AuthError(..), createUser, signinUser)
-import qualified Session
+import Auth (AuthRequest(..), AuthRequestError(..), AuthError(..), createUser, signinUser)
+import Session (SessionConfig(..), SessionPrincipal(..), SessionStore(..), defaultSessionConfig, mkFileSessionStore, signSessionId, verifyAndExtractSessionId)
 
 type AppM a = ExceptT String (ServerPartT IO) a
 
@@ -71,7 +71,7 @@ instance FromJSON AppConfigFile where
     <$> v .: "session"
 
 newtype AppContext = AppContext
-  { sessionPrincipal :: Session.SessionPrincipal
+  { sessionPrincipal :: SessionPrincipal
   }
 
 badRequest :: FilterMonad Response m => String -> m Response
@@ -89,20 +89,20 @@ emptyResponse = jsonResponse $ object []
 class ToServerResponse e where
   toServerResponse :: Monad m => e -> ServerPartT m Response
 
-instance ToServerResponse Auth.AuthError where
-  toServerResponse (Auth.BadRequest br) = badRequest errorStr
+instance ToServerResponse AuthError where
+  toServerResponse (BadRequest br) = badRequest errorStr
     where errorStr = case br of
-                     Auth.EmptyUsername -> "Username cannot be empty"
-                     Auth.UsernameDoesNotRespectPattern -> "Username has forbidden characters"
-                     Auth.EmptyPassword -> "Password cannot be empty"
-                     Auth.PasswordTooShort -> "Password is too short"
-                     Auth.UsernameTooShort -> "Username is too short"
-                     Auth.UsernameTooLong -> "Username is too long"
-  toServerResponse Auth.UserAlreadyExists = badRequest "Unable to create user"
-  toServerResponse Auth.InvalidCredentials = HServer.unauthorized $ jsonMessage "Invalid credentials"
-  toServerResponse (Auth.TechnicalError _) = internalServerError $ jsonMessage "Unable to process authentication"
+                     EmptyUsername -> "Username cannot be empty"
+                     UsernameDoesNotRespectPattern -> "Username has forbidden characters"
+                     EmptyPassword -> "Password cannot be empty"
+                     PasswordTooShort -> "Password is too short"
+                     UsernameTooShort -> "Username is too short"
+                     UsernameTooLong -> "Username is too long"
+  toServerResponse UserAlreadyExists = badRequest "Unable to create user"
+  toServerResponse InvalidCredentials = unauthorized $ jsonMessage "Invalid credentials"
+  toServerResponse (TechnicalError _) = internalServerError $ jsonMessage "Unable to process authentication"
 
-loadSessionConfigFromFile :: IO (Either String Session.SessionConfig)
+loadSessionConfigFromFile :: IO (Either String SessionConfig)
 loadSessionConfigFromFile = do
   mSecret <- lookupEnv "FOUCL_SESSION_SECRET"
   mConfigPath <- lookupEnv "FOUCL_CONFIG_FILE"
@@ -122,14 +122,14 @@ loadSessionConfigFromFile = do
             Right fileConfig -> pure $ Right (toSessionConfig secret fileConfig (parseBool =<< mCookieSecureRaw))
 
 
-toSessionConfig :: String -> AppConfigFile -> Maybe Bool -> Session.SessionConfig
+toSessionConfig :: String -> AppConfigFile -> Maybe Bool -> SessionConfig
 toSessionConfig secret AppConfigFile {appSession = SessionConfigFile {sessionCookieNameFile, sessionAbsoluteTtlSecondsFile, sessionIdleTtlSecondsFile}} mCookieSecure =
-  Session.defaultSessionConfig
-    { Session.sessionSecret = secret
-    , Session.sessionCookieName = fromMaybe (Session.sessionCookieName Session.defaultSessionConfig) sessionCookieNameFile
-    , Session.sessionAbsoluteTtlSeconds = fromIntegral (fromMaybe (round (Session.sessionAbsoluteTtlSeconds Session.defaultSessionConfig)) sessionAbsoluteTtlSecondsFile)
-    , Session.sessionIdleTtlSeconds = fromIntegral (fromMaybe (round (Session.sessionIdleTtlSeconds Session.defaultSessionConfig)) sessionIdleTtlSecondsFile)
-    , Session.sessionCookieSecure = fromMaybe (Session.sessionCookieSecure Session.defaultSessionConfig) mCookieSecure
+  defaultSessionConfig
+    { sessionSecret = secret
+    , sessionCookieName = fromMaybe (sessionCookieName defaultSessionConfig) sessionCookieNameFile
+    , sessionAbsoluteTtlSeconds = fromIntegral (fromMaybe (round (sessionAbsoluteTtlSeconds defaultSessionConfig)) sessionAbsoluteTtlSecondsFile)
+    , sessionIdleTtlSeconds = fromIntegral (fromMaybe (round (sessionIdleTtlSeconds defaultSessionConfig)) sessionIdleTtlSecondsFile)
+    , sessionCookieSecure = fromMaybe (sessionCookieSecure defaultSessionConfig) mCookieSecure
     }
 
 parseBool :: String -> Maybe Bool
@@ -153,7 +153,7 @@ runApp = do
         signupRateLimitState <- newMVar []
         tmpDir <- getTemporaryDirectory
         cd <- getCurrentDirectory
-        sessionStore <- Session.mkFileSessionStore (cd </> "data" </> "sessions") sessionConfig
+        sessionStore <- mkFileSessionStore (cd </> "data" </> "sessions") sessionConfig
         simpleHTTP nullConf { port = 8081 } $ do
             log "Incoming request" >> log "=========================END REQUEST====================\n"
             msum [ homePage
@@ -162,7 +162,7 @@ runApp = do
                  , mzero
                  ]
 
-apiController :: MVar [UTCTime] -> FilePath -> Session.SessionConfig -> Session.SessionStore -> ServerPartT IO Response
+apiController :: MVar [UTCTime] -> FilePath -> SessionConfig -> SessionStore -> ServerPartT IO Response
 apiController signupRateLimitState tmpDir sessionConfig sessionStore = dir "api" $ msum [ signupController signupRateLimitState tmpDir
                                                                                           , signinController sessionConfig sessionStore
                                                                                           , signoutController sessionConfig sessionStore
@@ -193,7 +193,7 @@ signupController signupRateLimitState tmpDir = dir "signup" $ do
     rq <- askRq
     (_, mBodyErr) <- liftIO $ bodyInput (signupBodyPolicy tmpDir) rq
     case mBodyErr of
-      Just bodyErr | isTooLargeBodyError bodyErr -> HServer.requestEntityTooLarge $ jsonMessage "Body too large"
+      Just bodyErr | isTooLargeBodyError bodyErr -> requestEntityTooLarge $ jsonMessage "Body too large"
       Just _ -> badRequest "Unable to decode request body"
       Nothing -> do
         allowed <- liftIO $ allowSignupRequest signupRateLimitState
@@ -211,33 +211,33 @@ signupController signupRateLimitState tmpDir = dir "signup" $ do
                   doCreateUser
                   (decode $ unBody body)
 
-          doCreateUser :: Auth.AuthRequest -> ServerPartT IO Response --AppM Response
+          doCreateUser :: AuthRequest -> ServerPartT IO Response --AppM Response
           doCreateUser signupRequest = do
-            res <- liftIO $ runExceptT $ Auth.createUser signupRequest
+            res <- liftIO $ runExceptT $ createUser signupRequest
             either toServerResponse
                    (const $ ok emptyResponse)
                    res
 
-signinController :: Session.SessionConfig -> Session.SessionStore -> ServerPartT IO Response
+signinController :: SessionConfig -> SessionStore -> ServerPartT IO Response
 signinController sessionConfig sessionStore = dir "signin" $ do
   nullDir
   method POST
-  withBusinessHandlingAndInput Auth.signinUser $ \authReq -> do
-    sid <- liftIO $ Session.createSessionForUser sessionStore (Auth.username authReq)
-    let cookieValue = Session.signSessionId (Session.sessionSecret sessionConfig) sid
+  withBusinessHandlingAndInput signinUser $ \authReq -> do
+    sid <- liftIO $ createSessionForUser sessionStore (username authReq)
+    let cookieValue = signSessionId (sessionSecret sessionConfig) sid
     addCookie Session (buildSessionCookie sessionConfig cookieValue)
     ok emptyResponse
 
-signoutController :: Session.SessionConfig -> Session.SessionStore -> ServerPartT IO Response
+signoutController :: SessionConfig -> SessionStore -> ServerPartT IO Response
 signoutController sessionConfig sessionStore = dir "signout" $ do
   nullDir
   method POST
   revokeAll <- isSignoutAllRequested
   mToken <- getSessionCookieValue sessionConfig
-  case mToken >>= Session.verifyAndExtractSessionId (Session.sessionSecret sessionConfig) of
-    Nothing -> HServer.unauthorized $ jsonMessage "Not authenticated"
+  case mToken >>= verifyAndExtractSessionId (sessionSecret sessionConfig) of
+    Nothing -> unauthorized $ jsonMessage "Not authenticated"
     Just sid -> do
-      _ <- liftIO $ if revokeAll then Session.revokeAllForSession sessionStore sid else Session.revokeSession sessionStore sid
+      _ <- liftIO $ if revokeAll then revokeAllForSession sessionStore sid else revokeSession sessionStore sid
       addCookie Expired (buildSessionCookie sessionConfig "")
       ok emptyResponse
 
@@ -245,7 +245,7 @@ signoutController sessionConfig sessionStore = dir "signout" $ do
 
 isSignoutAllRequested :: ServerPartT IO Bool
 isSignoutAllRequested = do
-  mRaw <- (Just <$> HServer.look "all") `mplus` pure Nothing
+  mRaw <- (Just <$> look "all") `mplus` pure Nothing
   pure $ case fmap (map toLower) mRaw of
     Just "true" -> True
     Just "1" -> True
@@ -303,18 +303,18 @@ withBusinessHandlingAndInput handle onSuccess = do
                (const $ onSuccess input)
                res
 
-buildSessionCookie :: Session.SessionConfig -> String -> HCookie.Cookie
+buildSessionCookie :: SessionConfig -> String -> Cookie
 buildSessionCookie sessionConfig cookieValue =
-  (mkCookie (Session.sessionCookieName sessionConfig) cookieValue)
-    { HCookie.secure = Session.sessionCookieSecure sessionConfig
-    , HCookie.httpOnly = True
-    , HCookie.sameSite = HCookie.SameSiteLax
+  (mkCookie (sessionCookieName sessionConfig) cookieValue)
+    { secure = sessionCookieSecure sessionConfig
+    , httpOnly = True
+    , sameSite = SameSiteLax
     }
 
-getSessionCookieValue :: Session.SessionConfig -> ServerPartT IO (Maybe String)
+getSessionCookieValue :: SessionConfig -> ServerPartT IO (Maybe String)
 getSessionCookieValue sessionConfig = do
   mCookieHeader <- getHeaderM "cookie"
-  pure $ mCookieHeader >>= extractCookie (Session.sessionCookieName sessionConfig) . BS8.unpack
+  pure $ mCookieHeader >>= extractCookie (sessionCookieName sessionConfig) . unpack
 
 extractCookie :: String -> String -> Maybe String
 extractCookie cookieName rawCookieHeader =
@@ -335,15 +335,15 @@ splitOn sep s =
 trim :: String -> String
 trim = dropWhile (== ' ')
 
-requireAuth :: Session.SessionConfig -> Session.SessionStore -> (AppContext -> ServerPartT IO Response) -> ServerPartT IO Response
+requireAuth :: SessionConfig -> SessionStore -> (AppContext -> ServerPartT IO Response) -> ServerPartT IO Response
 requireAuth sessionConfig sessionStore handler = do
   mToken <- getSessionCookieValue sessionConfig
-  case mToken >>= Session.verifyAndExtractSessionId (Session.sessionSecret sessionConfig) of
-    Nothing -> HServer.unauthorized $ jsonMessage "Not authenticated"
+  case mToken >>= verifyAndExtractSessionId (sessionSecret sessionConfig) of
+    Nothing -> unauthorized $ jsonMessage "Not authenticated"
     Just sid -> do
-      mPrincipal <- liftIO $ Session.resolveSession sessionStore sid
+      mPrincipal <- liftIO $ resolveSession sessionStore sid
       case mPrincipal of
-        Nothing -> HServer.unauthorized $ jsonMessage "Not authenticated"
+        Nothing -> unauthorized $ jsonMessage "Not authenticated"
         Just principal -> handler AppContext { sessionPrincipal = principal }
 
 
@@ -372,7 +372,7 @@ agendaController _ = dir "v1" $ dir "calendar-items" $ msum [ agendaList
     agendaList = do
       nullDir
       method GET
-      items <- liftIO $ AgendaStorage.getCalendarItems AgendaStorage.defaultCalendarStorageConfig
+      items <- liftIO $ getCalendarItems defaultCalendarStorageConfig
       ok (jsonResponse items)
 
     agendaCreate = do
@@ -385,33 +385,33 @@ agendaController _ = dir "v1" $ dir "calendar-items" $ msum [ agendaList
       where
         handleBody :: RqBody -> ServerPartT IO Response
         handleBody rqBody =
-          case decode' (unBody rqBody) :: Maybe CalendarItem of
+          case decode' (unBody rqBody) :: Maybe Agenda.CalendarItem of
             Nothing -> badRequest "Unable to decode the body as a CalendarItem"
-            Just (NewCalendarItem {content}) -> do
-              created <- liftIO $ AgendaStorage.createCalendarItem AgendaStorage.defaultCalendarStorageConfig content
+            Just (Agenda.NewCalendarItem {Agenda.content}) -> do
+              created <- liftIO $ createCalendarItem defaultCalendarStorageConfig content
               ok (jsonResponse created)
-            Just (ServerCalendarItem {content}) -> do
-              created <- liftIO $ AgendaStorage.createCalendarItem AgendaStorage.defaultCalendarStorageConfig content
+            Just (Agenda.ServerCalendarItem {Agenda.content}) -> do
+              created <- liftIO $ createCalendarItem defaultCalendarStorageConfig content
               ok (jsonResponse created)
 
     agendaValidate = path $ \itemId -> dir "validate" $ do
       nullDir
       method POST
       body <- askRq >>= takeRequestBody
+      let
+        handleBody :: RqBody -> ServerPartT IO Response
+        handleBody rqBody =
+          case decode' (unBody rqBody) :: Maybe Agenda.ValidateRequest of
+            Nothing -> badRequest "Unable to decode the body as a ValidateRequest"
+            Just (Agenda.ValidateRequest minutes) -> do
+              result <- liftIO $ updateCalendarItemDuration defaultCalendarStorageConfig itemId minutes
+              case result of
+                Left CalendarItemNotFound -> notFound emptyResponse
+                Left _ -> internalServerError emptyResponse
+                Right _ -> ok emptyResponse
       maybe (badRequest "Empty body")
             handleBody
             body
-      where
-        handleBody :: RqBody -> ServerPartT IO Response
-        handleBody rqBody =
-          case decode' (unBody rqBody) :: Maybe ValidateRequest of
-            Nothing -> badRequest "Unable to decode the body as a ValidateRequest"
-            Just (ValidateRequest minutes) -> do
-              result <- liftIO $ AgendaStorage.updateCalendarItemDuration AgendaStorage.defaultCalendarStorageConfig itemId minutes
-              case result of
-                Left AgendaStorage.CalendarItemNotFound -> notFound emptyResponse
-                Left _ -> internalServerError emptyResponse
-                Right _ -> ok emptyResponse
 
 crudGet ::CRUDEngine crudType a => crudType -> ServerPartT IO Response
 crudGet crudConfig = do
@@ -455,7 +455,7 @@ crudPost crudConfig = do
 
 createNoteContent :: CRUDEngine crudType a => crudType -> a -> ServerPartT IO Response
 createNoteContent crudConfig noteContent = do
-    recover (logThenGenericInternalError crudConfig) (ok . jsonResponse) $ CrudStorage.createItem crudConfig noteContent
+    recover (logThenGenericInternalError crudConfig) (ok . jsonResponse) $ createItem crudConfig noteContent
 
 logThenGenericInternalError :: (Show e, CRUDEngine crudType a) => crudType -> e -> ServerPartT IO Response
 logThenGenericInternalError crudConfig e = do
@@ -468,7 +468,7 @@ crudDelete crudConfig = do
     log ("crud DELETE on " ++ crudTypeDenomination crudConfig)
     path (\pathId -> do
         nullDir
-        recover (handleDeletionError pathId) (\() -> ok emptyResponse) $ CrudStorage.deleteItem crudConfig pathId)
+        recover (handleDeletionError pathId) (\() -> ok emptyResponse) $ deleteItem crudConfig pathId)
 
 handleDeletionError :: String -> CrudWriteException -> ServerPartT IO Response
 handleDeletionError pathId err = do
@@ -496,7 +496,7 @@ crudPut crudConfig = do
 handleUpdate :: CRUDEngine crudType a => crudType -> Identifiable a -> ServerPartT IO Response
 handleUpdate crudConfig update =
     recoverWith (const . notFound $ jsonMessage "Unable to find storage dir")
-                (ok.jsonResponse <$> CrudStorage.modifyItem crudConfig update)
+                (ok.jsonResponse <$> modifyItem crudConfig update)
 
 serveStaticResource :: ServerPartT IO Response
 serveStaticResource = do

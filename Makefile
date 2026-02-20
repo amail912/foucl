@@ -80,10 +80,11 @@ integration-test:
 	@set -euo pipefail; \
 	$(MAKE) --no-print-directory _prepare-sandbox; \
 	trap '$(DAEMON_SCRIPT) stop --pidfile "$(SANDBOX_PIDFILE)" >/dev/null 2>&1 || true' EXIT INT TERM; \
+	export FOUCL_SESSION_COOKIE_SECURE="$${FOUCL_SESSION_COOKIE_SECURE:-false}"; \
 	( \
 		export FOUCL_SESSION_SECRET="$${FOUCL_SESSION_SECRET:-dev-only-session-secret}"; \
 		export FOUCL_CONFIG_FILE="$${FOUCL_CONFIG_FILE:-$(FOUCL_CONFIG_FILE_DEFAULT)}"; \
-		export FOUCL_SESSION_COOKIE_SECURE="$${FOUCL_SESSION_COOKIE_SECURE:-false}"; \
+		export FOUCL_SESSION_COOKIE_SECURE="$$FOUCL_SESSION_COOKIE_SECURE"; \
 		cd "$(SANDBOX_DIR)"; \
 		$(DAEMON_SCRIPT) start --bin "$(abspath $(SANDBOX_EXE))" --pidfile "$(abspath $(SANDBOX_PIDFILE))"; \
 	); \

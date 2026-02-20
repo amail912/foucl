@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE NamedFieldPuns #-}
 
 module AgendaStorage
   ( CalendarStorageConfig(..)
@@ -15,8 +16,9 @@ import Control.Exception (IOException, try)
 import Data.Aeson (decode, encode)
 import qualified Data.ByteString.Lazy as BL
 import Data.List (isSuffixOf)
-import qualified Data.UUID as UUID (toString)
-import qualified Data.UUID.V4 as UUID (nextRandom)
+import Data.Maybe (catMaybes)
+import Data.UUID (toString)
+import Data.UUID.V4 (nextRandom)
 import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory)
 import System.FilePath ((</>))
 
@@ -80,7 +82,7 @@ calendarFilePath root itemId = root </> itemId ++ ".json"
 
 generateNewId :: FilePath -> IO String
 generateNewId root = do
-  newId <- UUID.toString <$> UUID.nextRandom
+  newId <- toString <$> nextRandom
   let path = calendarFilePath root newId
   exists <- doesFileExist path
   if exists

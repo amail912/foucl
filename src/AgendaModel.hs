@@ -1,6 +1,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE NamedFieldPuns #-}
 
 module AgendaModel
   ( ItemType(..)
@@ -13,7 +14,7 @@ module AgendaModel
 
 import Data.Aeson (FromJSON(..), ToJSON(..), (.:), (.:?), (.=), (.!=), withObject, object, Value(..))
 import Data.Aeson.Types (Parser)
-import qualified Data.HashMap.Strict as HM
+import Data.Aeson.KeyMap (insert)
 import Data.Maybe (catMaybes)
 import GHC.Generics (Generic)
 
@@ -146,11 +147,11 @@ instance ToJSON CalendarItem where
   toJSON (NewCalendarItem {content}) = toJSON content
   toJSON (ServerCalendarItem {content, itemId}) =
     case toJSON content of
-      Object obj -> Object (HM.insert "id" (toJSON itemId) obj)
+      Object obj -> Object (insert "id" (toJSON itemId) obj)
       other -> other
 
 newtype ValidateRequest = ValidateRequest
-  { actualDurationMinutes :: Int
+  { validateDurationMinutes :: Int
   } deriving (Show, Eq, Generic)
 
 instance FromJSON ValidateRequest where

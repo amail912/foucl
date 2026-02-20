@@ -12,8 +12,8 @@ module Session
   ) where
 
 import Data.Aeson (FromJSON(..), ToJSON(..), (.:), (.=), encode, decode, object, withObject)
-import qualified Data.ByteString.Char8 as BS8
-import qualified Data.ByteArray as BA
+import Data.ByteString.Char8 (pack, unpack)
+import Data.ByteArray (constEq)
 import Data.ByteArray.Encoding (Base(Base16), convertToBase)
 import qualified Data.ByteString.Lazy as BL
 import Crypto.Hash.Algorithms (SHA256)
@@ -289,10 +289,10 @@ verifyAndExtractSessionId secret token =
     isHex = all isHexDigit
 
 constantTimeEq :: String -> String -> Bool
-constantTimeEq a b = BA.constEq (BS8.pack a) (BS8.pack b)
+constantTimeEq a b = constEq (pack a) (pack b)
 
 digestFor :: String -> String -> String
-digestFor secret sid = BS8.unpack $ convertToBase Base16 mac
+digestFor secret sid = unpack $ convertToBase Base16 mac
   where
     mac :: HMAC SHA256
-    mac = hmac (BS8.pack secret) (BS8.pack sid)
+    mac = hmac (pack secret) (pack sid)

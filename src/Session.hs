@@ -34,6 +34,7 @@ data SessionConfig = SessionConfig
   , sessionSecret :: !String
   , sessionAbsoluteTtlSeconds :: !NominalDiffTime
   , sessionIdleTtlSeconds :: !NominalDiffTime
+  , sessionCookieSecure :: !Bool
   }
 
 defaultSessionConfig :: SessionConfig
@@ -42,6 +43,7 @@ defaultSessionConfig = SessionConfig
   , sessionSecret = "change-me-in-prod"
   , sessionAbsoluteTtlSeconds = 7 * 24 * 60 * 60
   , sessionIdleTtlSeconds = 24 * 60 * 60
+  , sessionCookieSecure = True
   }
 
 

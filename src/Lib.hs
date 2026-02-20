@@ -29,6 +29,8 @@ import qualified Happstack.Server as HServer
 import qualified Happstack.Server.Internal.Cookie as HCookie
 import Happstack.Server.Internal.MessageWrap (bodyInput, BodyPolicy)
 import Model (NoteContent, ChecklistContent, Content, Identifiable(..))
+import AgendaModel (CalendarItem(..), ValidateRequest(..))
+import qualified AgendaStorage
 import qualified CrudStorage
 import Crud
 import NoteCrud (NoteServiceConfig(..), defaultNoteServiceConfig)
@@ -104,6 +106,7 @@ loadSessionConfigFromFile :: IO (Either String Session.SessionConfig)
 loadSessionConfigFromFile = do
   mSecret <- lookupEnv "FOUCL_SESSION_SECRET"
   mConfigPath <- lookupEnv "FOUCL_CONFIG_FILE"
+  mCookieSecureRaw <- lookupEnv "FOUCL_SESSION_COOKIE_SECURE"
   let configPath = fromMaybe "config/app-config.json" mConfigPath
   case mSecret of
     Nothing -> pure $ Left "Missing required environment variable FOUCL_SESSION_SECRET"
@@ -116,17 +119,27 @@ loadSessionConfigFromFile = do
           decoded <- eitherDecodeFileStrict' configPath :: IO (Either String AppConfigFile)
           case decoded of
             Left err -> pure $ Left ("Unable to parse configuration file: " ++ err)
-            Right fileConfig -> pure $ Right (toSessionConfig secret fileConfig)
+            Right fileConfig -> pure $ Right (toSessionConfig secret fileConfig (parseBool =<< mCookieSecureRaw))
 
 
-toSessionConfig :: String -> AppConfigFile -> Session.SessionConfig
-toSessionConfig secret AppConfigFile {appSession = SessionConfigFile {sessionCookieNameFile, sessionAbsoluteTtlSecondsFile, sessionIdleTtlSecondsFile}} =
+toSessionConfig :: String -> AppConfigFile -> Maybe Bool -> Session.SessionConfig
+toSessionConfig secret AppConfigFile {appSession = SessionConfigFile {sessionCookieNameFile, sessionAbsoluteTtlSecondsFile, sessionIdleTtlSecondsFile}} mCookieSecure =
   Session.defaultSessionConfig
     { Session.sessionSecret = secret
     , Session.sessionCookieName = fromMaybe (Session.sessionCookieName Session.defaultSessionConfig) sessionCookieNameFile
     , Session.sessionAbsoluteTtlSeconds = fromIntegral (fromMaybe (round (Session.sessionAbsoluteTtlSeconds Session.defaultSessionConfig)) sessionAbsoluteTtlSecondsFile)
     , Session.sessionIdleTtlSeconds = fromIntegral (fromMaybe (round (Session.sessionIdleTtlSeconds Session.defaultSessionConfig)) sessionIdleTtlSecondsFile)
+    , Session.sessionCookieSecure = fromMaybe (Session.sessionCookieSecure Session.defaultSessionConfig) mCookieSecure
     }
+
+parseBool :: String -> Maybe Bool
+parseBool raw =
+  case map toLower raw of
+    "true" -> Just True
+    "1" -> Just True
+    "false" -> Just False
+    "0" -> Just False
+    _ -> Nothing
 
 runApp :: IO ()
 runApp = do
@@ -155,6 +168,7 @@ apiController signupRateLimitState tmpDir sessionConfig sessionStore = dir "api"
                                                                                           , signoutController sessionConfig sessionStore
                                                                                           , requireAuth sessionConfig sessionStore noteController
                                                                                           , requireAuth sessionConfig sessionStore checklistController
+                                                                                          , requireAuth sessionConfig sessionStore agendaController
                                                                                           ]
 
 homePage :: ServerPartT IO Response
@@ -292,7 +306,7 @@ withBusinessHandlingAndInput handle onSuccess = do
 buildSessionCookie :: Session.SessionConfig -> String -> HCookie.Cookie
 buildSessionCookie sessionConfig cookieValue =
   (mkCookie (Session.sessionCookieName sessionConfig) cookieValue)
-    { HCookie.secure = True
+    { HCookie.secure = Session.sessionCookieSecure sessionConfig
     , HCookie.httpOnly = True
     , HCookie.sameSite = HCookie.SameSiteLax
     }
@@ -348,6 +362,56 @@ checklistController _ = dir "checklist" $
                                            , crudDelete
                                            , crudPut
                                            ]
+
+agendaController :: AppContext -> ServerPartT IO Response
+agendaController _ = dir "v1" $ dir "calendar-items" $ msum [ agendaList
+                                                            , agendaCreate
+                                                            , agendaValidate
+                                                            ]
+  where
+    agendaList = do
+      nullDir
+      method GET
+      items <- liftIO $ AgendaStorage.getCalendarItems AgendaStorage.defaultCalendarStorageConfig
+      ok (jsonResponse items)
+
+    agendaCreate = do
+      nullDir
+      method POST
+      body <- askRq >>= takeRequestBody
+      maybe (badRequest "Empty body")
+            handleBody
+            body
+      where
+        handleBody :: RqBody -> ServerPartT IO Response
+        handleBody rqBody =
+          case decode' (unBody rqBody) :: Maybe CalendarItem of
+            Nothing -> badRequest "Unable to decode the body as a CalendarItem"
+            Just (NewCalendarItem {content}) -> do
+              created <- liftIO $ AgendaStorage.createCalendarItem AgendaStorage.defaultCalendarStorageConfig content
+              ok (jsonResponse created)
+            Just (ServerCalendarItem {content}) -> do
+              created <- liftIO $ AgendaStorage.createCalendarItem AgendaStorage.defaultCalendarStorageConfig content
+              ok (jsonResponse created)
+
+    agendaValidate = path $ \itemId -> dir "validate" $ do
+      nullDir
+      method POST
+      body <- askRq >>= takeRequestBody
+      maybe (badRequest "Empty body")
+            handleBody
+            body
+      where
+        handleBody :: RqBody -> ServerPartT IO Response
+        handleBody rqBody =
+          case decode' (unBody rqBody) :: Maybe ValidateRequest of
+            Nothing -> badRequest "Unable to decode the body as a ValidateRequest"
+            Just (ValidateRequest minutes) -> do
+              result <- liftIO $ AgendaStorage.updateCalendarItemDuration AgendaStorage.defaultCalendarStorageConfig itemId minutes
+              case result of
+                Left AgendaStorage.CalendarItemNotFound -> notFound emptyResponse
+                Left _ -> internalServerError emptyResponse
+                Right _ -> ok emptyResponse
 
 crudGet ::CRUDEngine crudType a => crudType -> ServerPartT IO Response
 crudGet crudConfig = do

@@ -23,6 +23,8 @@ library
       , Crud
       , NoteCrud
       , ChecklistCrud
+      , AgendaModel
+      , AgendaStorage
       , Auth
       , Session
   other-modules:

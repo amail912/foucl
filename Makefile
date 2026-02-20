@@ -39,7 +39,7 @@ _prepare-sandbox:
 	cabal build exe:foucl >/dev/null; \
 	built_exe="$$(cabal list-bin exe:foucl | tail -n 1)"; \
 	rm -rf "$(SANDBOX_DIR)"; \
-	mkdir -p "$(SANDBOX_DIR)/data/note" "$(SANDBOX_DIR)/data/checklist" "$(SANDBOX_DIR)/data/users"; \
+	mkdir -p "$(SANDBOX_DIR)/data/note" "$(SANDBOX_DIR)/data/checklist" "$(SANDBOX_DIR)/data/users" "$(SANDBOX_DIR)/data/calendar-items"; \
 	cp "$$built_exe" "$(SANDBOX_EXE)"; \
 	chmod +x "$(SANDBOX_EXE)"
 
@@ -62,6 +62,7 @@ start-sandbox:
 	( \
 		export FOUCL_SESSION_SECRET="$${FOUCL_SESSION_SECRET:-dev-only-session-secret}"; \
 		export FOUCL_CONFIG_FILE="$${FOUCL_CONFIG_FILE:-$(FOUCL_CONFIG_FILE_DEFAULT)}"; \
+		export FOUCL_SESSION_COOKIE_SECURE="$${FOUCL_SESSION_COOKIE_SECURE:-false}"; \
 		cd "$(SANDBOX_DIR)"; \
 		$(DAEMON_SCRIPT) start --bin "$(abspath $(SANDBOX_EXE))" --pidfile "$(abspath $(SANDBOX_PIDFILE))"; \
 	); \
@@ -82,6 +83,7 @@ integration-test:
 	( \
 		export FOUCL_SESSION_SECRET="$${FOUCL_SESSION_SECRET:-dev-only-session-secret}"; \
 		export FOUCL_CONFIG_FILE="$${FOUCL_CONFIG_FILE:-$(FOUCL_CONFIG_FILE_DEFAULT)}"; \
+		export FOUCL_SESSION_COOKIE_SECURE="$${FOUCL_SESSION_COOKIE_SECURE:-false}"; \
 		cd "$(SANDBOX_DIR)"; \
 		$(DAEMON_SCRIPT) start --bin "$(abspath $(SANDBOX_EXE))" --pidfile "$(abspath $(SANDBOX_PIDFILE))"; \
 	); \

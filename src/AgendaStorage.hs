@@ -8,6 +8,7 @@ module AgendaStorage
   , CalendarStorageError(..)
   , createCalendarItem
   , getCalendarItems
+  , updateCalendarItem
   , updateCalendarItemDuration
   ) where
 
@@ -76,6 +77,20 @@ updateCalendarItemDuration CalendarStorageConfig {calendarRootPath} itemId minut
               case writeResult of
                 Left _ -> pure (Left CalendarItemWriteFailure)
                 Right _ -> pure (Right updated)
+
+updateCalendarItem :: CalendarStorageConfig -> String -> CalendarItemContent -> IO (Either CalendarStorageError CalendarItem)
+updateCalendarItem CalendarStorageConfig {calendarRootPath} itemId content = do
+  let path = calendarFilePath calendarRootPath itemId
+  exists <- doesFileExist path
+  if not exists
+    then pure (Left CalendarItemNotFound)
+    else do
+      writeResult <- try (BL.writeFile path (encode updated)) :: IO (Either IOException ())
+      case writeResult of
+        Left _ -> pure (Left CalendarItemWriteFailure)
+        Right _ -> pure (Right updated)
+  where
+    updated = ServerCalendarItem { content = content, itemId = itemId }
 
 calendarFilePath :: FilePath -> String -> FilePath
 calendarFilePath root itemId = root </> itemId ++ ".json"

@@ -127,7 +127,7 @@ runIntegrationTests = do
         unauthResponse <- httpBS $ setRequestMethod "GET" unauthReq
         assertStatusCode "Agenda should require auth" 401 unauthResponse
 
-      it "should support agenda create/list/validate lifecycle" $ do
+      it "should support agenda create/list/update/validate lifecycle" $ do
         cookie <- signinOnly baseUsername basePassword
         assertNoAgendaItems cookie
         created <- createAgendaItem cookie agendaItemContent
@@ -141,9 +141,18 @@ runIntegrationTests = do
         case created of
           Agenda.ServerCalendarItem {} -> do
             let sid = Agenda.itemId created
+            let updatedContent = agendaItemContent
+                  { Agenda.title = "Updated agenda item"
+                  , Agenda.status = EnCours
+                  , Agenda.category = Just "updated-category"
+                  }
+            updateAgendaItem cookie (Agenda.ServerCalendarItem { Agenda.content = updatedContent, Agenda.itemId = sid })
+            updatedItemsAfterUpdate <- getAgendaItems cookie
+            let expectedUpdated = Agenda.ServerCalendarItem { Agenda.content = updatedContent, Agenda.itemId = sid }
+            assertEqual "Agenda item should be updated" [expectedUpdated] updatedItemsAfterUpdate
             validateAgendaItem cookie sid 42
             updatedItems <- getAgendaItems cookie
-            let expected = applyDuration 42 created
+            let expected = applyDuration 42 (Agenda.ServerCalendarItem { Agenda.content = updatedContent, Agenda.itemId = sid })
             assertEqual "Agenda item should be updated with duration" [expected] updatedItems
           _ -> assertFailure "Expected ServerCalendarItem response"
   where
@@ -415,10 +424,17 @@ createAgendaItem cookie content = do
   assertStatusCode200 "Agenda create should succeed" postResponse
   pure (getResponseBody postResponse)
 
+updateAgendaItem :: String -> Agenda.CalendarItem -> IO ()
+updateAgendaItem cookie item = do
+  postResponse :: Response Agenda.CalendarItem <- sendRequestWithJSONBodyImplWithCookie (Just cookie) POST CalendarItemsEndpoint item
+  assertStatusCode200 "Agenda update should succeed" postResponse
+
 validateAgendaItem :: String -> String -> Int -> IO ()
 validateAgendaItem cookie itemId minutes = do
-  req <- parseRequest ("POST http://localhost:8081/api/v1/calendar-items/" ++ itemId ++ "/validate")
-  let body = object [ "duree_reelle_minutes" .= minutes ]
+  req <- parseRequest "POST http://localhost:8081/api/v1/calendar-items"
+  let body = object [ "id" .= itemId
+                    , "duree_reelle_minutes" .= minutes
+                    ]
   resp <- httpNoBody $ setRequestMethod "POST"
                    $ setRequestHeader "Cookie" [BS.pack cookie]
                    $ setRequestHeader "Content-Type" ["application/json"]

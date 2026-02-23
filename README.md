@@ -31,7 +31,7 @@ Checklists (auth required):
 Agenda (auth required):
 - `GET /api/v1/calendar-items`
 - `POST /api/v1/calendar-items`
-- `POST /api/v1/calendar-items/:id/validate`
+- Update: `POST /api/v1/calendar-items` with `id` in body updates existing calendar item
 
 ## Lint
 

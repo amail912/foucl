@@ -150,10 +150,12 @@ instance ToJSON CalendarItem where
       Object obj -> Object (insert "id" (toJSON itemId) obj)
       other -> other
 
-newtype ValidateRequest = ValidateRequest
-  { validateDurationMinutes :: Int
+data ValidateRequest = ValidateRequest
+  { validateItemId :: String
+  , validateDurationMinutes :: Int
   } deriving (Show, Eq, Generic)
 
 instance FromJSON ValidateRequest where
   parseJSON = withObject "ValidateRequest" $ \v ->
-    ValidateRequest <$> v .: "duree_reelle_minutes"
+    ValidateRequest <$> v .: "id"
+                    <*> v .: "duree_reelle_minutes"

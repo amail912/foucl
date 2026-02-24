@@ -324,7 +324,13 @@ extractCookie cookieName rawCookieHeader =
       matches = filter (isPrefixOf targetPrefix) normalized
   in case matches of
        [] -> Nothing
-       (x:_) -> Just $ drop (length targetPrefix) x
+       (x:_) -> Just $ unquoteCookieValue $ drop (length targetPrefix) x
+
+unquoteCookieValue :: String -> String
+unquoteCookieValue value =
+  case value of
+    ('"':rest) | not (null rest) && last rest == '"' -> init rest
+    _ -> value
 
 splitOn :: Char -> String -> [String]
 splitOn sep s =

@@ -122,6 +122,14 @@ runIntegrationTests = do
                                 blockedReq
         assertStatusCode "Signup should be blocked when rate limit is reached" 400 blockedResponse
 
+      it "should accept quoted session cookie values for auth" $ do
+        rawCookie <- signinOnlyRawCookie baseUsername basePassword
+        protectedReq <- parseRequest "GET http://localhost:8081/api/note"
+        protectedResponse <- httpBS $ setRequestMethod "GET"
+                                 $ setRequestHeader "Cookie" [BS.pack rawCookie]
+                                 protectedReq
+        assertStatusCode "Quoted cookie should authenticate" 200 protectedResponse
+
       it "should require auth for agenda endpoints" $ do
         unauthReq <- parseRequest "GET http://localhost:8081/api/v1/calendar-items"
         unauthResponse <- httpBS $ setRequestMethod "GET" unauthReq
@@ -230,6 +238,14 @@ signinOnly username password = do
   case getFirstSetCookie signinResponse of
     Nothing -> assertFailure "Expected Set-Cookie header" >> pure ""
     Just header -> pure (extractCookiePair header)
+
+signinOnlyRawCookie :: String -> String -> IO String
+signinOnlyRawCookie username password = do
+  signinResponse <- performSignin username password
+  assertStatusCode "Signin should succeed" 200 signinResponse
+  case getFirstSetCookie signinResponse of
+    Nothing -> assertFailure "Expected Set-Cookie header" >> pure ""
+    Just header -> pure (BS.unpack (BS.takeWhile (/= ';') header))
 
 authPayload :: String -> String -> Value
 authPayload username password =

@@ -62,6 +62,8 @@ checklistServiceTests = test [ "Creating a checklist should create a new file in
 agendaStorageTests = test [ "Creating an agenda item should persist it and return an id" ~: agendaCreateAndList
                           , "Validating an agenda item should update duration only" ~: agendaValidateUpdatesDuration
                           , "Validating an unknown agenda item should fail" ~: agendaValidateMissing
+                          , "Agenda items should be isolated per user" ~: agendaUserIsolation
+                          , "Deleting an agenda item should remove only the owner's item" ~: agendaDelete
                           ]
 
 createTest :: ContentGen crudConfig a => crudConfig -> IO ()
@@ -185,9 +187,10 @@ instance ContentGen ChecklistServiceConfig ChecklistContent where
 
 agendaCreateAndList :: IO ()
 agendaCreateAndList = withEmptyCalendarDir $ \config -> do
+    let userId = "alice"
     let content = sampleAgendaContent
-    created <- createCalendarItem config content
-    items <- getCalendarItems config
+    created <- createCalendarItem config userId content
+    items <- getCalendarItems config userId
     case created of
       Agenda.ServerCalendarItem {} -> do
         let sid = Agenda.itemId created
@@ -199,12 +202,13 @@ agendaCreateAndList = withEmptyCalendarDir $ \config -> do
 
 agendaValidateUpdatesDuration :: IO ()
 agendaValidateUpdatesDuration = withEmptyCalendarDir $ \config -> do
-    created <- createCalendarItem config sampleAgendaContent
+    let userId = "alice"
+    created <- createCalendarItem config userId sampleAgendaContent
     case created of
       Agenda.ServerCalendarItem {} -> do
         let sid = Agenda.itemId created
             storedContent = Agenda.content created
-        result <- updateCalendarItemDuration config sid 55
+        result <- updateCalendarItemDuration config userId sid 55
         case result of
           Left err -> assertFailure ("Expected successful validation, got " ++ show err)
           Right updated -> do
@@ -214,10 +218,54 @@ agendaValidateUpdatesDuration = withEmptyCalendarDir $ \config -> do
 
 agendaValidateMissing :: IO ()
 agendaValidateMissing = withEmptyCalendarDir $ \config -> do
-    result <- updateCalendarItemDuration config "missing-id" 30
+    result <- updateCalendarItemDuration config "alice" "missing-id" 30
     case result of
       Left CalendarItemNotFound -> assertBool "Expected not found error" True
       _ -> assertFailure "Expected CalendarItemNotFound error"
+
+agendaUserIsolation :: IO ()
+agendaUserIsolation = withEmptyCalendarDir $ \config -> do
+    let ownerUserId = "alice"
+        otherUserId = "bob"
+    created <- createCalendarItem config ownerUserId sampleAgendaContent
+    ownerItems <- getCalendarItems config ownerUserId
+    otherItems <- getCalendarItems config otherUserId
+    assertEqual "Owner should see created agenda item" [created] ownerItems
+    assertEqual "Other user should not see owner's agenda item" [] otherItems
+    case created of
+      Agenda.ServerCalendarItem {} -> do
+        let sid = Agenda.itemId created
+        updateResult <- updateCalendarItem config otherUserId sid sampleAgendaContent
+        validateResult <- updateCalendarItemDuration config otherUserId sid 12
+        case updateResult of
+          Left CalendarItemNotFound -> pure ()
+          other -> assertFailure ("Expected CalendarItemNotFound on cross-user update, got " ++ show other)
+        case validateResult of
+          Left CalendarItemNotFound -> pure ()
+          other -> assertFailure ("Expected CalendarItemNotFound on cross-user validate, got " ++ show other)
+      _ -> assertFailure "Expected ServerCalendarItem from create"
+
+agendaDelete :: IO ()
+agendaDelete = withEmptyCalendarDir $ \config -> do
+    let ownerUserId = "alice"
+        otherUserId = "bob"
+    created <- createCalendarItem config ownerUserId sampleAgendaContent
+    case created of
+      Agenda.ServerCalendarItem {} -> do
+        let sid = Agenda.itemId created
+        otherDelete <- deleteCalendarItem config otherUserId sid
+        case otherDelete of
+          Left CalendarItemNotFound -> pure ()
+          other -> assertFailure ("Expected CalendarItemNotFound on cross-user delete, got " ++ show other)
+        deleteResult <- deleteCalendarItem config ownerUserId sid
+        case deleteResult of
+          Left err -> assertFailure ("Expected successful delete, got " ++ show err)
+          Right () -> do
+            ownerItems <- getCalendarItems config ownerUserId
+            otherItems <- getCalendarItems config otherUserId
+            assertEqual "Owner agenda should be empty after delete" [] ownerItems
+            assertEqual "Other user agenda should still be empty" [] otherItems
+      _ -> assertFailure "Expected ServerCalendarItem from create"
 
 sampleAgendaContent :: Agenda.CalendarItemContent
 sampleAgendaContent = Agenda.CalendarItemContent

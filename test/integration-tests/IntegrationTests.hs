@@ -20,12 +20,17 @@ import           GHC.Generics          (Generic)
 import           Network.HTTP.Simple
 import           Test.Hspec
 import           Test.HUnit
+import           Control.Exception (bracket_)
+import           Control.Monad.Trans.Except (runExceptT)
 import           Data.Time.Clock.POSIX (getPOSIXTime)
 import           Data.List (isInfixOf)
 import           Data.Char (toLower)
 import           System.Environment (lookupEnv)
+import           System.Directory (getCurrentDirectory, setCurrentDirectory)
+import           Data.Text (pack)
 import AgendaModel (ItemStatus(..), ItemType(..))
 import qualified AgendaModel as Agenda (CalendarItem(..), CalendarItemContent(..))
+import Auth (AuthRequest(..), AuthError(..), createUser)
 import Model
 
 -- ===================== Constants ==============================
@@ -36,8 +41,10 @@ checklistEndpoint = "/checklist"
 runIntegrationTests :: IO ()
 runIntegrationTests = do
   let baseUsername = "integration-base-user"
+      otherUsername = "integration-other-user"
       basePassword = "averystrongpass" :: String
   _ <- signupAndSignin baseUsername basePassword
+  ensureSandboxUser otherUsername basePassword
   expectedCookieSecure <- resolveCookieSecureExpectation
   hspec $ do
     describe "Integration Tests" $ do
@@ -135,7 +142,7 @@ runIntegrationTests = do
         unauthResponse <- httpBS $ setRequestMethod "GET" unauthReq
         assertStatusCode "Agenda should require auth" 401 unauthResponse
 
-      it "should support agenda create/list/update/validate lifecycle" $ do
+      it "should support agenda create/list/update/validate/delete lifecycle" $ do
         cookie <- signinOnly baseUsername basePassword
         assertNoAgendaItems cookie
         created <- createAgendaItem cookie agendaItemContent
@@ -162,6 +169,33 @@ runIntegrationTests = do
             updatedItems <- getAgendaItems cookie
             let expected = applyDuration 42 (Agenda.ServerCalendarItem { Agenda.content = updatedContent, Agenda.itemId = sid })
             assertEqual "Agenda item should be updated with duration" [expected] updatedItems
+            deleteAgendaItem cookie sid
+            assertNoAgendaItems cookie
+          _ -> assertFailure "Expected ServerCalendarItem response"
+
+      it "should isolate agenda items by authenticated user" $ do
+        otherCookie <- signinOnly otherUsername basePassword
+        ownerCookie <- signinOnly baseUsername basePassword
+        assertNoAgendaItems ownerCookie
+        assertNoAgendaItems otherCookie
+        created <- createAgendaItem ownerCookie agendaItemContent
+        ownerItems <- getAgendaItems ownerCookie
+        otherItems <- getAgendaItems otherCookie
+        assertEqual "Owner should see created agenda item" [created] ownerItems
+        assertEqual "Other user should not see owner's agenda item" [] otherItems
+        case created of
+          Agenda.ServerCalendarItem {} -> do
+            let sid = Agenda.itemId created
+            let updatedContent = agendaItemContent
+                  { Agenda.title = "Cross user update attempt"
+                  , Agenda.status = EnCours
+                  }
+            updateAgendaItemExpectStatus otherCookie (Agenda.ServerCalendarItem { Agenda.content = updatedContent, Agenda.itemId = sid }) 404
+            validateAgendaItemExpectStatus otherCookie sid 24 404
+            deleteAgendaItemExpectStatus otherCookie sid 404
+            deleteAgendaItem ownerCookie sid
+            assertNoAgendaItems ownerCookie
+            assertNoAgendaItems otherCookie
           _ -> assertFailure "Expected ServerCalendarItem response"
   where
     firstChecklistContent    = ChecklistContent { name = "First checklist"
@@ -246,6 +280,17 @@ signinOnlyRawCookie username password = do
   case getFirstSetCookie signinResponse of
     Nothing -> assertFailure "Expected Set-Cookie header" >> pure ""
     Just header -> pure (BS.unpack (BS.takeWhile (/= ';') header))
+
+ensureSandboxUser :: String -> String -> IO ()
+ensureSandboxUser username password = do
+  cwd <- getCurrentDirectory
+  let sandboxDir = cwd ++ "/dist-newstyle/sandbox/foucl"
+  bracket_ (setCurrentDirectory sandboxDir) (setCurrentDirectory cwd) $ do
+    result <- runExceptT $ createUser $ AuthRequest { username = username, password = pack password }
+    case result of
+      Right () -> pure ()
+      Left UserAlreadyExists -> pure ()
+      Left _ -> assertFailure "Expected sandbox user creation to succeed"
 
 authPayload :: String -> String -> Value
 authPayload username password =
@@ -445,6 +490,15 @@ updateAgendaItem cookie item = do
   postResponse :: Response Agenda.CalendarItem <- sendRequestWithJSONBodyImplWithCookie (Just cookie) POST CalendarItemsEndpoint item
   assertStatusCode200 "Agenda update should succeed" postResponse
 
+updateAgendaItemExpectStatus :: String -> Agenda.CalendarItem -> Int -> IO ()
+updateAgendaItemExpectStatus cookie item expectedStatus = do
+  req <- parseRequest "POST http://localhost:8081/api/v1/calendar-items"
+  resp <- httpNoBody $ setRequestMethod "POST"
+                   $ setRequestHeader "Cookie" [BS.pack cookie]
+                   $ setRequestHeader "Content-Type" ["application/json"]
+                   $ setRequestBodyJSON item req
+  assertStatusCode "Agenda update should return expected status" expectedStatus resp
+
 validateAgendaItem :: String -> String -> Int -> IO ()
 validateAgendaItem cookie itemId minutes = do
   req <- parseRequest "POST http://localhost:8081/api/v1/calendar-items"
@@ -456,3 +510,25 @@ validateAgendaItem cookie itemId minutes = do
                    $ setRequestHeader "Content-Type" ["application/json"]
                    $ setRequestBodyJSON body req
   assertStatusCode "Agenda validate should succeed" 200 resp
+
+validateAgendaItemExpectStatus :: String -> String -> Int -> Int -> IO ()
+validateAgendaItemExpectStatus cookie itemId minutes expectedStatus = do
+  req <- parseRequest "POST http://localhost:8081/api/v1/calendar-items"
+  let body = object [ "id" .= itemId
+                    , "duree_reelle_minutes" .= minutes
+                    ]
+  resp <- httpNoBody $ setRequestMethod "POST"
+                   $ setRequestHeader "Cookie" [BS.pack cookie]
+                   $ setRequestHeader "Content-Type" ["application/json"]
+                   $ setRequestBodyJSON body req
+  assertStatusCode "Agenda validate should return expected status" expectedStatus resp
+
+deleteAgendaItem :: String -> String -> IO ()
+deleteAgendaItem cookie itemId = deleteAgendaItemExpectStatus cookie itemId 200
+
+deleteAgendaItemExpectStatus :: String -> String -> Int -> IO ()
+deleteAgendaItemExpectStatus cookie itemId expectedStatus = do
+  req <- parseRequest ("DELETE http://localhost:8081/api/v1/calendar-items/" ++ itemId)
+  resp <- httpNoBody $ setRequestMethod "DELETE"
+                   $ setRequestHeader "Cookie" [BS.pack cookie] req
+  assertStatusCode "Agenda delete should return expected status" expectedStatus resp

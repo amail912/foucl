@@ -7,6 +7,7 @@ module AgendaStorage
   , defaultCalendarStorageConfig
   , CalendarStorageError(..)
   , createCalendarItem
+  , deleteCalendarItem
   , getCalendarItems
   , updateCalendarItem
   , updateCalendarItemDuration
@@ -20,7 +21,7 @@ import Data.List (isSuffixOf)
 import Data.Maybe (catMaybes)
 import Data.UUID (toString)
 import Data.UUID.V4 (nextRandom)
-import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory)
+import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory, removeFile)
 import System.FilePath ((</>))
 
 newtype CalendarStorageConfig = CalendarStorageConfig
@@ -36,25 +37,27 @@ data CalendarStorageError
   | CalendarItemWriteFailure
   deriving (Show, Eq)
 
-createCalendarItem :: CalendarStorageConfig -> CalendarItemContent -> IO CalendarItem
-createCalendarItem CalendarStorageConfig {calendarRootPath} content = do
-  createDirectoryIfMissing True calendarRootPath
-  newId <- generateNewId calendarRootPath
+createCalendarItem :: CalendarStorageConfig -> String -> CalendarItemContent -> IO CalendarItem
+createCalendarItem config userId content = do
+  let userRootPath = userCalendarRootPath config userId
+  createDirectoryIfMissing True userRootPath
+  newId <- generateNewId userRootPath
   let item = ServerCalendarItem { content = content, itemId = newId }
-  BL.writeFile (calendarFilePath calendarRootPath newId) (encode item)
+  BL.writeFile (calendarFilePath userRootPath newId) (encode item)
   pure item
 
-getCalendarItems :: CalendarStorageConfig -> IO [CalendarItem]
-getCalendarItems CalendarStorageConfig {calendarRootPath} = do
-  createDirectoryIfMissing True calendarRootPath
-  files <- listDirectory calendarRootPath
+getCalendarItems :: CalendarStorageConfig -> String -> IO [CalendarItem]
+getCalendarItems config userId = do
+  let userRootPath = userCalendarRootPath config userId
+  createDirectoryIfMissing True userRootPath
+  files <- listDirectory userRootPath
   let jsonFiles = filter (".json" `isSuffixOf`) files
-  items <- mapM (readItemFromFile calendarRootPath) jsonFiles
+  items <- mapM (readItemFromFile userRootPath) jsonFiles
   pure (catMaybes items)
 
-updateCalendarItemDuration :: CalendarStorageConfig -> String -> Int -> IO (Either CalendarStorageError CalendarItem)
-updateCalendarItemDuration CalendarStorageConfig {calendarRootPath} itemId minutes = do
-  let path = calendarFilePath calendarRootPath itemId
+updateCalendarItemDuration :: CalendarStorageConfig -> String -> String -> Int -> IO (Either CalendarStorageError CalendarItem)
+updateCalendarItemDuration config userId itemId minutes = do
+  let path = calendarFilePath (userCalendarRootPath config userId) itemId
   exists <- doesFileExist path
   if not exists
     then pure (Left CalendarItemNotFound)
@@ -78,22 +81,37 @@ updateCalendarItemDuration CalendarStorageConfig {calendarRootPath} itemId minut
                 Left _ -> pure (Left CalendarItemWriteFailure)
                 Right _ -> pure (Right updated)
 
-updateCalendarItem :: CalendarStorageConfig -> String -> CalendarItemContent -> IO (Either CalendarStorageError CalendarItem)
-updateCalendarItem CalendarStorageConfig {calendarRootPath} itemId content = do
-  let path = calendarFilePath calendarRootPath itemId
+updateCalendarItem :: CalendarStorageConfig -> String -> String -> CalendarItemContent -> IO (Either CalendarStorageError CalendarItem)
+updateCalendarItem config userId itemId content = do
+  let path = calendarFilePath (userCalendarRootPath config userId) itemId
   exists <- doesFileExist path
   if not exists
     then pure (Left CalendarItemNotFound)
     else do
       writeResult <- try (BL.writeFile path (encode updated)) :: IO (Either IOException ())
       case writeResult of
-        Left _ -> pure (Left CalendarItemWriteFailure)
-        Right _ -> pure (Right updated)
+                Left _ -> pure (Left CalendarItemWriteFailure)
+                Right _ -> pure (Right updated)
   where
     updated = ServerCalendarItem { content = content, itemId = itemId }
 
+deleteCalendarItem :: CalendarStorageConfig -> String -> String -> IO (Either CalendarStorageError ())
+deleteCalendarItem config userId itemId = do
+  let path = calendarFilePath (userCalendarRootPath config userId) itemId
+  exists <- doesFileExist path
+  if not exists
+    then pure (Left CalendarItemNotFound)
+    else do
+      deleteResult <- try (removeFile path) :: IO (Either IOException ())
+      case deleteResult of
+        Left _ -> pure (Left CalendarItemWriteFailure)
+        Right _ -> pure (Right ())
+
 calendarFilePath :: FilePath -> String -> FilePath
 calendarFilePath root itemId = root </> itemId ++ ".json"
+
+userCalendarRootPath :: CalendarStorageConfig -> String -> FilePath
+userCalendarRootPath CalendarStorageConfig {calendarRootPath} userId = calendarRootPath </> userId
 
 generateNewId :: FilePath -> IO String
 generateNewId root = do

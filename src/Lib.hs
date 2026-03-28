@@ -30,7 +30,7 @@ import Happstack.Server.Internal.Cookie (Cookie(..), SameSite(..))
 import Happstack.Server.Internal.MessageWrap (bodyInput, BodyPolicy)
 import Model (NoteContent, ChecklistContent, Content, Identifiable(..))
 import qualified AgendaModel as Agenda
-import AgendaStorage (createCalendarItem, defaultCalendarStorageConfig, getCalendarItems, updateCalendarItem, updateCalendarItemDuration, CalendarStorageError(..))
+import AgendaStorage (createCalendarItem, defaultCalendarStorageConfig, deleteCalendarItem, getCalendarItems, updateCalendarItem, updateCalendarItemDuration, CalendarStorageError(..))
 import CrudStorage (createItem, getAllItems, deleteItem, modifyItem)
 import Crud
 import NoteCrud (NoteServiceConfig(..), defaultNoteServiceConfig)
@@ -370,14 +370,16 @@ checklistController _ = dir "checklist" $
                                            ]
 
 agendaController :: AppContext -> ServerPartT IO Response
-agendaController _ = dir "v1" $ dir "calendar-items" $ msum [ agendaList
-                                                            , agendaCreate
-                                                            ]
+agendaController AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
+  dir "v1" $ dir "calendar-items" $ msum [ agendaList
+                                         , agendaCreate
+                                         , agendaDelete
+                                         ]
   where
     agendaList = do
       nullDir
       method GET
-      items <- liftIO $ getCalendarItems defaultCalendarStorageConfig
+      items <- liftIO $ getCalendarItems defaultCalendarStorageConfig principalUserId
       ok (jsonResponse items)
 
     agendaCreate = do
@@ -392,10 +394,10 @@ agendaController _ = dir "v1" $ dir "calendar-items" $ msum [ agendaList
         handleBody rqBody =
           case decode' (unBody rqBody) :: Maybe Agenda.CalendarItem of
             Just (Agenda.NewCalendarItem {Agenda.content}) -> do
-              created <- liftIO $ createCalendarItem defaultCalendarStorageConfig content
+              created <- liftIO $ createCalendarItem defaultCalendarStorageConfig principalUserId content
               ok (jsonResponse created)
             Just (Agenda.ServerCalendarItem {Agenda.content, Agenda.itemId}) -> do
-              result <- liftIO $ updateCalendarItem defaultCalendarStorageConfig itemId content
+              result <- liftIO $ updateCalendarItem defaultCalendarStorageConfig principalUserId itemId content
               case result of
                 Left CalendarItemNotFound -> notFound emptyResponse
                 Left _ -> internalServerError emptyResponse
@@ -404,11 +406,21 @@ agendaController _ = dir "v1" $ dir "calendar-items" $ msum [ agendaList
               case decode' (unBody rqBody) :: Maybe Agenda.ValidateRequest of
                 Nothing -> badRequest "Unable to decode the body as a CalendarItem or ValidateRequest"
                 Just (Agenda.ValidateRequest itemId minutes) -> do
-                  result <- liftIO $ updateCalendarItemDuration defaultCalendarStorageConfig itemId minutes
+                  result <- liftIO $ updateCalendarItemDuration defaultCalendarStorageConfig principalUserId itemId minutes
                   case result of
                     Left CalendarItemNotFound -> notFound emptyResponse
                     Left _ -> internalServerError emptyResponse
                     Right _ -> ok emptyResponse
+
+    agendaDelete = do
+      method DELETE
+      path $ \itemId -> do
+        nullDir
+        result <- liftIO $ deleteCalendarItem defaultCalendarStorageConfig principalUserId itemId
+        case result of
+          Left CalendarItemNotFound -> notFound emptyResponse
+          Left _ -> internalServerError emptyResponse
+          Right () -> ok emptyResponse
 
 crudGet ::CRUDEngine crudType a => crudType -> ServerPartT IO Response
 crudGet crudConfig = do

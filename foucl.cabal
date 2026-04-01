@@ -25,6 +25,7 @@ library
       , ChecklistCrud
       , AgendaModel
       , AgendaStorage
+      , TripSharingStorage
       , Auth
       , Session
   other-modules:

@@ -24,6 +24,7 @@ import ChecklistCrud (ChecklistServiceConfig(..))
 import AgendaModel (ItemStatus(..), ItemType(..))
 import qualified AgendaModel as Agenda (CalendarItem(..), CalendarItemContent(..), TripItemContent(..))
 import AgendaStorage
+import TripSharingStorage
 import Auth
 import Session
 import Data.Text (Text, pack)
@@ -31,7 +32,7 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 import qualified Data.ByteString.Lazy.Char8 as BL8
 
 runUnitTests :: IO ()
-runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, agendaStorageTests, signupValidationTests, signinValidationTests, sessionTests]
+runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, agendaStorageTests, tripSharingStorageTests, signupValidationTests, signinValidationTests, sessionTests]
 
 runTestTTAndExit tests = do
   c <- runTestTT tests
@@ -67,6 +68,13 @@ agendaStorageTests = test [ "Creating an agenda item should persist it and retur
                           , "Agenda items should be isolated per user" ~: agendaUserIsolation
                           , "Deleting an agenda item should remove only the owner's item" ~: agendaDelete
                           ]
+
+tripSharingStorageTests = test [ "Getting shares from empty storage should give an empty list" ~: shareGetEmpty
+                               , "Adding a shared user should persist it in stable order" ~: shareAddAndList
+                               , "Adding the same shared user twice should not duplicate it" ~: shareAddDuplicate
+                               , "Deleting a missing shared user should succeed" ~: shareDeleteMissing
+                               , "Share storage should be isolated per owner" ~: shareOwnerIsolation
+                               ]
 
 createTest :: ContentGen crudConfig a => crudConfig -> IO ()
 createTest config = do
@@ -163,6 +171,9 @@ noteServiceConfig = NoteServiceConfig "target/.foucl/data/note/"
 
 calendarStorageConfig :: CalendarStorageConfig
 calendarStorageConfig = CalendarStorageConfig "target/.foucl/data/calendar-items/"
+
+tripShareStorageConfig :: TripShareStorageConfig
+tripShareStorageConfig = TripShareStorageConfig "target/.foucl/data/trip-sharing/shares/"
 
 withEmptyDir :: CRUDEngine crudConfig a => crudConfig -> (crudConfig -> IO ()) -> IO ()
 withEmptyDir config _test = do
@@ -293,6 +304,63 @@ agendaDelete = withEmptyCalendarDir $ \config -> do
             assertEqual "Other user agenda should still be empty" [] otherItems
       _ -> assertFailure "Expected ServerCalendarItem from create"
 
+shareGetEmpty :: IO ()
+shareGetEmpty = withEmptyTripShareDir $ \config -> do
+    result <- getSharedUsers config "alice"
+    case result of
+      Left err -> assertFailure ("Expected empty share list, got " ++ show err)
+      Right usernames -> assertEqual "Expected no shared users" [] usernames
+
+shareAddAndList :: IO ()
+shareAddAndList = withEmptyTripShareDir $ \config -> do
+    addFirst <- addSharedUser config "alice" "charlie"
+    addSecond <- addSharedUser config "alice" "bob"
+    case (addFirst, addSecond) of
+      (Right (), Right ()) -> do
+        result <- getSharedUsers config "alice"
+        case result of
+          Left err -> assertFailure ("Expected share list to load, got " ++ show err)
+          Right usernames -> assertEqual "Expected stable sorted shared users" ["bob", "charlie"] usernames
+      _ -> assertFailure "Expected share additions to succeed"
+
+shareAddDuplicate :: IO ()
+shareAddDuplicate = withEmptyTripShareDir $ \config -> do
+    firstAdd <- addSharedUser config "alice" "bob"
+    secondAdd <- addSharedUser config "alice" "bob"
+    case (firstAdd, secondAdd) of
+      (Right (), Right ()) -> do
+        result <- getSharedUsers config "alice"
+        case result of
+          Left err -> assertFailure ("Expected deduplicated share list, got " ++ show err)
+          Right usernames -> assertEqual "Expected duplicate add to be idempotent" ["bob"] usernames
+      _ -> assertFailure "Expected share additions to succeed"
+
+shareDeleteMissing :: IO ()
+shareDeleteMissing = withEmptyTripShareDir $ \config -> do
+    result <- deleteSharedUser config "alice" "bob"
+    case result of
+      Left err -> assertFailure ("Expected missing delete to succeed, got " ++ show err)
+      Right () -> do
+        sharedUsers <- getSharedUsers config "alice"
+        case sharedUsers of
+          Left err -> assertFailure ("Expected empty share list, got " ++ show err)
+          Right usernames -> assertEqual "Expected missing delete to leave share list empty" [] usernames
+
+shareOwnerIsolation :: IO ()
+shareOwnerIsolation = withEmptyTripShareDir $ \config -> do
+    ownerAdd <- addSharedUser config "alice" "bob"
+    otherAdd <- addSharedUser config "carol" "dave"
+    case (ownerAdd, otherAdd) of
+      (Right (), Right ()) -> do
+        ownerUsers <- getSharedUsers config "alice"
+        otherUsers <- getSharedUsers config "carol"
+        case (ownerUsers, otherUsers) of
+          (Right owner, Right other) -> do
+            assertEqual "Expected alice shares to stay isolated" ["bob"] owner
+            assertEqual "Expected carol shares to stay isolated" ["dave"] other
+          _ -> assertFailure "Expected both share lists to load"
+      _ -> assertFailure "Expected owner-isolated additions to succeed"
+
 sampleAgendaContent :: Agenda.CalendarItemContent
 sampleAgendaContent = Agenda.CalendarItemContent
   { Agenda.itemType = Intention
@@ -335,6 +403,18 @@ withEmptyCalendarDir action = do
     cleanup = do
       exists <- doesDirectoryExist calendarDir
       when exists $ removeDirectoryRecursive calendarDir
+
+withEmptyTripShareDir :: (TripShareStorageConfig -> IO ()) -> IO ()
+withEmptyTripShareDir action = do
+    exists <- doesDirectoryExist shareDir
+    when exists $ removeDirectoryRecursive shareDir
+    action tripShareStorageConfig
+    cleanup
+  where
+    shareDir = tripShareRootPath tripShareStorageConfig
+    cleanup = do
+      exists <- doesDirectoryExist shareDir
+      when exists $ removeDirectoryRecursive shareDir
 
 signupValidationTests = test [ "Signup should reject short passwords" ~: rejectShortPassword
                              , "Signup should reject invalid usernames" ~: rejectInvalidUsername

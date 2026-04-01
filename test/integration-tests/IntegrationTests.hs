@@ -43,9 +43,11 @@ runIntegrationTests :: IO ()
 runIntegrationTests = do
   let baseUsername = "integration-base-user"
       otherUsername = "integration-other-user"
+      thirdUsername = "integration-third-user"
       basePassword = "averystrongpass" :: String
   _ <- signupAndSignin baseUsername basePassword
   ensureSandboxUser otherUsername basePassword
+  ensureSandboxUser thirdUsername basePassword
   expectedCookieSecure <- resolveCookieSecureExpectation
   hspec $ do
     describe "Integration Tests" $ do
@@ -148,12 +150,93 @@ runIntegrationTests = do
         unauthResponse <- httpBS $ setRequestMethod "GET" unauthReq
         assertStatusCode "Trip places should require auth" 401 unauthResponse
 
+      it "should require auth for trip-sharing shares endpoint" $ do
+        unauthReq <- parseRequest "GET http://localhost:8081/api/v1/trip-sharing/shares"
+        unauthResponse <- httpBS $ setRequestMethod "GET" unauthReq
+        assertStatusCode "Trip-sharing shares should require auth" 401 unauthResponse
+
       it "should expose the fixed trip places catalog" $ do
         cookie <- signinOnly baseUsername basePassword
         places <- getTripPlaces cookie
         repeatedPlaces <- getTripPlaces cookie
         assertEqual "Trip places should match the fixed catalog" expectedTripPlaces places
         assertEqual "Trip places should stay stable across requests" expectedTripPlaces repeatedPlaces
+
+      it "should support share-list add, list, and delete lifecycle" $ do
+        cookie <- signinOnly baseUsername basePassword
+        clearSharedUsers cookie [otherUsername, thirdUsername]
+        assertNoSharedUsers cookie
+        addSharedUser cookie otherUsername
+        sharedUsers <- getSharedUsersList cookie
+        assertEqual "Expected shared user to be listed" [shareUserValue otherUsername] sharedUsers
+        deleteSharedUser cookie otherUsername
+        assertNoSharedUsers cookie
+
+      it "should keep share additions idempotent" $ do
+        cookie <- signinOnly baseUsername basePassword
+        clearSharedUsers cookie [otherUsername]
+        addSharedUser cookie otherUsername
+        addSharedUser cookie otherUsername
+        sharedUsers <- getSharedUsersList cookie
+        assertEqual "Expected duplicate share add to be ignored" [shareUserValue otherUsername] sharedUsers
+        deleteSharedUser cookie otherUsername
+        assertNoSharedUsers cookie
+
+      it "should keep deleting a missing shared user idempotent" $ do
+        cookie <- signinOnly baseUsername basePassword
+        clearSharedUsers cookie [otherUsername]
+        deleteSharedUser cookie otherUsername
+        assertNoSharedUsers cookie
+
+      it "should reject adding an unknown shared user" $ do
+        cookie <- signinOnly baseUsername basePassword
+        clearSharedUsers cookie [otherUsername]
+        addSharedUserExpectMessage cookie "non-existent-shared-user" "username must reference an existing user"
+        assertNoSharedUsers cookie
+
+      it "should reject adding the authenticated user to their own share list" $ do
+        cookie <- signinOnly baseUsername basePassword
+        clearSharedUsers cookie [otherUsername]
+        addSharedUserExpectMessage cookie baseUsername "username must not be the authenticated user"
+        assertNoSharedUsers cookie
+
+      it "should reject malformed share add payloads" $ do
+        cookie <- signinOnly baseUsername basePassword
+        req <- parseRequest "POST http://localhost:8081/api/v1/trip-sharing/shares"
+        resp <- httpJSON $ setRequestMethod "POST"
+                        $ setRequestHeader "Cookie" [BS.pack cookie]
+                        $ setRequestHeader "Content-Type" ["application/json"]
+                        $ setRequestBodyJSON (object []) req
+        assertStatusCode "Malformed share add payload should return 400" 400 resp
+        assertMessageResponse "Unable to decode the body as a TripSharingUser" resp
+
+      it "should isolate share lists by authenticated user" $ do
+        ownerCookie <- signinOnly baseUsername basePassword
+        otherCookie <- signinOnly otherUsername basePassword
+        clearSharedUsers ownerCookie [thirdUsername]
+        clearSharedUsers otherCookie [thirdUsername]
+        addSharedUser ownerCookie thirdUsername
+        deleteSharedUser otherCookie thirdUsername
+        ownerSharedUsers <- getSharedUsersList ownerCookie
+        otherSharedUsers <- getSharedUsersList otherCookie
+        assertEqual "Owner shares should remain visible to the owner only" [shareUserValue thirdUsername] ownerSharedUsers
+        assertEqual "Other user should not see owner shares" [] otherSharedUsers
+        deleteSharedUser ownerCookie thirdUsername
+        assertNoSharedUsers ownerCookie
+        assertNoSharedUsers otherCookie
+
+      it "should return shared users in stable order" $ do
+        cookie <- signinOnly baseUsername basePassword
+        clearSharedUsers cookie [otherUsername, thirdUsername]
+        addSharedUser cookie thirdUsername
+        addSharedUser cookie otherUsername
+        firstRead <- getSharedUsersList cookie
+        secondRead <- getSharedUsersList cookie
+        let expected = [shareUserValue otherUsername, shareUserValue thirdUsername]
+        assertEqual "Expected first read to be sorted" expected firstRead
+        assertEqual "Expected repeated reads to stay stable" expected secondRead
+        clearSharedUsers cookie [otherUsername, thirdUsername]
+        assertNoSharedUsers cookie
 
       it "should support agenda create/list/update/validate/delete lifecycle" $ do
         cookie <- signinOnly baseUsername basePassword
@@ -623,6 +706,10 @@ data TripPlacesEndpoint = TripPlacesEndpoint
 instance Endpoint TripPlacesEndpoint where
     getEndpoint TripPlacesEndpoint = "/api/v1/trip-places"
 
+data TripSharingSharesEndpoint = TripSharingSharesEndpoint
+instance Endpoint TripSharingSharesEndpoint where
+    getEndpoint TripSharingSharesEndpoint = "/api/v1/trip-sharing/shares"
+
 class (ToJSON requestType, FromJSON responseType, Endpoint endpoint, Method methodType) => RequestType methodType endpoint requestType responseType | endpoint methodType -> requestType, endpoint methodType requestType -> responseType where
     sendRequestWithJSONBody :: endpoint -> methodType -> requestType -> IO (Response responseType)
 
@@ -653,6 +740,9 @@ instance RequestType POST CalendarItemsEndpoint Agenda.CalendarItem Agenda.Calen
 instance RequestType GET TripPlacesEndpoint () [Value] where
     sendRequestWithJSONBody endpoint _ = sendRequestWithJSONBodyImpl GET endpoint
 
+instance RequestType GET TripSharingSharesEndpoint () [Value] where
+    sendRequestWithJSONBody endpoint _ = sendRequestWithJSONBodyImpl GET endpoint
+
 assertNoAgendaItems :: String -> Expectation
 assertNoAgendaItems cookie = do
   getResponse :: Response [Agenda.CalendarItem] <- sendRequestWithJSONBodyImplWithCookie (Just cookie) GET CalendarItemsEndpoint ()
@@ -670,6 +760,49 @@ getTripPlaces cookie = do
   getResponse :: Response [Value] <- sendRequestWithJSONBodyImplWithCookie (Just cookie) GET TripPlacesEndpoint ()
   assertStatusCode200 "Trip places list should succeed" getResponse
   pure (getResponseBody getResponse)
+
+getSharedUsersList :: String -> IO [Value]
+getSharedUsersList cookie = do
+  getResponse :: Response [Value] <- sendRequestWithJSONBodyImplWithCookie (Just cookie) GET TripSharingSharesEndpoint ()
+  assertStatusCode200 "Share list should succeed" getResponse
+  pure (getResponseBody getResponse)
+
+assertNoSharedUsers :: String -> IO ()
+assertNoSharedUsers cookie = do
+  sharedUsers <- getSharedUsersList cookie
+  assertEqual "Expected no shared users" [] sharedUsers
+
+addSharedUser :: String -> String -> IO ()
+addSharedUser cookie username = do
+  req <- parseRequest "POST http://localhost:8081/api/v1/trip-sharing/shares"
+  resp <- httpNoBody $ setRequestMethod "POST"
+                   $ setRequestHeader "Cookie" [BS.pack cookie]
+                   $ setRequestHeader "Content-Type" ["application/json"]
+                   $ setRequestBodyJSON (object ["username" .= username]) req
+  assertStatusCode "Share add should succeed" 200 resp
+
+addSharedUserExpectMessage :: String -> String -> String -> IO ()
+addSharedUserExpectMessage cookie username expectedMessage = do
+  req <- parseRequest "POST http://localhost:8081/api/v1/trip-sharing/shares"
+  resp <- httpJSON $ setRequestMethod "POST"
+                  $ setRequestHeader "Cookie" [BS.pack cookie]
+                  $ setRequestHeader "Content-Type" ["application/json"]
+                  $ setRequestBodyJSON (object ["username" .= username]) req
+  assertStatusCode "Share add validation should return 400" 400 resp
+  assertMessageResponse expectedMessage resp
+
+deleteSharedUser :: String -> String -> IO ()
+deleteSharedUser cookie username = do
+  req <- parseRequest ("DELETE http://localhost:8081/api/v1/trip-sharing/shares/" ++ username)
+  resp <- httpNoBody $ setRequestMethod "DELETE"
+                   $ setRequestHeader "Cookie" [BS.pack cookie] req
+  assertStatusCode "Share delete should succeed" 200 resp
+
+clearSharedUsers :: String -> [String] -> IO ()
+clearSharedUsers cookie = mapM_ (deleteSharedUser cookie)
+
+shareUserValue :: String -> Value
+shareUserValue username = object ["username" .= username]
 
 createAgendaItem :: String -> Agenda.CalendarItemContent -> IO Agenda.CalendarItem
 createAgendaItem cookie content = do

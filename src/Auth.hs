@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE NamedFieldPuns #-}
-module Auth (AuthRequest(..), AuthError(..), AuthRequestError(..), createUser, signinUser) where
+module Auth (AuthRequest(..), AuthError(..), AuthRequestError(..), createUser, signinUser, userExists) where
 
 import Prelude hiding (writeFile)
 import Control.Monad (when, unless)
@@ -123,3 +123,13 @@ signinUser (AuthRequest {username, password}) = do
               case checkResult of
                 PasswordCheckSuccess -> pure ()
                 PasswordCheckFail -> throwError InvalidCredentials
+
+userExists :: String -> IO Bool
+userExists username = do
+  cd <- getCurrentDirectory
+  let usersDir = cd </> "data" </> "users"
+      profileFile = usersDir </> username </> "profile.json"
+  safeProfile <- ensureChild usersDir profileFile
+  case safeProfile of
+    Nothing -> pure False
+    Just realProfile -> doesFileExist realProfile

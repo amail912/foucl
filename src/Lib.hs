@@ -31,6 +31,7 @@ import Happstack.Server.Internal.MessageWrap (bodyInput, BodyPolicy)
 import Model (NoteContent, ChecklistContent, Content, Identifiable(..))
 import qualified AgendaModel as Agenda
 import AgendaStorage (createCalendarItem, defaultCalendarStorageConfig, deleteCalendarItem, getCalendarItems, updateCalendarItem, updateCalendarItemDuration, CalendarStorageError(..))
+import TripSharingStorage (addSharedUser, defaultTripShareStorageConfig, deleteSharedUser, getSharedUsers, TripShareStorageError(..))
 import CrudStorage (createItem, getAllItems, deleteItem, modifyItem)
 import Crud
 import NoteCrud (NoteServiceConfig(..), defaultNoteServiceConfig)
@@ -47,7 +48,7 @@ import Data.Time.Format.ISO8601 (iso8601ParseM)
 import GHC.Generics (Generic)
 import Data.ByteString.Lazy.Char8 (writeFile)
 import Filesystem.Path.CurrentOS    (commonPrefix, encodeString, decodeString, collapse, append)
-import Auth (AuthRequest(..), AuthRequestError(..), AuthError(..), createUser, signinUser)
+import Auth (AuthRequest(..), AuthRequestError(..), AuthError(..), createUser, signinUser, userExists)
 import Session (SessionConfig(..), SessionPrincipal(..), SessionStore(..), defaultSessionConfig, mkFileSessionStore, signSessionId, verifyAndExtractSessionId)
 
 type AppM a = ExceptT String (ServerPartT IO) a
@@ -81,8 +82,19 @@ newtype TripPlace = TripPlace
   { tripPlaceName :: String
   }
 
+newtype TripSharingUser = TripSharingUser
+  { tripSharingUsername :: String
+  }
+
 instance ToJSON TripPlace where
   toJSON (TripPlace placeName) = object ["name" .= placeName]
+
+instance ToJSON TripSharingUser where
+  toJSON (TripSharingUser username) = object ["username" .= username]
+
+instance FromJSON TripSharingUser where
+  parseJSON = withObject "TripSharingUser" $ \value -> TripSharingUser
+    <$> value .: "username"
 
 tripPlacesCatalog :: [TripPlace]
 tripPlacesCatalog =
@@ -273,6 +285,7 @@ apiController signupRateLimitState tmpDir sessionConfig sessionStore = dir "api"
                                                                                           , requireAuth sessionConfig sessionStore noteController
                                                                                           , requireAuth sessionConfig sessionStore checklistController
                                                                                           , requireAuth sessionConfig sessionStore tripPlacesController
+                                                                                          , requireAuth sessionConfig sessionStore tripSharingController
                                                                                           , requireAuth sessionConfig sessionStore agendaController
                                                                                           ]
 
@@ -479,6 +492,53 @@ tripPlacesController _ = dir "v1" $ dir "trip-places" $ do
   nullDir
   method GET
   ok (jsonResponse tripPlacesCatalog)
+
+tripSharingController :: AppContext -> ServerPartT IO Response
+tripSharingController AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
+  dir "v1" $ dir "trip-sharing" $ dir "shares" $ msum [ sharesList
+                                                      , sharesAdd
+                                                      , sharesDelete
+                                                      ]
+  where
+    sharesList = do
+      nullDir
+      method GET
+      result <- liftIO $ getSharedUsers defaultTripShareStorageConfig principalUserId
+      case result of
+        Left _ -> internalServerError emptyResponse
+        Right usernames -> ok (jsonResponse (map TripSharingUser usernames))
+
+    sharesAdd = do
+      nullDir
+      method POST
+      body <- askRq >>= takeRequestBody
+      maybe (badRequest "Empty body") handleBody body
+      where
+        handleBody :: RqBody -> ServerPartT IO Response
+        handleBody rqBody =
+          case decode' (unBody rqBody) :: Maybe TripSharingUser of
+            Nothing -> badRequest "Unable to decode the body as a TripSharingUser"
+            Just (TripSharingUser username)
+              | null username -> badRequest "username is required"
+              | username == principalUserId -> badRequest "username must not be the authenticated user"
+              | otherwise -> do
+                  exists <- liftIO $ userExists username
+                  if not exists
+                    then badRequest "username must reference an existing user"
+                    else do
+                      result <- liftIO $ addSharedUser defaultTripShareStorageConfig principalUserId username
+                      case result of
+                        Left _ -> internalServerError emptyResponse
+                        Right () -> ok emptyResponse
+
+    sharesDelete = do
+      method DELETE
+      path $ \username -> do
+        nullDir
+        result <- liftIO $ deleteSharedUser defaultTripShareStorageConfig principalUserId username
+        case result of
+          Left _ -> internalServerError emptyResponse
+          Right () -> ok emptyResponse
 
 agendaController :: AppContext -> ServerPartT IO Response
 agendaController AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =

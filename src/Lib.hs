@@ -31,7 +31,16 @@ import Happstack.Server.Internal.MessageWrap (bodyInput, BodyPolicy)
 import Model (NoteContent, ChecklistContent, Content, Identifiable(..))
 import qualified AgendaModel as Agenda
 import AgendaStorage (createCalendarItem, defaultCalendarStorageConfig, deleteCalendarItem, getCalendarItems, updateCalendarItem, updateCalendarItemDuration, CalendarStorageError(..))
-import TripSharingStorage (addSharedUser, defaultTripShareStorageConfig, deleteSharedUser, getSharedUsers, TripShareStorageError(..))
+import TripSharingStorage
+  ( addSharedUser
+  , addSubscribedUser
+  , defaultTripShareStorageConfig
+  , defaultTripSubscriptionStorageConfig
+  , deleteSharedUser
+  , deleteSubscribedUser
+  , getSharedUsers
+  , getSubscribedUsers
+  )
 import CrudStorage (createItem, getAllItems, deleteItem, modifyItem)
 import Crud
 import NoteCrud (NoteServiceConfig(..), defaultNoteServiceConfig)
@@ -495,10 +504,15 @@ tripPlacesController _ = dir "v1" $ dir "trip-places" $ do
 
 tripSharingController :: AppContext -> ServerPartT IO Response
 tripSharingController AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
-  dir "v1" $ dir "trip-sharing" $ dir "shares" $ msum [ sharesList
-                                                      , sharesAdd
-                                                      , sharesDelete
-                                                      ]
+  dir "v1" $ dir "trip-sharing" $ msum [ dir "shares" $ msum [ sharesList
+                                                             , sharesAdd
+                                                             , sharesDelete
+                                                             ]
+                                      , dir "subscriptions" $ msum [ subscriptionsList
+                                                                   , subscriptionsAdd
+                                                                   , subscriptionsDelete
+                                                                   ]
+                                      ]
   where
     sharesList = do
       nullDir
@@ -536,6 +550,46 @@ tripSharingController AppContext { sessionPrincipal = SessionPrincipal { princip
       path $ \username -> do
         nullDir
         result <- liftIO $ deleteSharedUser defaultTripShareStorageConfig principalUserId username
+        case result of
+          Left _ -> internalServerError emptyResponse
+          Right () -> ok emptyResponse
+
+    subscriptionsList = do
+      nullDir
+      method GET
+      result <- liftIO $ getSubscribedUsers defaultTripSubscriptionStorageConfig principalUserId
+      case result of
+        Left _ -> internalServerError emptyResponse
+        Right usernames -> ok (jsonResponse (map TripSharingUser usernames))
+
+    subscriptionsAdd = do
+      nullDir
+      method POST
+      body <- askRq >>= takeRequestBody
+      maybe (badRequest "Empty body") handleBody body
+      where
+        handleBody :: RqBody -> ServerPartT IO Response
+        handleBody rqBody =
+          case decode' (unBody rqBody) :: Maybe TripSharingUser of
+            Nothing -> badRequest "Unable to decode the body as a TripSharingUser"
+            Just (TripSharingUser username)
+              | null username -> badRequest "username is required"
+              | username == principalUserId -> badRequest "username must not be the authenticated user"
+              | otherwise -> do
+                  exists <- liftIO $ userExists username
+                  if not exists
+                    then badRequest "username must reference an existing user"
+                    else do
+                      result <- liftIO $ addSubscribedUser defaultTripSubscriptionStorageConfig principalUserId username
+                      case result of
+                        Left _ -> internalServerError emptyResponse
+                        Right () -> ok emptyResponse
+
+    subscriptionsDelete = do
+      method DELETE
+      path $ \username -> do
+        nullDir
+        result <- liftIO $ deleteSubscribedUser defaultTripSubscriptionStorageConfig principalUserId username
         case result of
           Left _ -> internalServerError emptyResponse
           Right () -> ok emptyResponse

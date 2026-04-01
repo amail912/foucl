@@ -155,6 +155,11 @@ runIntegrationTests = do
         unauthResponse <- httpBS $ setRequestMethod "GET" unauthReq
         assertStatusCode "Trip-sharing shares should require auth" 401 unauthResponse
 
+      it "should require auth for trip-sharing subscriptions endpoint" $ do
+        unauthReq <- parseRequest "GET http://localhost:8081/api/v1/trip-sharing/subscriptions"
+        unauthResponse <- httpBS $ setRequestMethod "GET" unauthReq
+        assertStatusCode "Trip-sharing subscriptions should require auth" 401 unauthResponse
+
       it "should expose the fixed trip places catalog" $ do
         cookie <- signinOnly baseUsername basePassword
         places <- getTripPlaces cookie
@@ -237,6 +242,97 @@ runIntegrationTests = do
         assertEqual "Expected repeated reads to stay stable" expected secondRead
         clearSharedUsers cookie [otherUsername, thirdUsername]
         assertNoSharedUsers cookie
+
+      it "should support subscription-list add, list, and delete lifecycle" $ do
+        cookie <- signinOnly baseUsername basePassword
+        clearSubscribedUsers cookie [otherUsername, thirdUsername]
+        assertNoSubscribedUsers cookie
+        addSubscribedUser cookie otherUsername
+        subscribedUsers <- getSubscribedUsersList cookie
+        assertEqual "Expected subscribed user to be listed" [tripSharingUserValue otherUsername] subscribedUsers
+        deleteSubscribedUser cookie otherUsername
+        assertNoSubscribedUsers cookie
+
+      it "should keep subscription additions idempotent" $ do
+        cookie <- signinOnly baseUsername basePassword
+        clearSubscribedUsers cookie [otherUsername]
+        addSubscribedUser cookie otherUsername
+        addSubscribedUser cookie otherUsername
+        subscribedUsers <- getSubscribedUsersList cookie
+        assertEqual "Expected duplicate subscription add to be ignored" [tripSharingUserValue otherUsername] subscribedUsers
+        deleteSubscribedUser cookie otherUsername
+        assertNoSubscribedUsers cookie
+
+      it "should keep deleting a missing subscribed user idempotent" $ do
+        cookie <- signinOnly baseUsername basePassword
+        clearSubscribedUsers cookie [otherUsername]
+        deleteSubscribedUser cookie otherUsername
+        assertNoSubscribedUsers cookie
+
+      it "should reject adding an unknown subscribed user" $ do
+        cookie <- signinOnly baseUsername basePassword
+        clearSubscribedUsers cookie [otherUsername]
+        addSubscribedUserExpectMessage cookie "non-existent-subscribed-user" "username must reference an existing user"
+        assertNoSubscribedUsers cookie
+
+      it "should reject subscribing to the authenticated user" $ do
+        cookie <- signinOnly baseUsername basePassword
+        clearSubscribedUsers cookie [otherUsername]
+        addSubscribedUserExpectMessage cookie baseUsername "username must not be the authenticated user"
+        assertNoSubscribedUsers cookie
+
+      it "should reject malformed subscription add payloads" $ do
+        cookie <- signinOnly baseUsername basePassword
+        req <- parseRequest "POST http://localhost:8081/api/v1/trip-sharing/subscriptions"
+        resp <- httpJSON $ setRequestMethod "POST"
+                        $ setRequestHeader "Cookie" [BS.pack cookie]
+                        $ setRequestHeader "Content-Type" ["application/json"]
+                        $ setRequestBodyJSON (object []) req
+        assertStatusCode "Malformed subscription add payload should return 400" 400 resp
+        assertMessageResponse "Unable to decode the body as a TripSharingUser" resp
+
+      it "should isolate subscription lists by authenticated user" $ do
+        ownerCookie <- signinOnly baseUsername basePassword
+        otherCookie <- signinOnly otherUsername basePassword
+        clearSubscribedUsers ownerCookie [thirdUsername]
+        clearSubscribedUsers otherCookie [thirdUsername]
+        addSubscribedUser ownerCookie thirdUsername
+        deleteSubscribedUser otherCookie thirdUsername
+        ownerSubscribedUsers <- getSubscribedUsersList ownerCookie
+        otherSubscribedUsers <- getSubscribedUsersList otherCookie
+        assertEqual "Owner subscriptions should remain visible to the owner only" [tripSharingUserValue thirdUsername] ownerSubscribedUsers
+        assertEqual "Other user should not see owner subscriptions" [] otherSubscribedUsers
+        deleteSubscribedUser ownerCookie thirdUsername
+        assertNoSubscribedUsers ownerCookie
+        assertNoSubscribedUsers otherCookie
+
+      it "should return subscribed users in stable order" $ do
+        cookie <- signinOnly baseUsername basePassword
+        clearSubscribedUsers cookie [otherUsername, thirdUsername]
+        addSubscribedUser cookie thirdUsername
+        addSubscribedUser cookie otherUsername
+        firstRead <- getSubscribedUsersList cookie
+        secondRead <- getSubscribedUsersList cookie
+        let expected = [tripSharingUserValue otherUsername, tripSharingUserValue thirdUsername]
+        assertEqual "Expected first subscription read to be sorted" expected firstRead
+        assertEqual "Expected repeated subscription reads to stay stable" expected secondRead
+        clearSubscribedUsers cookie [otherUsername, thirdUsername]
+        assertNoSubscribedUsers cookie
+
+      it "should keep subscriptions independent from shares" $ do
+        cookie <- signinOnly baseUsername basePassword
+        clearSharedUsers cookie [otherUsername]
+        clearSubscribedUsers cookie [otherUsername]
+        addSharedUser cookie otherUsername
+        addSubscribedUser cookie thirdUsername
+        sharedUsers <- getSharedUsersList cookie
+        subscribedUsers <- getSubscribedUsersList cookie
+        assertEqual "Expected shares to stay unchanged by subscriptions" [tripSharingUserValue otherUsername] sharedUsers
+        assertEqual "Expected subscriptions to stay independent from shares" [tripSharingUserValue thirdUsername] subscribedUsers
+        clearSharedUsers cookie [otherUsername]
+        clearSubscribedUsers cookie [otherUsername, thirdUsername]
+        assertNoSharedUsers cookie
+        assertNoSubscribedUsers cookie
 
       it "should support agenda create/list/update/validate/delete lifecycle" $ do
         cookie <- signinOnly baseUsername basePassword
@@ -710,6 +806,10 @@ data TripSharingSharesEndpoint = TripSharingSharesEndpoint
 instance Endpoint TripSharingSharesEndpoint where
     getEndpoint TripSharingSharesEndpoint = "/api/v1/trip-sharing/shares"
 
+data TripSharingSubscriptionsEndpoint = TripSharingSubscriptionsEndpoint
+instance Endpoint TripSharingSubscriptionsEndpoint where
+    getEndpoint TripSharingSubscriptionsEndpoint = "/api/v1/trip-sharing/subscriptions"
+
 class (ToJSON requestType, FromJSON responseType, Endpoint endpoint, Method methodType) => RequestType methodType endpoint requestType responseType | endpoint methodType -> requestType, endpoint methodType requestType -> responseType where
     sendRequestWithJSONBody :: endpoint -> methodType -> requestType -> IO (Response responseType)
 
@@ -743,6 +843,9 @@ instance RequestType GET TripPlacesEndpoint () [Value] where
 instance RequestType GET TripSharingSharesEndpoint () [Value] where
     sendRequestWithJSONBody endpoint _ = sendRequestWithJSONBodyImpl GET endpoint
 
+instance RequestType GET TripSharingSubscriptionsEndpoint () [Value] where
+    sendRequestWithJSONBody endpoint _ = sendRequestWithJSONBodyImpl GET endpoint
+
 assertNoAgendaItems :: String -> Expectation
 assertNoAgendaItems cookie = do
   getResponse :: Response [Agenda.CalendarItem] <- sendRequestWithJSONBodyImplWithCookie (Just cookie) GET CalendarItemsEndpoint ()
@@ -767,10 +870,21 @@ getSharedUsersList cookie = do
   assertStatusCode200 "Share list should succeed" getResponse
   pure (getResponseBody getResponse)
 
+getSubscribedUsersList :: String -> IO [Value]
+getSubscribedUsersList cookie = do
+  getResponse :: Response [Value] <- sendRequestWithJSONBodyImplWithCookie (Just cookie) GET TripSharingSubscriptionsEndpoint ()
+  assertStatusCode200 "Subscription list should succeed" getResponse
+  pure (getResponseBody getResponse)
+
 assertNoSharedUsers :: String -> IO ()
 assertNoSharedUsers cookie = do
   sharedUsers <- getSharedUsersList cookie
   assertEqual "Expected no shared users" [] sharedUsers
+
+assertNoSubscribedUsers :: String -> IO ()
+assertNoSubscribedUsers cookie = do
+  subscribedUsers <- getSubscribedUsersList cookie
+  assertEqual "Expected no subscribed users" [] subscribedUsers
 
 addSharedUser :: String -> String -> IO ()
 addSharedUser cookie username = do
@@ -802,7 +916,39 @@ clearSharedUsers :: String -> [String] -> IO ()
 clearSharedUsers cookie = mapM_ (deleteSharedUser cookie)
 
 shareUserValue :: String -> Value
-shareUserValue username = object ["username" .= username]
+shareUserValue = tripSharingUserValue
+
+tripSharingUserValue :: String -> Value
+tripSharingUserValue username = object ["username" .= username]
+
+addSubscribedUser :: String -> String -> IO ()
+addSubscribedUser cookie username = do
+  req <- parseRequest "POST http://localhost:8081/api/v1/trip-sharing/subscriptions"
+  resp <- httpNoBody $ setRequestMethod "POST"
+                   $ setRequestHeader "Cookie" [BS.pack cookie]
+                   $ setRequestHeader "Content-Type" ["application/json"]
+                   $ setRequestBodyJSON (object ["username" .= username]) req
+  assertStatusCode "Subscription add should succeed" 200 resp
+
+addSubscribedUserExpectMessage :: String -> String -> String -> IO ()
+addSubscribedUserExpectMessage cookie username expectedMessage = do
+  req <- parseRequest "POST http://localhost:8081/api/v1/trip-sharing/subscriptions"
+  resp <- httpJSON $ setRequestMethod "POST"
+                  $ setRequestHeader "Cookie" [BS.pack cookie]
+                  $ setRequestHeader "Content-Type" ["application/json"]
+                  $ setRequestBodyJSON (object ["username" .= username]) req
+  assertStatusCode "Subscription add validation should return 400" 400 resp
+  assertMessageResponse expectedMessage resp
+
+deleteSubscribedUser :: String -> String -> IO ()
+deleteSubscribedUser cookie username = do
+  req <- parseRequest ("DELETE http://localhost:8081/api/v1/trip-sharing/subscriptions/" ++ username)
+  resp <- httpNoBody $ setRequestMethod "DELETE"
+                   $ setRequestHeader "Cookie" [BS.pack cookie] req
+  assertStatusCode "Subscription delete should succeed" 200 resp
+
+clearSubscribedUsers :: String -> [String] -> IO ()
+clearSubscribedUsers cookie = mapM_ (deleteSubscribedUser cookie)
 
 createAgendaItem :: String -> Agenda.CalendarItemContent -> IO Agenda.CalendarItem
 createAgendaItem cookie content = do

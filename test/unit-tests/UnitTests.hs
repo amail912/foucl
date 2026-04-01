@@ -74,6 +74,12 @@ tripSharingStorageTests = test [ "Getting shares from empty storage should give 
                                , "Adding the same shared user twice should not duplicate it" ~: shareAddDuplicate
                                , "Deleting a missing shared user should succeed" ~: shareDeleteMissing
                                , "Share storage should be isolated per owner" ~: shareOwnerIsolation
+                               , "Getting subscriptions from empty storage should give an empty list" ~: subscriptionGetEmpty
+                               , "Adding a subscribed user should persist it in stable order" ~: subscriptionAddAndList
+                               , "Adding the same subscribed user twice should not duplicate it" ~: subscriptionAddDuplicate
+                               , "Deleting a missing subscribed user should succeed" ~: subscriptionDeleteMissing
+                               , "Subscription storage should be isolated per owner" ~: subscriptionOwnerIsolation
+                               , "Subscription storage should stay independent from share storage" ~: subscriptionShareIndependence
                                ]
 
 createTest :: ContentGen crudConfig a => crudConfig -> IO ()
@@ -174,6 +180,9 @@ calendarStorageConfig = CalendarStorageConfig "target/.foucl/data/calendar-items
 
 tripShareStorageConfig :: TripShareStorageConfig
 tripShareStorageConfig = TripShareStorageConfig "target/.foucl/data/trip-sharing/shares/"
+
+tripSubscriptionStorageConfig :: TripSubscriptionStorageConfig
+tripSubscriptionStorageConfig = TripSubscriptionStorageConfig "target/.foucl/data/trip-sharing/subscriptions/"
 
 withEmptyDir :: CRUDEngine crudConfig a => crudConfig -> (crudConfig -> IO ()) -> IO ()
 withEmptyDir config _test = do
@@ -361,6 +370,78 @@ shareOwnerIsolation = withEmptyTripShareDir $ \config -> do
           _ -> assertFailure "Expected both share lists to load"
       _ -> assertFailure "Expected owner-isolated additions to succeed"
 
+subscriptionGetEmpty :: IO ()
+subscriptionGetEmpty = withEmptyTripSubscriptionDir $ \config -> do
+    result <- getSubscribedUsers config "alice"
+    case result of
+      Left err -> assertFailure ("Expected empty subscription list, got " ++ show err)
+      Right usernames -> assertEqual "Expected no subscribed users" [] usernames
+
+subscriptionAddAndList :: IO ()
+subscriptionAddAndList = withEmptyTripSubscriptionDir $ \config -> do
+    addFirst <- addSubscribedUser config "alice" "charlie"
+    addSecond <- addSubscribedUser config "alice" "bob"
+    case (addFirst, addSecond) of
+      (Right (), Right ()) -> do
+        result <- getSubscribedUsers config "alice"
+        case result of
+          Left err -> assertFailure ("Expected subscription list to load, got " ++ show err)
+          Right usernames -> assertEqual "Expected stable sorted subscribed users" ["bob", "charlie"] usernames
+      _ -> assertFailure "Expected subscription additions to succeed"
+
+subscriptionAddDuplicate :: IO ()
+subscriptionAddDuplicate = withEmptyTripSubscriptionDir $ \config -> do
+    firstAdd <- addSubscribedUser config "alice" "bob"
+    secondAdd <- addSubscribedUser config "alice" "bob"
+    case (firstAdd, secondAdd) of
+      (Right (), Right ()) -> do
+        result <- getSubscribedUsers config "alice"
+        case result of
+          Left err -> assertFailure ("Expected deduplicated subscription list, got " ++ show err)
+          Right usernames -> assertEqual "Expected duplicate subscription add to be idempotent" ["bob"] usernames
+      _ -> assertFailure "Expected subscription additions to succeed"
+
+subscriptionDeleteMissing :: IO ()
+subscriptionDeleteMissing = withEmptyTripSubscriptionDir $ \config -> do
+    result <- deleteSubscribedUser config "alice" "bob"
+    case result of
+      Left err -> assertFailure ("Expected missing subscription delete to succeed, got " ++ show err)
+      Right () -> do
+        subscribedUsers <- getSubscribedUsers config "alice"
+        case subscribedUsers of
+          Left err -> assertFailure ("Expected empty subscription list, got " ++ show err)
+          Right usernames -> assertEqual "Expected missing delete to leave subscription list empty" [] usernames
+
+subscriptionOwnerIsolation :: IO ()
+subscriptionOwnerIsolation = withEmptyTripSubscriptionDir $ \config -> do
+    ownerAdd <- addSubscribedUser config "alice" "bob"
+    otherAdd <- addSubscribedUser config "carol" "dave"
+    case (ownerAdd, otherAdd) of
+      (Right (), Right ()) -> do
+        ownerUsers <- getSubscribedUsers config "alice"
+        otherUsers <- getSubscribedUsers config "carol"
+        case (ownerUsers, otherUsers) of
+          (Right owner, Right other) -> do
+            assertEqual "Expected alice subscriptions to stay isolated" ["bob"] owner
+            assertEqual "Expected carol subscriptions to stay isolated" ["dave"] other
+          _ -> assertFailure "Expected both subscription lists to load"
+      _ -> assertFailure "Expected owner-isolated subscription additions to succeed"
+
+subscriptionShareIndependence :: IO ()
+subscriptionShareIndependence = withEmptyTripSharingDirs $ \shareConfig subscriptionConfig -> do
+    shareAdd <- addSharedUser shareConfig "alice" "bob"
+    subscriptionAdd <- addSubscribedUser subscriptionConfig "alice" "carol"
+    case (shareAdd, subscriptionAdd) of
+      (Right (), Right ()) -> do
+        sharedUsers <- getSharedUsers shareConfig "alice"
+        subscribedUsers <- getSubscribedUsers subscriptionConfig "alice"
+        case (sharedUsers, subscribedUsers) of
+          (Right shared, Right subscribed) -> do
+            assertEqual "Expected share storage to remain independent" ["bob"] shared
+            assertEqual "Expected subscription storage to remain independent" ["carol"] subscribed
+          _ -> assertFailure "Expected both trip-sharing lists to load"
+      _ -> assertFailure "Expected trip-sharing relation additions to succeed"
+
 sampleAgendaContent :: Agenda.CalendarItemContent
 sampleAgendaContent = Agenda.CalendarItemContent
   { Agenda.itemType = Intention
@@ -415,6 +496,35 @@ withEmptyTripShareDir action = do
     cleanup = do
       exists <- doesDirectoryExist shareDir
       when exists $ removeDirectoryRecursive shareDir
+
+withEmptyTripSubscriptionDir :: (TripSubscriptionStorageConfig -> IO ()) -> IO ()
+withEmptyTripSubscriptionDir action = do
+    exists <- doesDirectoryExist subscriptionDir
+    when exists $ removeDirectoryRecursive subscriptionDir
+    action tripSubscriptionStorageConfig
+    cleanup
+  where
+    subscriptionDir = tripSubscriptionRootPath tripSubscriptionStorageConfig
+    cleanup = do
+      exists <- doesDirectoryExist subscriptionDir
+      when exists $ removeDirectoryRecursive subscriptionDir
+
+withEmptyTripSharingDirs :: (TripShareStorageConfig -> TripSubscriptionStorageConfig -> IO ()) -> IO ()
+withEmptyTripSharingDirs action = do
+    shareExists <- doesDirectoryExist shareDir
+    when shareExists $ removeDirectoryRecursive shareDir
+    subscriptionExists <- doesDirectoryExist subscriptionDir
+    when subscriptionExists $ removeDirectoryRecursive subscriptionDir
+    action tripShareStorageConfig tripSubscriptionStorageConfig
+    cleanup
+  where
+    shareDir = tripShareRootPath tripShareStorageConfig
+    subscriptionDir = tripSubscriptionRootPath tripSubscriptionStorageConfig
+    cleanup = do
+      shareExists <- doesDirectoryExist shareDir
+      when shareExists $ removeDirectoryRecursive shareDir
+      subscriptionExists <- doesDirectoryExist subscriptionDir
+      when subscriptionExists $ removeDirectoryRecursive subscriptionDir
 
 signupValidationTests = test [ "Signup should reject short passwords" ~: rejectShortPassword
                              , "Signup should reject invalid usernames" ~: rejectInvalidUsername

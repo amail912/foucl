@@ -23,13 +23,13 @@ import           Test.HUnit
 import           Control.Exception (bracket_)
 import           Control.Monad.Trans.Except (runExceptT)
 import           Data.Time.Clock.POSIX (getPOSIXTime)
-import           Data.List (isInfixOf)
+import           Data.List (isInfixOf, sortOn)
 import           Data.Char (toLower)
 import           System.Environment (lookupEnv)
 import           System.Directory (getCurrentDirectory, setCurrentDirectory)
 import           Data.Text (pack)
 import AgendaModel (ItemStatus(..), ItemType(..))
-import qualified AgendaModel as Agenda (CalendarItem(..), CalendarItemContent(..))
+import qualified AgendaModel as Agenda (CalendarItem(..), CalendarItemContent(..), TripItemContent(..))
 import Auth (AuthRequest(..), AuthError(..), createUser)
 import Model
 
@@ -185,6 +185,65 @@ runIntegrationTests = do
             assertNoAgendaItems cookie
           _ -> assertFailure "Expected ServerCalendarItem response"
 
+      it "should support trip item create/list/update lifecycle" $ do
+        cookie <- signinOnly baseUsername basePassword
+        assertNoAgendaItems cookie
+        created <- createAgendaItem cookie tripItemContent
+        case created of
+          Agenda.ServerCalendarItem {} -> do
+            let sid = Agenda.itemId created
+            assertBool "Created trip item should have id" (not (null sid))
+          _ -> assertFailure "Expected ServerCalendarItem response"
+        items <- getAgendaItems cookie
+        assertEqual "Agenda list should contain created trip item" [created] items
+        case created of
+          Agenda.ServerCalendarItem {} -> do
+            let sid = Agenda.itemId created
+            let updatedContent = Agenda.TripCalendarItemContent Agenda.TripItemContent
+                  { Agenda.tripWindowStart = "2025-02-01T09:00"
+                  , Agenda.tripWindowEnd = "2025-02-01T12:30"
+                  , Agenda.departurePlaceId = "Le Mesnil"
+                  , Agenda.arrivalPlaceId = "St Clair"
+                  }
+            let updatedItem = Agenda.ServerCalendarItem { Agenda.content = updatedContent, Agenda.itemId = sid }
+            updateAgendaItem cookie updatedItem
+            updatedItems <- getAgendaItems cookie
+            assertEqual "Trip item should be updated" [updatedItem] updatedItems
+            deleteAgendaItem cookie sid
+            assertNoAgendaItems cookie
+          _ -> assertFailure "Expected ServerCalendarItem response"
+
+      it "should return legacy and trip items together from agenda list" $ do
+        cookie <- signinOnly baseUsername basePassword
+        assertNoAgendaItems cookie
+        legacyCreated <- createAgendaItem cookie agendaItemContent
+        tripCreated <- createAgendaItem cookie tripItemContent
+        items <- getAgendaItems cookie
+        assertEqual "Agenda list should contain legacy and trip items"
+          (sortAgendaItems [legacyCreated, tripCreated])
+          (sortAgendaItems items)
+        case (legacyCreated, tripCreated) of
+          (Agenda.ServerCalendarItem {}, Agenda.ServerCalendarItem {}) -> do
+            deleteAgendaItem cookie (Agenda.itemId legacyCreated)
+            deleteAgendaItem cookie (Agenda.itemId tripCreated)
+            assertNoAgendaItems cookie
+          _ -> assertFailure "Expected stored agenda items with ids"
+
+      it "should reject malformed trip item payloads" $ do
+        cookie <- signinOnly baseUsername basePassword
+        req <- parseRequest "POST http://localhost:8081/api/v1/calendar-items"
+        let body = object
+              [ "type" .= ("trip" :: String)
+              , "windowStart" .= ("2025-02-01T09:00" :: String)
+              , "windowEnd" .= ("2025-02-01T11:00" :: String)
+              , "departurePlaceId" .= ("Paris" :: String)
+              ]
+        resp <- httpNoBody $ setRequestMethod "POST"
+                         $ setRequestHeader "Cookie" [BS.pack cookie]
+                         $ setRequestHeader "Content-Type" ["application/json"]
+                         $ setRequestBodyJSON body req
+        assertStatusCode "Malformed trip payload should be rejected" 400 resp
+
       it "should isolate agenda items by authenticated user" $ do
         otherCookie <- signinOnly otherUsername basePassword
         ownerCookie <- signinOnly baseUsername basePassword
@@ -232,6 +291,12 @@ runIntegrationTests = do
       , Agenda.recurrenceRule = Nothing
       , Agenda.recurrenceExceptionDates = []
       }
+    tripItemContent = Agenda.TripCalendarItemContent Agenda.TripItemContent
+      { Agenda.tripWindowStart = "2025-02-01T09:00"
+      , Agenda.tripWindowEnd = "2025-02-01T11:00"
+      , Agenda.departurePlaceId = "Paris"
+      , Agenda.arrivalPlaceId = "Le Mesnil"
+      }
     applyDuration minutes item =
       case item of
         Agenda.ServerCalendarItem {} ->
@@ -246,6 +311,11 @@ runIntegrationTests = do
       , object ["name" .= ("Le Mesnil" :: String)]
       , object ["name" .= ("St Clair" :: String)]
       ]
+    sortAgendaItems = sortOn agendaItemSortKey
+    agendaItemSortKey item =
+      case item of
+        Agenda.ServerCalendarItem {} -> Agenda.itemId item
+        Agenda.NewCalendarItem {} -> "new"
 
 resolveCookieSecureExpectation :: IO Bool
 resolveCookieSecureExpectation = do

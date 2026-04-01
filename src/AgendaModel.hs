@@ -8,13 +8,15 @@ module AgendaModel
   , ItemStatus(..)
   , RecurrenceRule(..)
   , CalendarItemContent(..)
+  , TripItemContent(..)
   , CalendarItem(..)
   , ValidateRequest(..)
+  , applyActualDurationMinutes
   ) where
 
 import Data.Aeson (FromJSON(..), ToJSON(..), (.:), (.:?), (.=), (.!=), withObject, object, Value(..))
 import Data.Aeson.Types (Parser)
-import Data.Aeson.KeyMap (insert)
+import Data.Aeson.KeyMap (KeyMap, insert)
 import Data.Maybe (catMaybes)
 import GHC.Generics (Generic)
 
@@ -81,7 +83,8 @@ instance ToJSON RecurrenceRule where
       RecurrenceEveryXDays interval ->
         object ["type" .= String "EVERY_X_DAYS", "interval_days" .= interval]
 
-data CalendarItemContent = CalendarItemContent
+data CalendarItemContent
+  = CalendarItemContent
   { itemType :: ItemType
   , title :: String
   , windowStart :: String
@@ -92,21 +95,34 @@ data CalendarItemContent = CalendarItemContent
   , category :: Maybe String
   , recurrenceRule :: Maybe RecurrenceRule
   , recurrenceExceptionDates :: [String]
+  }
+  | TripCalendarItemContent TripItemContent
+  deriving (Show, Eq, Generic)
+
+data TripItemContent = TripItemContent
+  { tripWindowStart :: String
+  , tripWindowEnd :: String
+  , departurePlaceId :: String
+  , arrivalPlaceId :: String
   } deriving (Show, Eq, Generic)
 
 instance FromJSON CalendarItemContent where
   parseJSON = withObject "CalendarItemContent" $ \v -> do
-    itemType <- v .: "type"
-    title <- v .: "titre"
-    windowStart <- v .: "fenetre_debut"
-    windowEnd <- v .: "fenetre_fin"
-    status <- v .: "statut"
-    sourceItemId <- v .:? "source_item_id"
-    actualDurationMinutes <- v .:? "duree_reelle_minutes"
-    category <- v .:? "categorie"
-    recurrenceRule <- v .:? "recurrence_rule"
-    recurrenceExceptionDates <- v .:? "recurrence_exception_dates" .!= []
-    pure CalendarItemContent {..}
+    rawType <- v .: "type" :: Parser String
+    case rawType of
+      "trip" -> TripCalendarItemContent <$> parseTripItemContent v
+      _ -> do
+        itemType <- parseJSON (toJSON rawType)
+        title <- v .: "titre"
+        windowStart <- v .: "fenetre_debut"
+        windowEnd <- v .: "fenetre_fin"
+        status <- v .: "statut"
+        sourceItemId <- v .:? "source_item_id"
+        actualDurationMinutes <- v .:? "duree_reelle_minutes"
+        category <- v .:? "categorie"
+        recurrenceRule <- v .:? "recurrence_rule"
+        recurrenceExceptionDates <- v .:? "recurrence_exception_dates" .!= []
+        pure CalendarItemContent {..}
 
 instance ToJSON CalendarItemContent where
   toJSON CalendarItemContent {..} =
@@ -128,6 +144,14 @@ instance ToJSON CalendarItemContent where
         case recurrenceRule of
           Just rule -> [ "recurrence_rule" .= rule, "recurrence_exception_dates" .= recurrenceExceptionDates ]
           Nothing -> []
+  toJSON (TripCalendarItemContent TripItemContent {tripWindowStart, tripWindowEnd, departurePlaceId, arrivalPlaceId}) =
+    object
+      [ "type" .= String "trip"
+      , "windowStart" .= tripWindowStart
+      , "windowEnd" .= tripWindowEnd
+      , "departurePlaceId" .= departurePlaceId
+      , "arrivalPlaceId" .= arrivalPlaceId
+      ]
 
 data CalendarItem
   = NewCalendarItem { content :: CalendarItemContent }
@@ -159,3 +183,17 @@ instance FromJSON ValidateRequest where
   parseJSON = withObject "ValidateRequest" $ \v ->
     ValidateRequest <$> v .: "id"
                     <*> v .: "duree_reelle_minutes"
+
+parseTripItemContent :: KeyMap Value -> Parser TripItemContent
+parseTripItemContent v =
+  TripItemContent
+    <$> v .: "windowStart"
+    <*> v .: "windowEnd"
+    <*> v .: "departurePlaceId"
+    <*> v .: "arrivalPlaceId"
+
+applyActualDurationMinutes :: Int -> CalendarItemContent -> CalendarItemContent
+applyActualDurationMinutes minutes content =
+  case content of
+    legacy@CalendarItemContent {} -> legacy { actualDurationMinutes = Just minutes }
+    trip@TripCalendarItemContent {} -> trip

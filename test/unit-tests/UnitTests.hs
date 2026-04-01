@@ -12,7 +12,7 @@ import Model (Identifiable(..), NoteContent(..), ChecklistContent(..), Checklist
 import System.Directory (removeDirectoryRecursive, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, getCurrentDirectory, getPermissions, Permissions(..))
 import Data.Maybe (fromJust)
 import Data.Either (isRight)
-import Data.List ((\\))
+import Data.List ((\\), sortOn)
 import Control.Monad (when)
 import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import Control.Monad.Trans.Except (runExceptT)
@@ -22,7 +22,7 @@ import System.Exit (exitSuccess, exitFailure)
 import NoteCrud (NoteServiceConfig(..))
 import ChecklistCrud (ChecklistServiceConfig(..))
 import AgendaModel (ItemStatus(..), ItemType(..))
-import qualified AgendaModel as Agenda (CalendarItem(..), CalendarItemContent(..))
+import qualified AgendaModel as Agenda (CalendarItem(..), CalendarItemContent(..), TripItemContent(..))
 import AgendaStorage
 import Auth
 import Session
@@ -60,8 +60,10 @@ checklistServiceTests = test [ "Creating a checklist should create a new file in
                              ]
 
 agendaStorageTests = test [ "Creating an agenda item should persist it and return an id" ~: agendaCreateAndList
+                          , "Creating a trip item should persist it and round-trip through storage" ~: agendaTripCreateAndList
                           , "Validating an agenda item should update duration only" ~: agendaValidateUpdatesDuration
                           , "Validating an unknown agenda item should fail" ~: agendaValidateMissing
+                          , "Agenda storage should return legacy and trip items together" ~: agendaMixedItems
                           , "Agenda items should be isolated per user" ~: agendaUserIsolation
                           , "Deleting an agenda item should remove only the owner's item" ~: agendaDelete
                           ]
@@ -216,6 +218,20 @@ agendaValidateUpdatesDuration = withEmptyCalendarDir $ \config -> do
             assertEqual "Expected duration to update" expectedContent (Agenda.content updated)
       _ -> assertFailure "Expected ServerCalendarItem from create"
 
+agendaTripCreateAndList :: IO ()
+agendaTripCreateAndList = withEmptyCalendarDir $ \config -> do
+    let userId = "alice"
+    created <- createCalendarItem config userId sampleTripContent
+    items <- getCalendarItems config userId
+    case created of
+      Agenda.ServerCalendarItem {} -> do
+        let sid = Agenda.itemId created
+            storedContent = Agenda.content created
+        assertBool "Expected created trip item to have id" (not (null sid))
+        assertEqual "Expected stored trip content to match input" sampleTripContent storedContent
+        assertEqual "Expected agenda list to contain created trip item" [created] items
+      _ -> assertFailure "Expected ServerCalendarItem from create"
+
 agendaValidateMissing :: IO ()
 agendaValidateMissing = withEmptyCalendarDir $ \config -> do
     result <- updateCalendarItemDuration config "alice" "missing-id" 30
@@ -244,6 +260,16 @@ agendaUserIsolation = withEmptyCalendarDir $ \config -> do
           Left CalendarItemNotFound -> pure ()
           other -> assertFailure ("Expected CalendarItemNotFound on cross-user validate, got " ++ show other)
       _ -> assertFailure "Expected ServerCalendarItem from create"
+
+agendaMixedItems :: IO ()
+agendaMixedItems = withEmptyCalendarDir $ \config -> do
+    let userId = "alice"
+    legacyCreated <- createCalendarItem config userId sampleAgendaContent
+    tripCreated <- createCalendarItem config userId sampleTripContent
+    items <- getCalendarItems config userId
+    assertEqual "Expected agenda list to contain legacy and trip items"
+      (sortCalendarItems [legacyCreated, tripCreated])
+      (sortCalendarItems items)
 
 agendaDelete :: IO ()
 agendaDelete = withEmptyCalendarDir $ \config -> do
@@ -280,6 +306,23 @@ sampleAgendaContent = Agenda.CalendarItemContent
   , Agenda.recurrenceRule = Nothing
   , Agenda.recurrenceExceptionDates = []
   }
+
+sampleTripContent :: Agenda.CalendarItemContent
+sampleTripContent = Agenda.TripCalendarItemContent Agenda.TripItemContent
+  { Agenda.tripWindowStart = "2025-02-01T08:00"
+  , Agenda.tripWindowEnd = "2025-02-01T10:00"
+  , Agenda.departurePlaceId = "Paris"
+  , Agenda.arrivalPlaceId = "Le Mesnil"
+  }
+
+sortCalendarItems :: [Agenda.CalendarItem] -> [Agenda.CalendarItem]
+sortCalendarItems = sortOn calendarItemSortKey
+
+calendarItemSortKey :: Agenda.CalendarItem -> String
+calendarItemSortKey item =
+  case item of
+    Agenda.ServerCalendarItem {} -> Agenda.itemId item
+    Agenda.NewCalendarItem {} -> "new"
 
 withEmptyCalendarDir :: (CalendarStorageConfig -> IO ()) -> IO ()
 withEmptyCalendarDir action = do

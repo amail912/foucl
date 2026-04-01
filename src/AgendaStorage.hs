@@ -13,7 +13,7 @@ module AgendaStorage
   , updateCalendarItemDuration
   ) where
 
-import AgendaModel (CalendarItem(..), CalendarItemContent(..))
+import AgendaModel (CalendarItem(..), CalendarItemContent, applyActualDurationMinutes)
 import Control.Exception (IOException, try)
 import Data.Aeson (decode, encode)
 import qualified Data.ByteString.Lazy as BL
@@ -69,13 +69,13 @@ updateCalendarItemDuration config userId itemId minutes = do
           case decode raw of
             Nothing -> pure (Left CalendarItemReadFailure)
             Just (ServerCalendarItem {content}) -> do
-              let updated = ServerCalendarItem { content = content { actualDurationMinutes = Just minutes }, itemId = itemId }
+              let updated = ServerCalendarItem { content = applyActualDurationMinutes minutes content, itemId = itemId }
               writeResult <- try (BL.writeFile path (encode updated)) :: IO (Either IOException ())
               case writeResult of
                 Left _ -> pure (Left CalendarItemWriteFailure)
                 Right _ -> pure (Right updated)
             Just (NewCalendarItem {content}) -> do
-              let updated = ServerCalendarItem { content = content { actualDurationMinutes = Just minutes }, itemId = itemId }
+              let updated = ServerCalendarItem { content = applyActualDurationMinutes minutes content, itemId = itemId }
               writeResult <- try (BL.writeFile path (encode updated)) :: IO (Either IOException ())
               case writeResult of
                 Left _ -> pure (Left CalendarItemWriteFailure)

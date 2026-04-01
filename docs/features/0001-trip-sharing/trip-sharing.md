@@ -18,7 +18,6 @@ Let users share trip information in a controlled way so other users can retrieve
 ## Stories
 
 ### To Refine
-- [003 Trip Calendar Item](to-refine/003-trip-calendar-item.md) - Extend calendar items so they can represent trip payloads in the new contract.
 - [004 Trip Validation And Editing](to-refine/004-trip-validation-and-editing.md) - Keep trip creation, updates, and deletion valid and deterministic.
 - [005 Share Trip Users](to-refine/005-share-trip-users.md) - Let users manage who may see their trips.
 - [006 Subscribe To Trip Users](to-refine/006-subscribe-to-trip-users.md) - Let users manage whose trips they want to follow.
@@ -27,3 +26,4 @@ Let users share trip information in a controlled way so other users can retrieve
 ### Done
 - [001 Scope Calendar Items To Authenticated User](done/001-scope-calendar-items-to-authenticated-user.md) - Isolate calendar item reads and writes by owner before trips reuse the agenda API.
 - [002 Predefined Places Catalog](done/002-predefined-places-catalog.md) - Expose the fixed list of allowed trip places.
+- [003 Trip Calendar Item](done/003-trip-calendar-item.md) - Extend calendar items so they can represent trip payloads in the new contract.

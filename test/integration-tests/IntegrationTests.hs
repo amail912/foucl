@@ -9,6 +9,7 @@ module IntegrationTests (runIntegrationTests) where
 
 import Prelude hiding (id)
 import           Data.Aeson
+import           Data.Aeson.Types (parseMaybe)
 import           Data.ByteString       (ByteString)
 import           Data.ByteString.UTF8
 import qualified Data.ByteString.Char8 as BS
@@ -244,6 +245,90 @@ runIntegrationTests = do
                          $ setRequestBodyJSON body req
         assertStatusCode "Malformed trip payload should be rejected" 400 resp
 
+      it "should reject trip create when departure place is unknown" $ do
+        cookie <- signinOnly baseUsername basePassword
+        assertTripCreateValidationError cookie
+          (mkTripContent "2025-02-03T09:00" "2025-02-03T11:00" "Nowhere" "Paris")
+          "departurePlaceId must reference an existing trip place"
+
+      it "should reject trip create when arrival place is unknown" $ do
+        cookie <- signinOnly baseUsername basePassword
+        assertTripCreateValidationError cookie
+          (mkTripContent "2025-02-03T09:00" "2025-02-03T11:00" "Paris" "Nowhere")
+          "arrivalPlaceId must reference an existing trip place"
+
+      it "should reject trip create when departure and arrival are identical" $ do
+        cookie <- signinOnly baseUsername basePassword
+        assertTripCreateValidationError cookie
+          (mkTripContent "2025-02-03T09:00" "2025-02-03T11:00" "Paris" "Paris")
+          "departurePlaceId and arrivalPlaceId must be different"
+
+      it "should reject trip create when windowEnd is not strictly after windowStart" $ do
+        cookie <- signinOnly baseUsername basePassword
+        assertTripCreateValidationError cookie
+          (mkTripContent "2025-02-03T11:00" "2025-02-03T11:00" "Paris" "Le Mesnil")
+          "windowEnd must be strictly after windowStart"
+
+      it "should reject overlapping trips for the same user" $ do
+        cookie <- signinOnly baseUsername basePassword
+        created <- createAgendaItem cookie tripItemContent
+        assertTripCreateValidationError cookie
+          (mkTripContent "2025-02-01T10:30" "2025-02-01T12:00" "Le Mesnil" "St Clair")
+          "trip time window overlaps another trip"
+        case created of
+          Agenda.ServerCalendarItem {} -> deleteAgendaItem cookie (Agenda.itemId created)
+          _ -> assertFailure "Expected stored trip item"
+        assertNoAgendaItems cookie
+
+      it "should allow back-to-back trips for the same user" $ do
+        cookie <- signinOnly baseUsername basePassword
+        firstTrip <- createAgendaItem cookie tripItemContent
+        secondTrip <- createAgendaItem cookie (mkTripContent "2025-02-01T11:00" "2025-02-01T13:00" "Le Mesnil" "St Clair")
+        items <- getAgendaItems cookie
+        assertEqual "Touching trips should both be stored"
+          (sortAgendaItems [firstTrip, secondTrip])
+          (sortAgendaItems items)
+        case (firstTrip, secondTrip) of
+          (Agenda.ServerCalendarItem {}, Agenda.ServerCalendarItem {}) -> do
+            deleteAgendaItem cookie (Agenda.itemId firstTrip)
+            deleteAgendaItem cookie (Agenda.itemId secondTrip)
+            assertNoAgendaItems cookie
+          _ -> assertFailure "Expected stored trip items"
+
+      it "should reject trip update when it overlaps another trip owned by the same user" $ do
+        cookie <- signinOnly baseUsername basePassword
+        firstTrip <- createAgendaItem cookie tripItemContent
+        secondTrip <- createAgendaItem cookie (mkTripContent "2025-02-01T12:00" "2025-02-01T13:00" "Le Mesnil" "St Clair")
+        case (firstTrip, secondTrip) of
+          (Agenda.ServerCalendarItem {}, Agenda.ServerCalendarItem {}) -> do
+            assertTripUpdateValidationError cookie
+              (Agenda.ServerCalendarItem
+                { Agenda.itemId = Agenda.itemId secondTrip
+                , Agenda.content = mkTripContent "2025-02-01T10:45" "2025-02-01T13:00" "Le Mesnil" "St Clair"
+                })
+              "trip time window overlaps another trip"
+            deleteAgendaItem cookie (Agenda.itemId firstTrip)
+            deleteAgendaItem cookie (Agenda.itemId secondTrip)
+            assertNoAgendaItems cookie
+          _ -> assertFailure "Expected stored trip items"
+
+      it "should not apply one user's trip overlap checks to another user" $ do
+        ownerCookie <- signinOnly baseUsername basePassword
+        otherCookie <- signinOnly otherUsername basePassword
+        ownerTrip <- createAgendaItem ownerCookie tripItemContent
+        otherTrip <- createAgendaItem otherCookie (mkTripContent "2025-02-01T10:30" "2025-02-01T12:00" "Paris" "St Clair")
+        ownerItems <- getAgendaItems ownerCookie
+        otherItems <- getAgendaItems otherCookie
+        assertEqual "Owner should keep their trip" [ownerTrip] ownerItems
+        assertEqual "Other user should be allowed the same time window" [otherTrip] otherItems
+        case (ownerTrip, otherTrip) of
+          (Agenda.ServerCalendarItem {}, Agenda.ServerCalendarItem {}) -> do
+            deleteAgendaItem ownerCookie (Agenda.itemId ownerTrip)
+            deleteAgendaItem otherCookie (Agenda.itemId otherTrip)
+            assertNoAgendaItems ownerCookie
+            assertNoAgendaItems otherCookie
+          _ -> assertFailure "Expected stored trip items"
+
       it "should isolate agenda items by authenticated user" $ do
         otherCookie <- signinOnly otherUsername basePassword
         ownerCookie <- signinOnly baseUsername basePassword
@@ -297,6 +382,13 @@ runIntegrationTests = do
       , Agenda.departurePlaceId = "Paris"
       , Agenda.arrivalPlaceId = "Le Mesnil"
       }
+    mkTripContent start end departure arrival =
+      Agenda.TripCalendarItemContent Agenda.TripItemContent
+        { Agenda.tripWindowStart = start
+        , Agenda.tripWindowEnd = end
+        , Agenda.departurePlaceId = departure
+        , Agenda.arrivalPlaceId = arrival
+        }
     applyDuration minutes item =
       case item of
         Agenda.ServerCalendarItem {} ->
@@ -598,6 +690,33 @@ updateAgendaItemExpectStatus cookie item expectedStatus = do
                    $ setRequestHeader "Content-Type" ["application/json"]
                    $ setRequestBodyJSON item req
   assertStatusCode "Agenda update should return expected status" expectedStatus resp
+
+assertTripCreateValidationError :: String -> Agenda.CalendarItemContent -> String -> IO ()
+assertTripCreateValidationError cookie content expectedMessage =
+  assertAgendaPostValidationError cookie (Agenda.NewCalendarItem { Agenda.content = content }) expectedMessage
+
+assertTripUpdateValidationError :: String -> Agenda.CalendarItem -> String -> IO ()
+assertTripUpdateValidationError cookie item expectedMessage =
+  assertAgendaPostValidationError cookie item expectedMessage
+
+assertAgendaPostValidationError :: String -> Agenda.CalendarItem -> String -> IO ()
+assertAgendaPostValidationError cookie item expectedMessage = do
+  req <- parseRequest "POST http://localhost:8081/api/v1/calendar-items"
+  resp <- httpJSON $ setRequestMethod "POST"
+                  $ setRequestHeader "Cookie" [BS.pack cookie]
+                  $ setRequestHeader "Content-Type" ["application/json"]
+                  $ setRequestBodyJSON item req
+  assertStatusCode "Agenda validation error should return 400" 400 resp
+  assertMessageResponse expectedMessage resp
+
+assertMessageResponse :: String -> Response Value -> Assertion
+assertMessageResponse expectedMessage response =
+  case getResponseBody response of
+    Object value ->
+      case parseMaybe (.: "message") value of
+        Just actualMessage -> assertEqual "Expected validation error message" expectedMessage (actualMessage :: String)
+        Nothing -> assertFailure "Expected response body to contain a message field"
+    _ -> assertFailure "Expected JSON object error response"
 
 validateAgendaItem :: String -> String -> Int -> IO ()
 validateAgendaItem cookie itemId minutes = do

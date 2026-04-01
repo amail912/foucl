@@ -11,7 +11,7 @@ import Prelude hiding (log, writeFile)
 import Data.Aeson (ToJSON(toJSON), FromJSON(parseJSON), decode, encode, decode', eitherDecodeFileStrict', (.:), (.:?), (.=), withObject, object)
 import Data.Function ((&))
 import Data.Functor ((<$>))
-import Data.Maybe (Maybe(..), fromMaybe)
+import Data.Maybe (Maybe(..), fromMaybe, mapMaybe)
 import Data.Int (Int64)
 import Control.Monad (msum, mzero, join, foldM, when, mplus)
 import Control.Monad.Except (catchError, throwError)
@@ -41,6 +41,9 @@ import System.IO (hFlush, stdout)
 import System.Environment (lookupEnv)
 import System.Exit (exitFailure)
 import Data.Time.Clock (UTCTime, getCurrentTime, addUTCTime)
+import Data.Time.LocalTime (LocalTime)
+import Data.Time.Format (defaultTimeLocale, parseTimeM)
+import Data.Time.Format.ISO8601 (iso8601ParseM)
 import GHC.Generics (Generic)
 import Data.ByteString.Lazy.Char8 (writeFile)
 import Filesystem.Path.CurrentOS    (commonPrefix, encodeString, decodeString, collapse, append)
@@ -87,6 +90,93 @@ tripPlacesCatalog =
   , TripPlace "Le Mesnil"
   , TripPlace "St Clair"
   ]
+
+data TripWriteValidation
+  = TripWriteValid
+  | TripWriteBadRequest String
+  | TripWriteNotFound
+  | TripWriteTechnicalFailure
+
+tripPlaceNames :: [String]
+tripPlaceNames = map tripPlaceName tripPlacesCatalog
+
+validateTripWrite :: String -> Maybe String -> Agenda.CalendarItemContent -> IO TripWriteValidation
+validateTripWrite principalUserId mCurrentItemId content =
+  case content of
+    Agenda.TripCalendarItemContent tripContent -> do
+      existingItems <- getCalendarItems defaultCalendarStorageConfig principalUserId
+      pure (validateTripContent tripPlaceNames existingItems mCurrentItemId tripContent)
+    _ -> pure TripWriteValid
+
+validateTripContent :: [String] -> [Agenda.CalendarItem] -> Maybe String -> Agenda.TripItemContent -> TripWriteValidation
+validateTripContent validPlaceNames existingItems mCurrentItemId tripContent =
+  case validateTripWritePreconditions existingItems mCurrentItemId of
+    Just result -> result
+    Nothing ->
+      case tripInterval tripContent of
+        Nothing -> TripWriteBadRequest "windowStart and windowEnd must be valid ISO date-time strings"
+        Just interval
+          | not (Agenda.departurePlaceId tripContent `elem` validPlaceNames) ->
+              TripWriteBadRequest "departurePlaceId must reference an existing trip place"
+          | not (Agenda.arrivalPlaceId tripContent `elem` validPlaceNames) ->
+              TripWriteBadRequest "arrivalPlaceId must reference an existing trip place"
+          | Agenda.departurePlaceId tripContent == Agenda.arrivalPlaceId tripContent ->
+              TripWriteBadRequest "departurePlaceId and arrivalPlaceId must be different"
+          | not (tripIntervalHasPositiveDuration interval) ->
+              TripWriteBadRequest "windowEnd must be strictly after windowStart"
+          | otherwise ->
+              case storedTripIntervals existingItems mCurrentItemId of
+                Left () -> TripWriteTechnicalFailure
+                Right intervals
+                  | any (tripIntervalsOverlap interval) intervals ->
+                      TripWriteBadRequest "trip time window overlaps another trip"
+                  | otherwise -> TripWriteValid
+
+validateTripWritePreconditions :: [Agenda.CalendarItem] -> Maybe String -> Maybe TripWriteValidation
+validateTripWritePreconditions existingItems mCurrentItemId =
+  case mCurrentItemId of
+    Just currentItemId
+      | currentItemId `notElem` mapMaybe calendarItemId existingItems -> Just TripWriteNotFound
+    _ -> Nothing
+
+calendarItemId :: Agenda.CalendarItem -> Maybe String
+calendarItemId item =
+  case item of
+    Agenda.ServerCalendarItem { Agenda.itemId } -> Just itemId
+    Agenda.NewCalendarItem {} -> Nothing
+
+tripInterval :: Agenda.TripItemContent -> Maybe (LocalTime, LocalTime)
+tripInterval tripContent = do
+  start <- parseTripLocalTime (Agenda.tripWindowStart tripContent)
+  end <- parseTripLocalTime (Agenda.tripWindowEnd tripContent)
+  pure (start, end)
+
+parseTripLocalTime :: String -> Maybe LocalTime
+parseTripLocalTime raw =
+  iso8601ParseM raw `mplus` parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M" raw
+
+tripIntervalHasPositiveDuration :: (LocalTime, LocalTime) -> Bool
+tripIntervalHasPositiveDuration (start, end) = end > start
+
+-- Touching boundaries are allowed; only real interval intersection is rejected.
+tripIntervalsOverlap :: (LocalTime, LocalTime) -> (LocalTime, LocalTime) -> Bool
+tripIntervalsOverlap (startA, endA) (startB, endB) = startA < endB && startB < endA
+
+storedTripIntervals :: [Agenda.CalendarItem] -> Maybe String -> Either () [(LocalTime, LocalTime)]
+storedTripIntervals existingItems mCurrentItemId =
+  mapM storedTripInterval (filter isOtherStoredTrip existingItems)
+  where
+    isOtherStoredTrip item =
+      case item of
+        Agenda.ServerCalendarItem { Agenda.content = Agenda.TripCalendarItemContent {}, Agenda.itemId } ->
+          Just itemId /= mCurrentItemId
+        _ -> False
+
+    storedTripInterval item =
+      case item of
+        Agenda.ServerCalendarItem { Agenda.content = Agenda.TripCalendarItemContent tripContent } ->
+          maybe (Left ()) Right (tripInterval tripContent)
+        _ -> Left ()
 
 badRequest :: FilterMonad Response m => String -> m Response
 badRequest = HServer.badRequest . jsonMessage
@@ -415,14 +505,26 @@ agendaController AppContext { sessionPrincipal = SessionPrincipal { principalUse
         handleBody rqBody =
           case decode' (unBody rqBody) :: Maybe Agenda.CalendarItem of
             Just (Agenda.NewCalendarItem {Agenda.content}) -> do
-              created <- liftIO $ createCalendarItem defaultCalendarStorageConfig principalUserId content
-              ok (jsonResponse created)
+              validation <- liftIO $ validateTripWrite principalUserId Nothing content
+              case validation of
+                TripWriteValid -> do
+                  created <- liftIO $ createCalendarItem defaultCalendarStorageConfig principalUserId content
+                  ok (jsonResponse created)
+                TripWriteBadRequest message -> badRequest message
+                TripWriteNotFound -> notFound emptyResponse
+                TripWriteTechnicalFailure -> internalServerError emptyResponse
             Just (Agenda.ServerCalendarItem {Agenda.content, Agenda.itemId}) -> do
-              result <- liftIO $ updateCalendarItem defaultCalendarStorageConfig principalUserId itemId content
-              case result of
-                Left CalendarItemNotFound -> notFound emptyResponse
-                Left _ -> internalServerError emptyResponse
-                Right updated -> ok (jsonResponse updated)
+              validation <- liftIO $ validateTripWrite principalUserId (Just itemId) content
+              case validation of
+                TripWriteValid -> do
+                  result <- liftIO $ updateCalendarItem defaultCalendarStorageConfig principalUserId itemId content
+                  case result of
+                    Left CalendarItemNotFound -> notFound emptyResponse
+                    Left _ -> internalServerError emptyResponse
+                    Right updated -> ok (jsonResponse updated)
+                TripWriteBadRequest message -> badRequest message
+                TripWriteNotFound -> notFound emptyResponse
+                TripWriteTechnicalFailure -> internalServerError emptyResponse
             Nothing ->
               case decode' (unBody rqBody) :: Maybe Agenda.ValidateRequest of
                 Nothing -> badRequest "Unable to decode the body as a CalendarItem or ValidateRequest"

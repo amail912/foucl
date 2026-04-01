@@ -19,8 +19,14 @@ Define the backend contract needed to support trip sharing and frontend-derived 
 Returns the fixed list of places available for trips.
 
 Response fields per place:
-- `id`
 - `name`
+
+The place name is the identifier for this iteration.
+
+Initial place list:
+- `Paris`
+- `Le Mesnil`
+- `St Clair`
 
 No short label is returned by the backend.
 

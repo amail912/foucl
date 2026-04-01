@@ -142,6 +142,18 @@ runIntegrationTests = do
         unauthResponse <- httpBS $ setRequestMethod "GET" unauthReq
         assertStatusCode "Agenda should require auth" 401 unauthResponse
 
+      it "should require auth for trip places endpoint" $ do
+        unauthReq <- parseRequest "GET http://localhost:8081/api/v1/trip-places"
+        unauthResponse <- httpBS $ setRequestMethod "GET" unauthReq
+        assertStatusCode "Trip places should require auth" 401 unauthResponse
+
+      it "should expose the fixed trip places catalog" $ do
+        cookie <- signinOnly baseUsername basePassword
+        places <- getTripPlaces cookie
+        repeatedPlaces <- getTripPlaces cookie
+        assertEqual "Trip places should match the fixed catalog" expectedTripPlaces places
+        assertEqual "Trip places should stay stable across requests" expectedTripPlaces repeatedPlaces
+
       it "should support agenda create/list/update/validate/delete lifecycle" $ do
         cookie <- signinOnly baseUsername basePassword
         assertNoAgendaItems cookie
@@ -229,6 +241,11 @@ runIntegrationTests = do
         Agenda.NewCalendarItem {} ->
           let storedContent = Agenda.content item
           in Agenda.NewCalendarItem { Agenda.content = storedContent { Agenda.actualDurationMinutes = Just minutes } }
+    expectedTripPlaces =
+      [ object ["name" .= ("Paris" :: String)]
+      , object ["name" .= ("Le Mesnil" :: String)]
+      , object ["name" .= ("St Clair" :: String)]
+      ]
 
 resolveCookieSecureExpectation :: IO Bool
 resolveCookieSecureExpectation = do
@@ -440,6 +457,10 @@ data CalendarItemsEndpoint = CalendarItemsEndpoint
 instance Endpoint CalendarItemsEndpoint where
     getEndpoint CalendarItemsEndpoint = "/api/v1/calendar-items"
 
+data TripPlacesEndpoint = TripPlacesEndpoint
+instance Endpoint TripPlacesEndpoint where
+    getEndpoint TripPlacesEndpoint = "/api/v1/trip-places"
+
 class (ToJSON requestType, FromJSON responseType, Endpoint endpoint, Method methodType) => RequestType methodType endpoint requestType responseType | endpoint methodType -> requestType, endpoint methodType requestType -> responseType where
     sendRequestWithJSONBody :: endpoint -> methodType -> requestType -> IO (Response responseType)
 
@@ -467,6 +488,9 @@ instance RequestType GET CalendarItemsEndpoint () [Agenda.CalendarItem] where
 instance RequestType POST CalendarItemsEndpoint Agenda.CalendarItem Agenda.CalendarItem where
     sendRequestWithJSONBody endpoint _ = sendRequestWithJSONBodyImpl POST endpoint
 
+instance RequestType GET TripPlacesEndpoint () [Value] where
+    sendRequestWithJSONBody endpoint _ = sendRequestWithJSONBodyImpl GET endpoint
+
 assertNoAgendaItems :: String -> Expectation
 assertNoAgendaItems cookie = do
   getResponse :: Response [Agenda.CalendarItem] <- sendRequestWithJSONBodyImplWithCookie (Just cookie) GET CalendarItemsEndpoint ()
@@ -477,6 +501,12 @@ getAgendaItems :: String -> IO [Agenda.CalendarItem]
 getAgendaItems cookie = do
   getResponse :: Response [Agenda.CalendarItem] <- sendRequestWithJSONBodyImplWithCookie (Just cookie) GET CalendarItemsEndpoint ()
   assertStatusCode200 "Agenda list should succeed" getResponse
+  pure (getResponseBody getResponse)
+
+getTripPlaces :: String -> IO [Value]
+getTripPlaces cookie = do
+  getResponse :: Response [Value] <- sendRequestWithJSONBodyImplWithCookie (Just cookie) GET TripPlacesEndpoint ()
+  assertStatusCode200 "Trip places list should succeed" getResponse
   pure (getResponseBody getResponse)
 
 createAgendaItem :: String -> Agenda.CalendarItemContent -> IO Agenda.CalendarItem

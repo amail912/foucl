@@ -74,6 +74,20 @@ newtype AppContext = AppContext
   { sessionPrincipal :: SessionPrincipal
   }
 
+newtype TripPlace = TripPlace
+  { tripPlaceName :: String
+  }
+
+instance ToJSON TripPlace where
+  toJSON (TripPlace placeName) = object ["name" .= placeName]
+
+tripPlacesCatalog :: [TripPlace]
+tripPlacesCatalog =
+  [ TripPlace "Paris"
+  , TripPlace "Le Mesnil"
+  , TripPlace "St Clair"
+  ]
+
 badRequest :: FilterMonad Response m => String -> m Response
 badRequest = HServer.badRequest . jsonMessage
 
@@ -168,6 +182,7 @@ apiController signupRateLimitState tmpDir sessionConfig sessionStore = dir "api"
                                                                                           , signoutController sessionConfig sessionStore
                                                                                           , requireAuth sessionConfig sessionStore noteController
                                                                                           , requireAuth sessionConfig sessionStore checklistController
+                                                                                          , requireAuth sessionConfig sessionStore tripPlacesController
                                                                                           , requireAuth sessionConfig sessionStore agendaController
                                                                                           ]
 
@@ -368,6 +383,12 @@ checklistController _ = dir "checklist" $
                                            , crudDelete
                                            , crudPut
                                            ]
+
+tripPlacesController :: AppContext -> ServerPartT IO Response
+tripPlacesController _ = dir "v1" $ dir "trip-places" $ do
+  nullDir
+  method GET
+  ok (jsonResponse tripPlacesCatalog)
 
 agendaController :: AppContext -> ServerPartT IO Response
 agendaController AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =

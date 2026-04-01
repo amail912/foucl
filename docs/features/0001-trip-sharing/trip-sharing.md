@@ -18,7 +18,6 @@ Let users share trip information in a controlled way so other users can retrieve
 ## Stories
 
 ### To Refine
-- [007 Period Trips Query](to-refine/007-period-trips-query.md) - Return the ordered trips needed for frontend presence derivation.
 
 ### Done
 - [001 Scope Calendar Items To Authenticated User](done/001-scope-calendar-items-to-authenticated-user.md) - Isolate calendar item reads and writes by owner before trips reuse the agenda API.
@@ -27,3 +26,4 @@ Let users share trip information in a controlled way so other users can retrieve
 - [004 Trip Validation And Editing](done/004-trip-validation-and-editing.md) - Keep trip creation, updates, and deletion valid and deterministic.
 - [005 Share Trip Users](done/005-share-trip-users.md) - Let users manage who may see their trips.
 - [006 Subscribe To Trip Users](done/006-subscribe-to-trip-users.md) - Let users manage whose trips they want to follow.
+- [007 Period Trips Query](done/007-period-trips-query.md) - Return the ordered trips needed for frontend presence derivation.

@@ -160,6 +160,11 @@ runIntegrationTests = do
         unauthResponse <- httpBS $ setRequestMethod "GET" unauthReq
         assertStatusCode "Trip-sharing subscriptions should require auth" 401 unauthResponse
 
+      it "should require auth for trip-sharing period-trips endpoint" $ do
+        unauthReq <- periodTripsRequest Nothing (Just "2025-03-10T00:00") (Just "2025-03-11T00:00")
+        unauthResponse <- httpBS unauthReq
+        assertStatusCode "Trip-sharing period-trips should require auth" 401 unauthResponse
+
       it "should expose the fixed trip places catalog" $ do
         cookie <- signinOnly baseUsername basePassword
         places <- getTripPlaces cookie
@@ -333,6 +338,101 @@ runIntegrationTests = do
         clearSubscribedUsers cookie [otherUsername, thirdUsername]
         assertNoSharedUsers cookie
         assertNoSubscribedUsers cookie
+
+      it "should reject invalid period-trip queries" $ do
+        cookie <- signinOnly baseUsername basePassword
+        assertPeriodTripsValidationError cookie Nothing (Just "2025-03-10T12:00") "start is required"
+        assertPeriodTripsValidationError cookie (Just "not-a-date") (Just "2025-03-10T12:00") "start must be a valid ISO date-time string"
+        assertPeriodTripsValidationError cookie (Just "2025-03-10T12:00") (Just "2025-03-10T12:00") "end must be strictly after start"
+
+      it "should require both subscriptions and shares to expose period trips" $ do
+        baseCookie <- signinOnly baseUsername basePassword
+        otherCookie <- signinOnly otherUsername basePassword
+        thirdCookie <- signinOnly thirdUsername basePassword
+        clearAgendaItems baseCookie
+        clearAgendaItems otherCookie
+        clearAgendaItems thirdCookie
+        clearSharedUsers baseCookie [otherUsername, thirdUsername]
+        clearSharedUsers otherCookie [baseUsername, thirdUsername]
+        clearSharedUsers thirdCookie [baseUsername, otherUsername]
+        clearSubscribedUsers baseCookie [otherUsername, thirdUsername]
+        clearSubscribedUsers otherCookie [baseUsername, thirdUsername]
+        clearSubscribedUsers thirdCookie [baseUsername, otherUsername]
+        otherTrip <- createAgendaItem otherCookie (mkTripContent "2025-03-10T09:00" "2025-03-10T10:00" "Paris" "Le Mesnil")
+        thirdTrip <- createAgendaItem thirdCookie (mkTripContent "2025-03-10T11:00" "2025-03-10T12:00" "Le Mesnil" "St Clair")
+        addSubscribedUser baseCookie otherUsername
+        addSharedUser thirdCookie baseUsername
+        invisibleTrips <- getPeriodTripsList baseCookie "2025-03-10T00:00" "2025-03-11T00:00"
+        assertEqual "Trips should stay hidden without both relations" [] invisibleTrips
+        addSharedUser otherCookie baseUsername
+        addSubscribedUser baseCookie thirdUsername
+        firstRead <- getPeriodTripsList baseCookie "2025-03-10T00:00" "2025-03-11T00:00"
+        secondRead <- getPeriodTripsList baseCookie "2025-03-10T00:00" "2025-03-11T00:00"
+        let expected =
+              [ periodTripsUserValue otherUsername [otherTrip]
+              , periodTripsUserValue thirdUsername [thirdTrip]
+              ]
+        assertEqual "Visible trip users should be returned in stable username order" expected firstRead
+        assertEqual "Repeated period-trip reads should stay stable" expected secondRead
+        clearAgendaItems baseCookie
+        clearAgendaItems otherCookie
+        clearAgendaItems thirdCookie
+        clearSharedUsers baseCookie [otherUsername, thirdUsername]
+        clearSharedUsers otherCookie [baseUsername, thirdUsername]
+        clearSharedUsers thirdCookie [baseUsername, otherUsername]
+        clearSubscribedUsers baseCookie [otherUsername, thirdUsername]
+        clearSubscribedUsers otherCookie [baseUsername, thirdUsername]
+        clearSubscribedUsers thirdCookie [baseUsername, otherUsername]
+
+      it "should include the last seed trip before start and only in-period trips with start inclusive and end exclusive" $ do
+        baseCookie <- signinOnly baseUsername basePassword
+        otherCookie <- signinOnly otherUsername basePassword
+        clearAgendaItems baseCookie
+        clearAgendaItems otherCookie
+        clearSharedUsers otherCookie [baseUsername]
+        clearSubscribedUsers baseCookie [otherUsername]
+        addSharedUser otherCookie baseUsername
+        addSubscribedUser baseCookie otherUsername
+        earlyTrip <- createAgendaItem otherCookie (mkTripContent "2025-03-20T07:00" "2025-03-20T08:00" "Paris" "Le Mesnil")
+        seedTrip <- createAgendaItem otherCookie (mkTripContent "2025-03-20T09:00" "2025-03-20T09:30" "Le Mesnil" "Paris")
+        startTrip <- createAgendaItem otherCookie (mkTripContent "2025-03-20T10:00" "2025-03-20T11:00" "Paris" "St Clair")
+        middleTrip <- createAgendaItem otherCookie (mkTripContent "2025-03-20T12:00" "2025-03-20T13:00" "St Clair" "Le Mesnil")
+        endTrip <- createAgendaItem otherCookie (mkTripContent "2025-03-20T15:00" "2025-03-20T16:00" "Le Mesnil" "Paris")
+        trips <- getPeriodTripsList baseCookie "2025-03-20T10:00" "2025-03-20T15:00"
+        let expected = [periodTripsUserValue otherUsername [seedTrip, startTrip, middleTrip]]
+        assertEqual "Expected seed trip and in-period trips only" expected trips
+        case (earlyTrip, endTrip) of
+          (Agenda.ServerCalendarItem {}, Agenda.ServerCalendarItem {}) -> pure ()
+          _ -> assertFailure "Expected stored trip items"
+        clearAgendaItems baseCookie
+        clearAgendaItems otherCookie
+        clearSharedUsers otherCookie [baseUsername]
+        clearSubscribedUsers baseCookie [otherUsername]
+
+      it "should exclude users without qualifying trips and ignore legacy agenda items" $ do
+        baseCookie <- signinOnly baseUsername basePassword
+        otherCookie <- signinOnly otherUsername basePassword
+        thirdCookie <- signinOnly thirdUsername basePassword
+        clearAgendaItems baseCookie
+        clearAgendaItems otherCookie
+        clearAgendaItems thirdCookie
+        clearSharedUsers otherCookie [baseUsername]
+        clearSharedUsers thirdCookie [baseUsername]
+        clearSubscribedUsers baseCookie [otherUsername, thirdUsername]
+        addSharedUser otherCookie baseUsername
+        addSharedUser thirdCookie baseUsername
+        addSubscribedUser baseCookie otherUsername
+        addSubscribedUser baseCookie thirdUsername
+        _ <- createAgendaItem otherCookie agendaItemContent
+        _ <- createAgendaItem thirdCookie (mkTripContent "2025-03-30T15:00" "2025-03-30T16:00" "Paris" "Le Mesnil")
+        trips <- getPeriodTripsList baseCookie "2025-03-30T10:00" "2025-03-30T12:00"
+        assertEqual "Visible users without a seed trip or in-period trip should be excluded" [] trips
+        clearAgendaItems baseCookie
+        clearAgendaItems otherCookie
+        clearAgendaItems thirdCookie
+        clearSharedUsers otherCookie [baseUsername]
+        clearSharedUsers thirdCookie [baseUsername]
+        clearSubscribedUsers baseCookie [otherUsername, thirdUsername]
 
       it "should support agenda create/list/update/validate/delete lifecycle" $ do
         cookie <- signinOnly baseUsername basePassword
@@ -810,6 +910,10 @@ data TripSharingSubscriptionsEndpoint = TripSharingSubscriptionsEndpoint
 instance Endpoint TripSharingSubscriptionsEndpoint where
     getEndpoint TripSharingSubscriptionsEndpoint = "/api/v1/trip-sharing/subscriptions"
 
+data TripSharingPeriodTripsEndpoint = TripSharingPeriodTripsEndpoint
+instance Endpoint TripSharingPeriodTripsEndpoint where
+    getEndpoint TripSharingPeriodTripsEndpoint = "/api/v1/trip-sharing/period-trips"
+
 class (ToJSON requestType, FromJSON responseType, Endpoint endpoint, Method methodType) => RequestType methodType endpoint requestType responseType | endpoint methodType -> requestType, endpoint methodType requestType -> responseType where
     sendRequestWithJSONBody :: endpoint -> methodType -> requestType -> IO (Response responseType)
 
@@ -949,6 +1053,46 @@ deleteSubscribedUser cookie username = do
 
 clearSubscribedUsers :: String -> [String] -> IO ()
 clearSubscribedUsers cookie = mapM_ (deleteSubscribedUser cookie)
+
+periodTripsRequest :: Maybe String -> Maybe String -> Maybe String -> IO Request
+periodTripsRequest mCookie mStart mEnd = do
+  req <- parseRequest ("GET http://localhost:8081" ++ getEndpoint TripSharingPeriodTripsEndpoint)
+  let withCookie :: Request -> Request
+      withCookie =
+        case mCookie of
+          Nothing -> \req' -> req'
+          Just cookie -> setRequestHeader "Cookie" [BS.pack cookie]
+      query =
+        maybe [] (\start -> [("start", Just (BS.pack start))]) mStart ++
+        maybe [] (\end -> [("end", Just (BS.pack end))]) mEnd
+  pure $ withCookie $ setRequestMethod "GET" $ setRequestQueryString query req
+
+getPeriodTripsList :: String -> String -> String -> IO [Value]
+getPeriodTripsList cookie start end = do
+  req <- periodTripsRequest (Just cookie) (Just start) (Just end)
+  resp <- httpJSON req
+  assertStatusCode200 "Period trips request should succeed" (resp :: Response [Value])
+  pure (getResponseBody resp)
+
+assertPeriodTripsValidationError :: String -> Maybe String -> Maybe String -> String -> IO ()
+assertPeriodTripsValidationError cookie mStart mEnd expectedMessage = do
+  req <- periodTripsRequest (Just cookie) mStart mEnd
+  resp <- httpJSON req
+  assertStatusCode "Period trips validation should return 400" 400 (resp :: Response Value)
+  assertMessageResponse expectedMessage resp
+
+periodTripsUserValue :: String -> [Agenda.CalendarItem] -> Value
+periodTripsUserValue username trips = object ["username" .= username, "trips" .= trips]
+
+clearAgendaItems :: String -> IO ()
+clearAgendaItems cookie = do
+  items <- getAgendaItems cookie
+  mapM_ deleteStoredItem items
+  where
+    deleteStoredItem item =
+      case item of
+        Agenda.ServerCalendarItem {} -> deleteAgendaItem cookie (Agenda.itemId item)
+        Agenda.NewCalendarItem {} -> pure ()
 
 createAgendaItem :: String -> Agenda.CalendarItemContent -> IO Agenda.CalendarItem
 createAgendaItem cookie content = do

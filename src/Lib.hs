@@ -11,7 +11,7 @@ import Prelude hiding (log, writeFile)
 import Data.Aeson (ToJSON(toJSON), FromJSON(parseJSON), decode, encode, decode', eitherDecodeFileStrict', (.:), (.:?), (.=), withObject, object)
 import Data.Function ((&))
 import Data.Functor ((<$>))
-import Data.Maybe (Maybe(..), fromMaybe, mapMaybe)
+import Data.Maybe (Maybe(..), fromMaybe, mapMaybe, catMaybes)
 import Data.Int (Int64)
 import Control.Monad (msum, mzero, join, foldM, when, mplus)
 import Control.Monad.Except (catchError, throwError)
@@ -21,7 +21,7 @@ import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import Control.Monad.IO.Class (liftIO, MonadIO)
 import Data.Either (either)
 import Data.ByteString.Char8 (unpack)
-import Data.List (isPrefixOf)
+import Data.List (isPrefixOf, sortOn)
 import Data.Char (toLower)
 import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
 import Happstack.Server (FilterMonad, Response, ServerPartT, RqBody, takeRequestBody, unBody, rqBody, decodeBody, askRq, defaultBodyPolicy, nullDir, path, serveFileFrom, guessContentTypeM, mimeTypes, uriRest, nullConf, simpleHTTP, toResponse, method, ok, internalServerError, notFound, dir, Method(GET, POST, DELETE, PUT), Conf(..), addCookie, mkCookie, CookieLife(Session, Expired), getHeaderM, unauthorized, requestEntityTooLarge, look)
@@ -95,11 +95,28 @@ newtype TripSharingUser = TripSharingUser
   { tripSharingUsername :: String
   }
 
+data PeriodTripsUser = PeriodTripsUser
+  { periodTripsUsername :: String
+  , periodTripsItems :: [Agenda.CalendarItem]
+  }
+
+data StoredTripItem = StoredTripItem
+  { storedTripStart :: LocalTime
+  , storedTripCalendarItem :: Agenda.CalendarItem
+  }
+
 instance ToJSON TripPlace where
   toJSON (TripPlace placeName) = object ["name" .= placeName]
 
 instance ToJSON TripSharingUser where
   toJSON (TripSharingUser username) = object ["username" .= username]
+
+instance ToJSON PeriodTripsUser where
+  toJSON (PeriodTripsUser username trips) =
+    object
+      [ "username" .= username
+      , "trips" .= trips
+      ]
 
 instance FromJSON TripSharingUser where
   parseJSON = withObject "TripSharingUser" $ \value -> TripSharingUser
@@ -198,6 +215,75 @@ storedTripIntervals existingItems mCurrentItemId =
         Agenda.ServerCalendarItem { Agenda.content = Agenda.TripCalendarItemContent tripContent } ->
           maybe (Left ()) Right (tripInterval tripContent)
         _ -> Left ()
+
+parsePeriodTripBounds :: Maybe String -> Maybe String -> Either String (LocalTime, LocalTime)
+parsePeriodTripBounds Nothing _ = Left "start is required"
+parsePeriodTripBounds _ Nothing = Left "end is required"
+parsePeriodTripBounds (Just rawStart) (Just rawEnd) =
+  case (parseTripLocalTime rawStart, parseTripLocalTime rawEnd) of
+    (Nothing, _) -> Left "start must be a valid ISO date-time string"
+    (_, Nothing) -> Left "end must be a valid ISO date-time string"
+    (Just start, Just end)
+      | end <= start -> Left "end must be strictly after start"
+      | otherwise -> Right (start, end)
+
+resolveVisiblePeriodTripUsers :: String -> IO (Either () [String])
+resolveVisiblePeriodTripUsers principalUserId = do
+  subscribedUsersResult <- getSubscribedUsers defaultTripSubscriptionStorageConfig principalUserId
+  case subscribedUsersResult of
+    Left _ -> pure (Left ())
+    Right subscribedUsers -> do
+      visibilityResults <- mapM isVisibleToPrincipal subscribedUsers
+      pure $ case sequence visibilityResults of
+        Left _ -> Left ()
+        Right visibleUsers -> Right [username | (username, True) <- visibleUsers]
+  where
+    isVisibleToPrincipal username = do
+      sharedUsersResult <- getSharedUsers defaultTripShareStorageConfig username
+      pure $ case sharedUsersResult of
+        Left _ -> Left ()
+        Right sharedUsers -> Right (username, principalUserId `elem` sharedUsers)
+
+loadPeriodTripsForUsers :: [String] -> LocalTime -> LocalTime -> IO (Either () [PeriodTripsUser])
+loadPeriodTripsForUsers usernames periodStart periodEnd = do
+  groups <- mapM buildUserGroup usernames
+  pure $ fmap catMaybes (sequence groups)
+  where
+    buildUserGroup username = do
+      items <- getCalendarItems defaultCalendarStorageConfig username
+      pure $ case selectPeriodTrips periodStart periodEnd items of
+        Left () -> Left ()
+        Right [] -> Right Nothing
+        Right trips -> Right (Just (PeriodTripsUser username trips))
+
+selectPeriodTrips :: LocalTime -> LocalTime -> [Agenda.CalendarItem] -> Either () [Agenda.CalendarItem]
+selectPeriodTrips periodStart periodEnd items = do
+  storedTrips <- storedTripItems items
+  let orderedTrips = sortOn storedTripStart storedTrips
+      seedTrip = case filter (\trip -> storedTripStart trip < periodStart) orderedTrips of
+        [] -> Nothing
+        earlierTrips -> Just (last earlierTrips)
+      periodTrips =
+        [ storedTripCalendarItem trip
+        | trip <- orderedTrips
+        , storedTripStart trip >= periodStart
+        , storedTripStart trip < periodEnd
+        ]
+  pure $
+    case seedTrip of
+      Nothing -> periodTrips
+      Just trip -> storedTripCalendarItem trip : periodTrips
+
+storedTripItems :: [Agenda.CalendarItem] -> Either () [StoredTripItem]
+storedTripItems items = catMaybes <$> mapM toStoredTripItem items
+  where
+    toStoredTripItem item =
+      case item of
+        Agenda.ServerCalendarItem { Agenda.content = Agenda.TripCalendarItemContent tripContent } ->
+          case parseTripLocalTime (Agenda.tripWindowStart tripContent) of
+            Nothing -> Left ()
+            Just tripStart -> Right (Just (StoredTripItem tripStart item))
+        _ -> Right Nothing
 
 badRequest :: FilterMonad Response m => String -> m Response
 badRequest = HServer.badRequest . jsonMessage
@@ -512,8 +598,26 @@ tripSharingController AppContext { sessionPrincipal = SessionPrincipal { princip
                                                                    , subscriptionsAdd
                                                                    , subscriptionsDelete
                                                                    ]
+                                      , dir "period-trips" periodTripsList
                                       ]
   where
+    periodTripsList = do
+      nullDir
+      method GET
+      mStart <- (Just <$> look "start") `mplus` pure Nothing
+      mEnd <- (Just <$> look "end") `mplus` pure Nothing
+      case parsePeriodTripBounds mStart mEnd of
+        Left message -> badRequest message
+        Right (periodStart, periodEnd) -> do
+          visibleUsersResult <- liftIO $ resolveVisiblePeriodTripUsers principalUserId
+          case visibleUsersResult of
+            Left () -> internalServerError emptyResponse
+            Right visibleUsers -> do
+              groupsResult <- liftIO $ loadPeriodTripsForUsers visibleUsers periodStart periodEnd
+              case groupsResult of
+                Left () -> internalServerError emptyResponse
+                Right groups -> ok (jsonResponse groups)
+
     sharesList = do
       nullDir
       method GET

@@ -12,7 +12,7 @@ import Model (Identifiable(..), NoteContent(..), ChecklistContent(..), Checklist
 import System.Directory (removeDirectoryRecursive, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, getCurrentDirectory, getPermissions, Permissions(..))
 import Data.Maybe (fromJust)
 import Data.Either (isRight)
-import Data.List ((\\), sortOn)
+import Data.List ((\\), sortOn, isInfixOf)
 import Control.Monad (when)
 import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import Control.Monad.Trans.Except (runExceptT)
@@ -528,7 +528,8 @@ withEmptyTripSharingDirs action = do
 
 signupValidationTests = test [ "Signup should reject short passwords" ~: rejectShortPassword
                              , "Signup should reject invalid usernames" ~: rejectInvalidUsername
-                             , "Signup should create a user profile on valid payload" ~: signupNominal
+                             , "Signup should create a pending member profile on valid payload" ~: signupNominal
+                             , "Signup should bootstrap the configured admin as approved" ~: signupBootstrapAdmin
                              , "Signup should fail when user already exists" ~: signupAlreadyExistingUser
                              , "Signup should create restricted file permissions" ~: signupUsesRestrictedPermissions
                              ]
@@ -558,7 +559,22 @@ signupNominal = withCleanSignupUser "signup-nominal-user" $ \username -> do
         let profilePath = cd ++ "/data/users/" ++ username ++ "/profile.json"
         profileExists <- doesFileExist profilePath
         assertBool "Expected signup profile file to exist" profileExists
+        contents <- BL8.unpack <$> BL8.readFile profilePath
+        assertBool "Expected signup profile to persist pending approval" ("\"approvalStatus\":\"pending\"" `isInfixOf` contents)
+        assertBool "Expected signup profile to persist member role" ("\"role\":\"member\"" `isInfixOf` contents)
       _ -> assertFailure "Expected signup success"
+
+signupBootstrapAdmin :: IO ()
+signupBootstrapAdmin = withCleanSignupUser "bootstrap-admin-user" $ \username -> do
+    let validPassword = pack "averystrongpass"
+    result <- runExceptT $ createUserWithBootstrapAdmin (Just username) $ AuthRequest { username = username, password = validPassword }
+    case result of
+      Right () -> do
+        signinResult <- runExceptT $ signinUser $ AuthRequest { username = username, password = validPassword }
+        case signinResult of
+          Right () -> pure ()
+          _ -> assertFailure "Expected bootstrap admin signin success"
+      _ -> assertFailure "Expected bootstrap admin signup success"
 
 signupAlreadyExistingUser :: IO ()
 signupAlreadyExistingUser = withCleanSignupUser "signup-existing-user" $ \username -> do
@@ -593,7 +609,8 @@ signupUsesRestrictedPermissions = withCleanSignupUser "signup-permissions-user" 
       _ -> assertFailure "Expected signup success"
 
 
-signinValidationTests = test [ "Signin should authenticate with valid credentials" ~: signinNominal
+signinValidationTests = test [ "Signin should reject pending users even with valid credentials" ~: signinRejectsPendingUser
+                             , "Signin should authenticate with valid credentials once approved" ~: signinNominal
                              , "Signin should reject invalid password" ~: signinRejectsInvalidPassword
                              , "Signin should reject unknown users" ~: signinRejectsUnknownUser
                              ]
@@ -604,10 +621,26 @@ signinNominal = withCleanSignupUser "signin-nominal-user" $ \username -> do
     signupResult <- runExceptT $ createUser $ AuthRequest { username = username, password = validPassword }
     case signupResult of
       Right () -> do
+        approvalResult <- runExceptT $ approveUser username
+        case approvalResult of
+          Left _ -> assertFailure "Expected signup approval"
+          Right () -> pure ()
         signinResult <- runExceptT $ signinUser $ AuthRequest { username = username, password = validPassword }
         case signinResult of
           Right () -> assertBool "Signin should succeed" True
           _ -> assertFailure "Expected successful signin"
+      _ -> assertFailure "Expected signup success"
+
+signinRejectsPendingUser :: IO ()
+signinRejectsPendingUser = withCleanSignupUser "signin-pending-user" $ \username -> do
+    let validPassword = pack "averystrongpass"
+    signupResult <- runExceptT $ createUser $ AuthRequest { username = username, password = validPassword }
+    case signupResult of
+      Right () -> do
+        signinResult <- runExceptT $ signinUser $ AuthRequest { username = username, password = validPassword }
+        case signinResult of
+          Left AccountPendingApproval -> assertBool "AccountPendingApproval expected" True
+          _ -> assertFailure "Expected AccountPendingApproval"
       _ -> assertFailure "Expected signup success"
 
 signinRejectsInvalidPassword :: IO ()
@@ -616,6 +649,10 @@ signinRejectsInvalidPassword = withCleanSignupUser "signin-invalid-password-user
     signupResult <- runExceptT $ createUser $ AuthRequest { username = username, password = validPassword }
     case signupResult of
       Right () -> do
+        approvalResult <- runExceptT $ approveUser username
+        case approvalResult of
+          Left _ -> assertFailure "Expected signup approval"
+          Right () -> pure ()
         signinResult <- runExceptT $ signinUser $ AuthRequest { username = username, password = pack "wrongpassword!!" }
         case signinResult of
           Left InvalidCredentials -> assertBool "InvalidCredentials expected" True

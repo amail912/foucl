@@ -9,12 +9,24 @@ Optional env vars:
 - `FOUCL_CONFIG_FILE`: path to the JSON config file (default: `config/app-config.json`).
 - `FOUCL_SESSION_COOKIE_SECURE`: set to `false` (or `0`) to allow HTTP in dev. Default is `true`.
 
+Required config fields:
+- `auth.bootstrapAdminUsername`: username that is bootstrapped as the first approved admin.
+
 ## API
 
 Auth:
 - `POST /api/signup`
 - `POST /api/signin`
 - `POST /api/signout`
+
+Signup behavior:
+- `POST /api/signup` creates a pending account for normal users.
+- Pending users cannot sign in until an admin approves them.
+- The configured bootstrap admin username is created as an approved admin account.
+
+Admin (auth required, admin only):
+- `GET /api/v1/admin/pending-signups`
+- `POST /api/v1/admin/pending-signups/approve`
 
 Notes (auth required):
 - `GET /api/note`

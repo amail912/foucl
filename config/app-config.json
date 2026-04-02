@@ -1,4 +1,7 @@
 {
+  "auth": {
+    "bootstrapAdminUsername": "admin"
+  },
   "session": {
     "cookieName": "foucl_session",
     "absoluteTtlSeconds": 604800,

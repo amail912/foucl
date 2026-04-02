@@ -57,7 +57,7 @@ import Data.Time.Format.ISO8601 (iso8601ParseM)
 import GHC.Generics (Generic)
 import Data.ByteString.Lazy.Char8 (writeFile)
 import Filesystem.Path.CurrentOS    (commonPrefix, encodeString, decodeString, collapse, append)
-import Auth (AuthRequest(..), AuthRequestError(..), AuthError(..), createUser, signinUser, userExists)
+import Auth (AuthRequest(..), AuthRequestError(..), AuthError(..), createUserWithBootstrapAdmin, signinUser, userExists, isApprovedAdmin, listPendingUsers, approveUser)
 import Session (SessionConfig(..), SessionPrincipal(..), SessionStore(..), defaultSessionConfig, mkFileSessionStore, signSessionId, verifyAndExtractSessionId)
 
 type AppM a = ExceptT String (ServerPartT IO) a
@@ -75,13 +75,28 @@ instance FromJSON SessionConfigFile where
     <*> v .:? "absoluteTtlSeconds"
     <*> v .:? "idleTtlSeconds"
 
-newtype AppConfigFile = AppConfigFile
+newtype AuthConfigFile = AuthConfigFile
+  { bootstrapAdminUsernameFile :: String
+  } deriving (Generic)
+
+instance FromJSON AuthConfigFile where
+  parseJSON = withObject "AuthConfigFile" $ \v -> AuthConfigFile
+    <$> v .: "bootstrapAdminUsername"
+
+data AppConfigFile = AppConfigFile
   { appSession :: SessionConfigFile
+  , appAuth :: AuthConfigFile
   } deriving (Generic)
 
 instance FromJSON AppConfigFile where
   parseJSON = withObject "AppConfigFile" $ \v -> AppConfigFile
     <$> v .: "session"
+    <*> v .: "auth"
+
+data AppConfig = AppConfig
+  { sessionConfig :: SessionConfig
+  , bootstrapAdminUsername :: String
+  }
 
 newtype AppContext = AppContext
   { sessionPrincipal :: SessionPrincipal
@@ -93,6 +108,10 @@ newtype TripPlace = TripPlace
 
 newtype TripSharingUser = TripSharingUser
   { tripSharingUsername :: String
+  }
+
+newtype PendingSignupApproval = PendingSignupApproval
+  { pendingSignupApprovalUsername :: String
   }
 
 data PeriodTripsUser = PeriodTripsUser
@@ -111,6 +130,9 @@ instance ToJSON TripPlace where
 instance ToJSON TripSharingUser where
   toJSON (TripSharingUser username) = object ["username" .= username]
 
+instance ToJSON PendingSignupApproval where
+  toJSON (PendingSignupApproval username) = object ["username" .= username]
+
 instance ToJSON PeriodTripsUser where
   toJSON (PeriodTripsUser username trips) =
     object
@@ -120,6 +142,10 @@ instance ToJSON PeriodTripsUser where
 
 instance FromJSON TripSharingUser where
   parseJSON = withObject "TripSharingUser" $ \value -> TripSharingUser
+    <$> value .: "username"
+
+instance FromJSON PendingSignupApproval where
+  parseJSON = withObject "PendingSignupApproval" $ \value -> PendingSignupApproval
     <$> value .: "username"
 
 tripPlacesCatalog :: [TripPlace]
@@ -311,10 +337,11 @@ instance ToServerResponse AuthError where
                      UsernameTooLong -> "Username is too long"
   toServerResponse UserAlreadyExists = badRequest "Unable to create user"
   toServerResponse InvalidCredentials = unauthorized $ jsonMessage "Invalid credentials"
+  toServerResponse AccountPendingApproval = HServer.forbidden $ jsonMessage "Account pending approval"
   toServerResponse (TechnicalError _) = internalServerError $ jsonMessage "Unable to process authentication"
 
-loadSessionConfigFromFile :: IO (Either String SessionConfig)
-loadSessionConfigFromFile = do
+loadAppConfigFromFile :: IO (Either String AppConfig)
+loadAppConfigFromFile = do
   mSecret <- lookupEnv "FOUCL_SESSION_SECRET"
   mConfigPath <- lookupEnv "FOUCL_CONFIG_FILE"
   mCookieSecureRaw <- lookupEnv "FOUCL_SESSION_COOKIE_SECURE"
@@ -330,18 +357,25 @@ loadSessionConfigFromFile = do
           decoded <- eitherDecodeFileStrict' configPath :: IO (Either String AppConfigFile)
           case decoded of
             Left err -> pure $ Left ("Unable to parse configuration file: " ++ err)
-            Right fileConfig -> pure $ Right (toSessionConfig secret fileConfig (parseBool =<< mCookieSecureRaw))
+            Right fileConfig ->
+              case toAppConfig secret fileConfig (parseBool =<< mCookieSecureRaw) of
+                Left err -> pure $ Left err
+                Right appConfig -> pure $ Right appConfig
 
-
-toSessionConfig :: String -> AppConfigFile -> Maybe Bool -> SessionConfig
-toSessionConfig secret AppConfigFile {appSession = SessionConfigFile {sessionCookieNameFile, sessionAbsoluteTtlSecondsFile, sessionIdleTtlSecondsFile}} mCookieSecure =
-  defaultSessionConfig
-    { sessionSecret = secret
-    , sessionCookieName = fromMaybe (sessionCookieName defaultSessionConfig) sessionCookieNameFile
-    , sessionAbsoluteTtlSeconds = fromIntegral (fromMaybe (round (sessionAbsoluteTtlSeconds defaultSessionConfig)) sessionAbsoluteTtlSecondsFile)
-    , sessionIdleTtlSeconds = fromIntegral (fromMaybe (round (sessionIdleTtlSeconds defaultSessionConfig)) sessionIdleTtlSecondsFile)
-    , sessionCookieSecure = fromMaybe (sessionCookieSecure defaultSessionConfig) mCookieSecure
-    }
+toAppConfig :: String -> AppConfigFile -> Maybe Bool -> Either String AppConfig
+toAppConfig secret AppConfigFile {appSession = SessionConfigFile {sessionCookieNameFile, sessionAbsoluteTtlSecondsFile, sessionIdleTtlSecondsFile}, appAuth = AuthConfigFile {bootstrapAdminUsernameFile}} mCookieSecure
+  | null bootstrapAdminUsernameFile = Left "Configuration auth.bootstrapAdminUsername cannot be empty"
+  | otherwise = Right AppConfig
+      { sessionConfig =
+          defaultSessionConfig
+            { sessionSecret = secret
+            , sessionCookieName = fromMaybe (sessionCookieName defaultSessionConfig) sessionCookieNameFile
+            , sessionAbsoluteTtlSeconds = fromIntegral (fromMaybe (round (sessionAbsoluteTtlSeconds defaultSessionConfig)) sessionAbsoluteTtlSecondsFile)
+            , sessionIdleTtlSeconds = fromIntegral (fromMaybe (round (sessionIdleTtlSeconds defaultSessionConfig)) sessionIdleTtlSecondsFile)
+            , sessionCookieSecure = fromMaybe (sessionCookieSecure defaultSessionConfig) mCookieSecure
+            }
+      , bootstrapAdminUsername = bootstrapAdminUsernameFile
+      }
 
 parseBool :: String -> Maybe Bool
 parseBool raw =
@@ -355,34 +389,39 @@ parseBool raw =
 runApp :: IO ()
 runApp = do
     putStrLn "running server"
-    sessionConfigResult <- loadSessionConfigFromFile
-    case sessionConfigResult of
+    appConfigResult <- loadAppConfigFromFile
+    case appConfigResult of
       Left err -> do
         putStrLn $ "[startup-error] " ++ err
         exitFailure
-      Right sessionConfig -> do
+      Right appConfig -> do
         signupRateLimitState <- newMVar []
         tmpDir <- getTemporaryDirectory
         cd <- getCurrentDirectory
-        sessionStore <- mkFileSessionStore (cd </> "data" </> "sessions") sessionConfig
+        let sessionCfg = sessionConfig appConfig
+        sessionStore <- mkFileSessionStore (cd </> "data" </> "sessions") sessionCfg
         simpleHTTP nullConf { port = 8081 } $ do
             log "Incoming request" >> log "=========================END REQUEST====================\n"
             msum [ homePage
-                 , apiController signupRateLimitState tmpDir sessionConfig sessionStore
+                 , apiController signupRateLimitState tmpDir appConfig sessionStore
                  , serveStaticResource
                  , mzero
                  ]
 
-apiController :: MVar [UTCTime] -> FilePath -> SessionConfig -> SessionStore -> ServerPartT IO Response
-apiController signupRateLimitState tmpDir sessionConfig sessionStore = dir "api" $ msum [ signupController signupRateLimitState tmpDir
-                                                                                          , signinController sessionConfig sessionStore
-                                                                                          , signoutController sessionConfig sessionStore
-                                                                                          , requireAuth sessionConfig sessionStore noteController
-                                                                                          , requireAuth sessionConfig sessionStore checklistController
-                                                                                          , requireAuth sessionConfig sessionStore tripPlacesController
-                                                                                          , requireAuth sessionConfig sessionStore tripSharingController
-                                                                                          , requireAuth sessionConfig sessionStore agendaController
-                                                                                          ]
+apiController :: MVar [UTCTime] -> FilePath -> AppConfig -> SessionStore -> ServerPartT IO Response
+apiController signupRateLimitState tmpDir appConfig sessionStore =
+  let sessionCfg = sessionConfig appConfig
+      bootstrapAdmin = bootstrapAdminUsername appConfig
+  in dir "api" $ msum [ signupController signupRateLimitState tmpDir bootstrapAdmin
+                      , signinController sessionCfg sessionStore
+                      , signoutController sessionCfg sessionStore
+                      , requireAuth sessionCfg sessionStore noteController
+                      , requireAuth sessionCfg sessionStore checklistController
+                      , requireAuth sessionCfg sessionStore tripPlacesController
+                      , requireAuth sessionCfg sessionStore tripSharingController
+                      , requireAuth sessionCfg sessionStore agendaController
+                      , requireAuth sessionCfg sessionStore adminController
+                      ]
 
 homePage :: ServerPartT IO Response
 homePage = do
@@ -399,8 +438,8 @@ signupBodyPolicy tmpDir = defaultBodyPolicy tmpDir 0 maxSignupBodyBytes maxSignu
 isTooLargeBodyError :: String -> Bool
 isTooLargeBodyError err = "x-www-form-urlencoded content longer than BodyPolicy.maxRAM=" `isPrefixOf` err
 
-signupController :: MVar [UTCTime] -> FilePath -> ServerPartT IO Response
-signupController signupRateLimitState tmpDir = dir "signup" $ do
+signupController :: MVar [UTCTime] -> FilePath -> String -> ServerPartT IO Response
+signupController signupRateLimitState tmpDir bootstrapAdmin = dir "signup" $ do
     nullDir
     method POST
     rq <- askRq
@@ -426,7 +465,7 @@ signupController signupRateLimitState tmpDir = dir "signup" $ do
 
           doCreateUser :: AuthRequest -> ServerPartT IO Response --AppM Response
           doCreateUser signupRequest = do
-            res <- liftIO $ runExceptT $ createUser signupRequest
+            res <- liftIO $ runExceptT $ createUserWithBootstrapAdmin (Just bootstrapAdmin) signupRequest
             either toServerResponse
                    (const $ ok emptyResponse)
                    res
@@ -565,6 +604,14 @@ requireAuth sessionConfig sessionStore handler = do
         Nothing -> unauthorized $ jsonMessage "Not authenticated"
         Just principal -> handler AppContext { sessionPrincipal = principal }
 
+requireApprovedAdmin :: AppContext -> ServerPartT IO Response -> ServerPartT IO Response
+requireApprovedAdmin AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } handler = do
+  adminCheck <- liftIO $ isApprovedAdmin principalUserId
+  case adminCheck of
+    Left _ -> internalServerError emptyResponse
+    Right False -> HServer.forbidden $ jsonMessage "Admin privileges required"
+    Right True -> handler
+
 
 noteController :: AppContext -> ServerPartT IO Response
 noteController _ = dir "note" noteHandlers
@@ -587,6 +634,41 @@ tripPlacesController _ = dir "v1" $ dir "trip-places" $ do
   nullDir
   method GET
   ok (jsonResponse tripPlacesCatalog)
+
+adminController :: AppContext -> ServerPartT IO Response
+adminController appContext =
+  dir "v1" $ dir "admin" $
+    dir "pending-signups" $ requireApprovedAdmin appContext $
+      msum [ pendingSignupsList
+           , pendingSignupApprove
+           ]
+  where
+    pendingSignupsList = do
+      nullDir
+      method GET
+      pendingUsersResult <- liftIO listPendingUsers
+      case pendingUsersResult of
+        Left _ -> internalServerError emptyResponse
+        Right pendingUsers -> ok (jsonResponse (map PendingSignupApproval pendingUsers))
+
+    pendingSignupApprove = do
+      dir "approve" $ do
+        nullDir
+        method POST
+        body <- askRq >>= takeRequestBody
+        maybe (badRequest "Empty body") handleBody body
+
+    handleBody :: RqBody -> ServerPartT IO Response
+    handleBody rqBody =
+      case decode' (unBody rqBody) :: Maybe PendingSignupApproval of
+        Nothing -> badRequest "Unable to decode the body as a PendingSignupApproval"
+        Just (PendingSignupApproval username)
+          | null username -> badRequest "username is required"
+          | otherwise -> do
+              result <- liftIO $ runExceptT $ approveUser username
+              either toServerResponse
+                     (const $ ok emptyResponse)
+                     result
 
 tripSharingController :: AppContext -> ServerPartT IO Response
 tripSharingController AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =

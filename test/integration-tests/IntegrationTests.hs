@@ -65,8 +65,9 @@ runIntegrationTests = do
         runCrudLifecycle cookie ChecklistEndpoint firstChecklistContent firstChecklistNewContent
 
       it "should authenticate signin using stored signup password hash" $ do
-        signinResponse <- performSigninNoBody baseUsername basePassword
+        signinResponse <- performSigninJSON baseUsername basePassword
         assertStatusCode "Signin should succeed with valid credentials" 200 signinResponse
+        assertSigninProfileResponse baseUsername ["admin"] True signinResponse
 
         invalidSigninResponse <- performSignin baseUsername "wrongpasswordbad"
         assertStatusCode "Signin should reject invalid password" 401 invalidSigninResponse
@@ -1240,6 +1241,21 @@ assertMessageResponse expectedMessage response =
         Just actualMessage -> assertEqual "Expected validation error message" expectedMessage (actualMessage :: String)
         Nothing -> assertFailure "Expected response body to contain a message field"
     _ -> assertFailure "Expected JSON object error response"
+
+assertSigninProfileResponse :: String -> [String] -> Bool -> Response Value -> Assertion
+assertSigninProfileResponse expectedUsername expectedRoles expectedApproved response =
+  case getResponseBody response of
+    Object value -> do
+      case parseMaybe (.: "username") value of
+        Just actualUsername -> assertEqual "Expected signin profile username" expectedUsername (actualUsername :: String)
+        Nothing -> assertFailure "Expected signin profile username"
+      case parseMaybe (.: "roles") value of
+        Just actualRoles -> assertEqual "Expected signin profile roles" expectedRoles (actualRoles :: [String])
+        Nothing -> assertFailure "Expected signin profile roles"
+      case parseMaybe (.: "approved") value of
+        Just actualApproved -> assertEqual "Expected signin profile approval flag" expectedApproved (actualApproved :: Bool)
+        Nothing -> assertFailure "Expected signin profile approval flag"
+    _ -> assertFailure "Expected signin profile JSON object"
 
 validateAgendaItem :: String -> String -> Int -> IO ()
 validateAgendaItem cookie itemId minutes = do

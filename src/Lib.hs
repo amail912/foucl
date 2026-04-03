@@ -57,7 +57,7 @@ import Data.Time.Format.ISO8601 (iso8601ParseM)
 import GHC.Generics (Generic)
 import Data.ByteString.Lazy.Char8 (writeFile)
 import Filesystem.Path.CurrentOS    (commonPrefix, encodeString, decodeString, collapse, append)
-import Auth (AuthRequest(..), AuthRequestError(..), AuthError(..), createUserWithBootstrapAdmin, signinUser, userExists, isApprovedAdmin, listPendingUsers, approveUser)
+import Auth (AuthRequest(..), AuthRequestError(..), AuthError(..), AuthenticatedProfile(..), createUserWithBootstrapAdmin, signinUser, userExists, isApprovedAdmin, listPendingUsers, approveUser)
 import Session (SessionConfig(..), SessionPrincipal(..), SessionStore(..), defaultSessionConfig, mkFileSessionStore, signSessionId, verifyAndExtractSessionId)
 
 type AppM a = ExceptT String (ServerPartT IO) a
@@ -474,11 +474,11 @@ signinController :: SessionConfig -> SessionStore -> ServerPartT IO Response
 signinController sessionConfig sessionStore = dir "signin" $ do
   nullDir
   method POST
-  withBusinessHandlingAndInput signinUser $ \authReq -> do
-    sid <- liftIO $ createSessionForUser sessionStore (username authReq)
+  withBusinessHandlingAndInput signinUser $ \profile -> do
+    sid <- liftIO $ createSessionForUser sessionStore (authProfileUsername profile)
     let cookieValue = signSessionId (sessionSecret sessionConfig) sid
     addCookie Session (buildSessionCookie sessionConfig cookieValue)
-    ok emptyResponse
+    ok (jsonResponse profile)
 
 signoutController :: SessionConfig -> SessionStore -> ServerPartT IO Response
 signoutController sessionConfig sessionStore = dir "signout" $ do
@@ -538,7 +538,7 @@ withBusinessHandling handle = do
                    res
 
 
-withBusinessHandlingAndInput :: (FromJSON a, ToServerResponse e) => (a -> ExceptT e IO r) -> (a -> ServerPartT IO Response) -> ServerPartT IO Response
+withBusinessHandlingAndInput :: (FromJSON a, ToServerResponse e) => (a -> ExceptT e IO r) -> (r -> ServerPartT IO Response) -> ServerPartT IO Response
 withBusinessHandlingAndInput handle onSuccess = do
     body <- askRq >>= takeRequestBody
     maybe (badRequest "Empty body")
@@ -552,7 +552,7 @@ withBusinessHandlingAndInput handle onSuccess = do
       process input = do
         res <- liftIO $ runExceptT $ handle input
         either toServerResponse
-               (const $ onSuccess input)
+               onSuccess
                res
 
 buildSessionCookie :: SessionConfig -> String -> Cookie

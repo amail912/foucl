@@ -17,7 +17,6 @@ Let the frontend render authenticated state immediately after signin, restore au
 ## Stories
 
 ### Ready
-- [001 Return Profile On Signin](ready/001-return-profile-on-signin.md) - Return the authenticated profile body on successful signin with implementation-ready contract detail.
 
 ### To Refine
 - [002 Add Auth Profile Endpoint](to-refine/002-add-auth-profile-endpoint.md) - Add a cookie-based endpoint that returns the current authenticated profile.
@@ -26,3 +25,4 @@ Let the frontend render authenticated state immediately after signin, restore au
 - [005 Normalize Auth Admin Error Semantics](to-refine/005-normalize-auth-admin-error-semantics.md) - Make auth and admin endpoints return stable frontend-usable status classes.
 
 ### Done
+- [001 Return Profile On Signin](done/001-return-profile-on-signin.md) - Return the authenticated profile body on successful signin with implementation-ready contract detail.

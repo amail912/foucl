@@ -572,7 +572,10 @@ signupBootstrapAdmin = withCleanSignupUser "bootstrap-admin-user" $ \username ->
       Right () -> do
         signinResult <- runExceptT $ signinUser $ AuthRequest { username = username, password = validPassword }
         case signinResult of
-          Right () -> pure ()
+          Right profile -> do
+            assertEqual "Expected bootstrap admin username in signin profile" username (authProfileUsername profile)
+            assertEqual "Expected bootstrap admin role in signin profile" [AdminRole] (authProfileRoles profile)
+            assertBool "Expected bootstrap admin to be approved" (authProfileApproved profile)
           _ -> assertFailure "Expected bootstrap admin signin success"
       _ -> assertFailure "Expected bootstrap admin signup success"
 
@@ -627,7 +630,10 @@ signinNominal = withCleanSignupUser "signin-nominal-user" $ \username -> do
           Right () -> pure ()
         signinResult <- runExceptT $ signinUser $ AuthRequest { username = username, password = validPassword }
         case signinResult of
-          Right () -> assertBool "Signin should succeed" True
+          Right profile -> do
+            assertEqual "Expected signin username to match" username (authProfileUsername profile)
+            assertEqual "Expected member role in signin profile" [MemberRole] (authProfileRoles profile)
+            assertBool "Expected approved signin profile" (authProfileApproved profile)
           _ -> assertFailure "Expected successful signin"
       _ -> assertFailure "Expected signup success"
 

@@ -5,6 +5,7 @@ module Auth
   ( AuthRequest(..)
   , AuthError(..)
   , AuthRequestError(..)
+  , AuthenticatedProfile(..)
   , UserRole(..)
   , ApprovalStatus(..)
   , createUser
@@ -59,8 +60,22 @@ checkPasswordRules p = do
   when (Text.null p) $ throwError $ BadRequest EmptyPassword
   when (Text.length p < 12) $ throwError $ BadRequest PasswordTooShort
 
+data AuthenticatedProfile = AuthenticatedProfile
+  { authProfileUsername :: !String
+  , authProfileRoles :: ![UserRole]
+  , authProfileApproved :: !Bool
+  } deriving (Eq, Show)
+
 data UserRole = AdminRole | MemberRole deriving (Eq, Show)
 data ApprovalStatus = ApprovedStatus | PendingStatus deriving (Eq, Show)
+
+instance ToJSON AuthenticatedProfile where
+  toJSON (AuthenticatedProfile username roles approved) =
+    object
+      [ "username" .= username
+      , "roles" .= roles
+      , "approved" .= approved
+      ]
 
 instance ToJSON UserRole where
   toJSON AdminRole = "admin"
@@ -160,20 +175,20 @@ persistUser username passwordHash userRole approvalStatus = do
               Right _ -> pure ()
       _ -> throwError $ BadRequest UsernameDoesNotRespectPattern
 
-signinUser :: AuthRequest -> AuthAppM ()
+signinUser :: AuthRequest -> AuthAppM AuthenticatedProfile
 signinUser (AuthRequest {username, password}) = do
   maybeUser <- liftIO $ loadPersistedUser username
   case maybeUser of
     Left err -> throwError $ TechnicalError err
     Right Nothing -> throwError InvalidCredentials
-    Right (Just (PersistedUser {passwordHash, approvalStatus})) -> do
+    Right (Just persistedUser@(PersistedUser {passwordHash, approvalStatus})) -> do
       let checkResult = checkPassword (mkPassword password) passwordHash
       case checkResult of
         PasswordCheckFail -> throwError InvalidCredentials
         PasswordCheckSuccess ->
           case approvalStatus of
             PendingStatus -> throwError AccountPendingApproval
-            ApprovedStatus -> pure ()
+            ApprovedStatus -> pure (toAuthenticatedProfile persistedUser)
 
 userExists :: String -> IO Bool
 userExists username = do
@@ -252,3 +267,11 @@ usersDirectory :: IO FilePath
 usersDirectory = do
   cd <- getCurrentDirectory
   pure (cd </> "data" </> "users")
+
+toAuthenticatedProfile :: PersistedUser -> AuthenticatedProfile
+toAuthenticatedProfile PersistedUser {uname, userRole, approvalStatus} =
+  AuthenticatedProfile
+    { authProfileUsername = uname
+    , authProfileRoles = [userRole]
+    , authProfileApproved = approvalStatus == ApprovedStatus
+    }

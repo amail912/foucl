@@ -16,13 +16,11 @@ Let the frontend render authenticated state immediately after signin, restore au
 
 ## Stories
 
-### Ready
-
 ### To Refine
-- [003 Admin Pending User Deletion](to-refine/003-admin-pending-user-deletion.md) - Let admins delete pending signups in the same governance flow as approval.
 - [004 Admin Approved User Management](to-refine/004-admin-approved-user-management.md) - Let admins list and delete approved users.
 - [005 Normalize Auth Admin Error Semantics](to-refine/005-normalize-auth-admin-error-semantics.md) - Make auth and admin endpoints return stable frontend-usable status classes.
 
 ### Done
 - [001 Return Profile On Signin](done/001-return-profile-on-signin.md) - Return the authenticated profile body on successful signin with implementation-ready contract detail.
 - [002 Add Auth Profile Endpoint](done/002-add-auth-profile-endpoint.md) - Add a cookie-authenticated profile endpoint with implementation-ready contract detail.
+- [003 Admin Pending User Deletion](done/003-admin-pending-user-deletion.md) - Delete pending signups through an implementation-ready admin moderation contract.

@@ -136,6 +136,40 @@ runIntegrationTests = do
         approvedSigninResponse <- performSigninNoBody pendingUsername basePassword
         assertStatusCode "Approved user should be able to sign in" 200 approvedSigninResponse
 
+      it "should allow an admin to delete pending signups" $ do
+        uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
+        let pendingUsername = "deletable-" ++ show uniquenessSuffix
+        ensurePendingSandboxUser baseUsername pendingUsername basePassword
+
+        adminCookie <- signinOnly baseUsername basePassword
+        pendingUsersBeforeDelete <- getPendingSignups adminCookie
+        assertBool "Pending signup should be visible before delete" (pendingSignupValue pendingUsername `elem` pendingUsersBeforeDelete)
+
+        deletePendingSignup adminCookie pendingUsername
+
+        pendingUsersAfterDelete <- getPendingSignups adminCookie
+        assertBool "Deleted pending signup should no longer be visible" (pendingSignupValue pendingUsername `notElem` pendingUsersAfterDelete)
+
+        deletedSigninResponse <- performSigninJSON pendingUsername basePassword
+        assertStatusCode "Deleted pending user should no longer be able to sign in" 401 deletedSigninResponse
+        assertMessageResponse "Invalid credentials" deletedSigninResponse
+
+      it "should return not found when deleting an unknown pending signup" $ do
+        adminCookie <- signinOnly baseUsername basePassword
+        deleteResponse <- deletePendingSignupResponse adminCookie "missing-pending-user"
+        assertStatusCode "Deleting an unknown pending signup should return not found" 404 deleteResponse
+        assertMessageResponse "Not found" deleteResponse
+
+      it "should return not found when deleting an approved user through the pending-signup route" $ do
+        uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
+        let approvedUsername = "approved-delete-" ++ show uniquenessSuffix
+        ensureApprovedSandboxUser baseUsername approvedUsername basePassword
+
+        adminCookie <- signinOnly baseUsername basePassword
+        deleteResponse <- deletePendingSignupResponse adminCookie approvedUsername
+        assertStatusCode "Deleting an approved user through the pending-signup route should return not found" 404 deleteResponse
+        assertMessageResponse "Not found" deleteResponse
+
       it "should reject non-admin access to pending signup admin endpoints" $ do
         uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
         let memberUsername = "member-" ++ show uniquenessSuffix
@@ -155,6 +189,16 @@ runIntegrationTests = do
                              $ setRequestBodyJSON (object ["username" .= baseUsername]) approveReq
         assertStatusCode "Non-admin should be forbidden from approving pending signups" 403 approveResp
         assertMessageResponse "Admin privileges required" approveResp
+
+        deleteResp <- deletePendingSignupResponse memberCookie baseUsername
+        assertStatusCode "Non-admin should be forbidden from deleting pending signups" 403 deleteResp
+        assertMessageResponse "Admin privileges required" deleteResp
+
+      it "should reject unauthenticated delete access to pending signup admin endpoints" $ do
+        deleteReq <- parseRequest "DELETE http://localhost:8081/api/v1/admin/pending-signups/admin"
+        deleteResp <- httpJSON $ setRequestMethod "DELETE" deleteReq
+        assertStatusCode "Pending signup delete should require auth" 401 deleteResp
+        assertMessageResponse "Not authenticated" deleteResp
 
       it "should set session cookie attributes on signin" $ do
         signinResponse <- performSignin baseUsername basePassword
@@ -888,6 +932,17 @@ approvePendingSignup cookie username = do
                    $ setRequestHeader "Content-Type" ["application/json"]
                    $ setRequestBodyJSON (object ["username" .= username]) req
   assertStatusCode "Pending signup approval should succeed" 200 resp
+
+deletePendingSignup :: String -> String -> IO ()
+deletePendingSignup cookie username = do
+  resp <- deletePendingSignupResponse cookie username
+  assertStatusCode "Pending signup delete should succeed" 200 resp
+
+deletePendingSignupResponse :: String -> String -> IO (Response Value)
+deletePendingSignupResponse cookie username = do
+  req <- parseRequest ("DELETE http://localhost:8081/api/v1/admin/pending-signups/" ++ username)
+  httpJSON $ setRequestMethod "DELETE"
+           $ setRequestHeader "Cookie" [BS.pack cookie] req
 
 pendingSignupValue :: String -> Value
 pendingSignupValue username = object ["username" .= username]

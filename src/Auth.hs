@@ -17,6 +17,7 @@ module Auth
   , isApprovedAdmin
   , listPendingUsers
   , approveUser
+  , deletePendingUser
   ) where
 
 import Prelude hiding (writeFile)
@@ -28,7 +29,7 @@ import Data.ByteString.Lazy.Char8 (writeFile)
 import Data.Char (isAlphaNum)
 import Data.Password.Argon2 (PasswordHash(..), PasswordCheck(..), Argon2, mkPassword, hashPassword, checkPassword)
 import qualified Data.Text as Text (Text, null, length)
-import System.Directory (doesDirectoryExist, doesFileExist, createDirectory, getCurrentDirectory, canonicalizePath, makeAbsolute, emptyPermissions, setOwnerReadable, setOwnerWritable, setOwnerSearchable, setPermissions, listDirectory)
+import System.Directory (doesDirectoryExist, doesFileExist, createDirectory, getCurrentDirectory, canonicalizePath, makeAbsolute, emptyPermissions, setOwnerReadable, setOwnerWritable, setOwnerSearchable, setPermissions, listDirectory, removeDirectoryRecursive)
 import System.FilePath ((</>), normalise, takeDirectory, takeFileName, addTrailingPathSeparator)
 import Data.List (isPrefixOf)
 import Control.Exception (try, IOException)
@@ -36,7 +37,7 @@ import System.IO.Error (isAlreadyExistsError)
 import qualified Data.ByteString.Lazy as BL
 import Data.Maybe (catMaybes)
 
-data AuthError = BadRequest !AuthRequestError | UserAlreadyExists | InvalidCredentials | AccountPendingApproval | TechnicalError !AuthTechnicalError
+data AuthError = BadRequest !AuthRequestError | UserAlreadyExists | InvalidCredentials | AccountPendingApproval | ResourceNotFound | TechnicalError !AuthTechnicalError
 data AuthRequestError = EmptyUsername | EmptyPassword | UsernameDoesNotRespectPattern | UsernameTooShort | UsernameTooLong | PasswordTooShort
 data AuthTechnicalError = UsersDirDoesNotExist | UserStorageFailure | UserReadFailure deriving Eq
 type AuthAppM a = ExceptT AuthError IO a
@@ -220,6 +221,20 @@ approveUser username = do
     Right Nothing -> throwError InvalidCredentials
     Right (Just persistedUser) -> liftIO $ storePersistedUser persistedUser { approvalStatus = ApprovedStatus }
 
+deletePendingUser :: String -> AuthAppM ()
+deletePendingUser username = do
+  maybeUser <- liftIO $ loadPersistedUser username
+  case maybeUser of
+    Left err -> throwError $ TechnicalError err
+    Right Nothing -> throwError ResourceNotFound
+    Right (Just PersistedUser {approvalStatus})
+      | approvalStatus /= PendingStatus -> throwError ResourceNotFound
+      | otherwise -> do
+          deleteResult <- liftIO $ deletePersistedUser username
+          case deleteResult of
+            Left err -> throwError $ TechnicalError err
+            Right () -> pure ()
+
 loadAuthenticatedProfile :: String -> AuthAppM AuthenticatedProfile
 loadAuthenticatedProfile username = do
   maybeUser <- liftIO $ loadPersistedUser username
@@ -253,6 +268,20 @@ storePersistedUser persistedUser@PersistedUser {uname = username} = do
   case maybeSafeProfile of
     Just realProfile -> writeFile realProfile (encode persistedUser)
     Nothing -> pure ()
+
+deletePersistedUser :: String -> IO (Either AuthTechnicalError ())
+deletePersistedUser username = do
+  usersDir <- usersDirectory
+  let userDir = usersDir </> username
+  maybeSafeUserDir <- ensureChild usersDir userDir
+  case maybeSafeUserDir of
+    Nothing -> pure (Left UserStorageFailure)
+    Just realUserDir -> do
+      deleteResult <- try (removeDirectoryRecursive realUserDir) :: IO (Either IOException ())
+      pure $
+        case deleteResult of
+          Left _ -> Left UserStorageFailure
+          Right () -> Right ()
 
 listPersistedUsers :: IO (Either AuthTechnicalError [PersistedUser])
 listPersistedUsers = do

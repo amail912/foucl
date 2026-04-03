@@ -57,7 +57,7 @@ import Data.Time.Format.ISO8601 (iso8601ParseM)
 import GHC.Generics (Generic)
 import Data.ByteString.Lazy.Char8 (writeFile)
 import Filesystem.Path.CurrentOS    (commonPrefix, encodeString, decodeString, collapse, append)
-import Auth (AuthRequest(..), AuthRequestError(..), AuthError(..), AuthenticatedProfile(..), createUserWithBootstrapAdmin, loadAuthenticatedProfile, signinUser, userExists, isApprovedAdmin, listPendingUsers, approveUser)
+import Auth (AuthRequest(..), AuthRequestError(..), AuthError(..), AuthenticatedProfile(..), createUserWithBootstrapAdmin, loadAuthenticatedProfile, signinUser, userExists, isApprovedAdmin, listPendingUsers, approveUser, deletePendingUser)
 import Session (SessionConfig(..), SessionPrincipal(..), SessionStore(..), defaultSessionConfig, mkFileSessionStore, signSessionId, verifyAndExtractSessionId)
 
 type AppM a = ExceptT String (ServerPartT IO) a
@@ -338,6 +338,7 @@ instance ToServerResponse AuthError where
   toServerResponse UserAlreadyExists = badRequest "Unable to create user"
   toServerResponse InvalidCredentials = unauthorized $ jsonMessage "Invalid credentials"
   toServerResponse AccountPendingApproval = HServer.forbidden $ jsonMessage "Account pending approval"
+  toServerResponse ResourceNotFound = notFound $ jsonMessage "Not found"
   toServerResponse (TechnicalError _) = internalServerError $ jsonMessage "Unable to process authentication"
 
 loadAppConfigFromFile :: IO (Either String AppConfig)
@@ -653,6 +654,7 @@ adminController appContext =
     dir "pending-signups" $ requireApprovedAdmin appContext $
       msum [ pendingSignupsList
            , pendingSignupApprove
+           , pendingSignupDelete
            ]
   where
     pendingSignupsList = do
@@ -669,6 +671,15 @@ adminController appContext =
         method POST
         body <- askRq >>= takeRequestBody
         maybe (badRequest "Empty body") handleBody body
+
+    pendingSignupDelete = do
+      path $ \username -> do
+        nullDir
+        method DELETE
+        result <- liftIO $ runExceptT $ deletePendingUser username
+        either toServerResponse
+               (const $ ok emptyResponse)
+               result
 
     handleBody :: RqBody -> ServerPartT IO Response
     handleBody rqBody =

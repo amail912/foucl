@@ -57,7 +57,7 @@ import Data.Time.Format.ISO8601 (iso8601ParseM)
 import GHC.Generics (Generic)
 import Data.ByteString.Lazy.Char8 (writeFile)
 import Filesystem.Path.CurrentOS    (commonPrefix, encodeString, decodeString, collapse, append)
-import Auth (AuthRequest(..), AuthRequestError(..), AuthError(..), AuthenticatedProfile(..), createUserWithBootstrapAdmin, signinUser, userExists, isApprovedAdmin, listPendingUsers, approveUser)
+import Auth (AuthRequest(..), AuthRequestError(..), AuthError(..), AuthenticatedProfile(..), createUserWithBootstrapAdmin, loadAuthenticatedProfile, signinUser, userExists, isApprovedAdmin, listPendingUsers, approveUser)
 import Session (SessionConfig(..), SessionPrincipal(..), SessionStore(..), defaultSessionConfig, mkFileSessionStore, signSessionId, verifyAndExtractSessionId)
 
 type AppM a = ExceptT String (ServerPartT IO) a
@@ -415,6 +415,7 @@ apiController signupRateLimitState tmpDir appConfig sessionStore =
   in dir "api" $ msum [ signupController signupRateLimitState tmpDir bootstrapAdmin
                       , signinController sessionCfg sessionStore
                       , signoutController sessionCfg sessionStore
+                      , requireAuth sessionCfg sessionStore authController
                       , requireAuth sessionCfg sessionStore noteController
                       , requireAuth sessionCfg sessionStore checklistController
                       , requireAuth sessionCfg sessionStore tripPlacesController
@@ -492,6 +493,17 @@ signoutController sessionConfig sessionStore = dir "signout" $ do
       _ <- liftIO $ if revokeAll then revokeAllForSession sessionStore sid else revokeSession sessionStore sid
       addCookie Expired (buildSessionCookie sessionConfig "")
       ok emptyResponse
+
+authController :: AppContext -> ServerPartT IO Response
+authController AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
+  dir "auth" $
+    dir "profile" $ do
+      nullDir
+      method GET
+      profileResult <- liftIO $ runExceptT $ loadAuthenticatedProfile principalUserId
+      either toServerResponse
+             (ok . jsonResponse)
+             profileResult
 
 
 

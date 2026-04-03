@@ -72,6 +72,22 @@ runIntegrationTests = do
         invalidSigninResponse <- performSignin baseUsername "wrongpasswordbad"
         assertStatusCode "Signin should reject invalid password" 401 invalidSigninResponse
 
+      it "should return the authenticated profile for a signed-in user" $ do
+        signinResponse <- performSigninJSON baseUsername basePassword
+        assertStatusCode "Signin should succeed with valid credentials" 200 signinResponse
+        cookie <- signinOnly baseUsername basePassword
+        profileResponse <- getAuthProfile cookie
+        assertStatusCode "Auth profile should succeed" 200 profileResponse
+        assertEqual "Auth profile response should match signin profile response"
+          (getResponseBody signinResponse)
+          (getResponseBody profileResponse)
+
+      it "should reject unauthenticated auth profile access" $ do
+        req <- parseRequest "GET http://localhost:8081/api/auth/profile"
+        resp <- httpJSON $ setRequestMethod "GET" req
+        assertStatusCode "Auth profile should require auth" 401 resp
+        assertMessageResponse "Not authenticated" resp
+
       it "should enforce signup rate limiting" $ do
         uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
 
@@ -846,6 +862,12 @@ performSigninWith send username password = do
   send $ setRequestMethod "POST"
       $ setRequestHeader "Content-Type" ["application/json"]
       $ setRequestBodyJSON (authPayload username password) signinReq
+
+getAuthProfile :: String -> IO (Response Value)
+getAuthProfile cookie = do
+  req <- parseRequest "GET http://localhost:8081/api/auth/profile"
+  httpJSON $ setRequestMethod "GET"
+           $ setRequestHeader "Cookie" [BS.pack cookie] req
 
 getPendingSignups :: String -> IO [Value]
 getPendingSignups cookie = do

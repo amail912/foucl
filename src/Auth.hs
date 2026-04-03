@@ -10,6 +10,7 @@ module Auth
   , ApprovalStatus(..)
   , createUser
   , createUserWithBootstrapAdmin
+  , loadAuthenticatedProfile
   , signinUser
   , userExists
   , isApprovedAdmin
@@ -220,6 +221,14 @@ approveUser username = do
     Left err -> throwError $ TechnicalError err
     Right Nothing -> throwError InvalidCredentials
     Right (Just persistedUser) -> liftIO $ storePersistedUser persistedUser { approvalStatus = ApprovedStatus }
+
+loadAuthenticatedProfile :: String -> AuthAppM AuthenticatedProfile
+loadAuthenticatedProfile username = do
+  maybeUser <- liftIO $ loadPersistedUser username
+  case maybeUser of
+    Left err -> throwError $ TechnicalError err
+    Right Nothing -> throwError $ TechnicalError UserReadFailure
+    Right (Just persistedUser) -> pure (toAuthenticatedProfile persistedUser)
 
 loadPersistedUser :: String -> IO (Either AuthTechnicalError (Maybe PersistedUser))
 loadPersistedUser username = do

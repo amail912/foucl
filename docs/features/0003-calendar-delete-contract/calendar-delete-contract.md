@@ -13,6 +13,6 @@ Let the frontend delete calendar items by id through one stable contract regardl
 ## Stories
 
 ### To Refine
-- [001 Stabilize Calendar Item Delete Contract](to-refine/001-stabilize-calendar-item-delete-contract.md) - Make calendar-item deletion consistent and explicit across task and trip usage.
 
 ### Done
+- [001 Stabilize Calendar Item Delete Contract](done/001-stabilize-calendar-item-delete-contract.md) - Make calendar-item deletion consistent and explicit across task and trip usage with an implementation-ready contract.

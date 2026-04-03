@@ -341,6 +341,11 @@ runIntegrationTests = do
         unauthResponse <- httpBS $ setRequestMethod "GET" unauthReq
         assertStatusCode "Agenda should require auth" 401 unauthResponse
 
+      it "should require auth for agenda delete" $ do
+        unauthReq <- parseRequest "DELETE http://localhost:8081/api/v1/calendar-items/missing-item"
+        unauthResponse <- httpBS $ setRequestMethod "DELETE" unauthReq
+        assertStatusCode "Agenda delete should require auth" 401 unauthResponse
+
       it "should require auth for trip places endpoint" $ do
         unauthReq <- parseRequest "GET http://localhost:8081/api/v1/trip-places"
         unauthResponse <- httpBS $ setRequestMethod "GET" unauthReq
@@ -828,6 +833,10 @@ runIntegrationTests = do
             assertNoAgendaItems ownerCookie
             assertNoAgendaItems otherCookie
           _ -> assertFailure "Expected ServerCalendarItem response"
+
+      it "should return not found when deleting an unknown agenda item id" $ do
+        cookie <- signinOnly baseUsername basePassword
+        deleteAgendaItemExpectStatus cookie "missing-agenda-item" 404
   where
     firstChecklistContent    = ChecklistContent { name = "First checklist"
                                                  , items = [ ChecklistItem { label = "First item label unchecked", checked = False }

@@ -109,11 +109,14 @@ createManyThenGetTest config = do
 createManyThenDeleteAllTest :: ContentGen crudConfig a => crudConfig -> IO ()
 createManyThenDeleteAllTest config = do
     eitherCreationIds <- mapM ((runExceptT . postItem config) . generateExample config) [1..5]
-    let noteIds = map fromRight eitherCreationIds
-    results <- mapM (runExceptT . delItem config . id) noteIds
+    let noteIds = map createdItemId eitherCreationIds
+    results <- mapM (runExceptT . delItem config) noteIds
     assertBool "all deletions should be a success" (all isRight results)
     dirContent <- retrieveContentInDir config
     assertEqual "note storage should be empty" [] dirContent
+    where
+      createdItemId (Right StorageId { id = itemId }) = itemId
+      createdItemId (Left _) = undefined
 
 fromRight (Right a) = a
 fromRight (Left _) = undefined
@@ -125,9 +128,9 @@ deleteNoteOnEmptyDir config = withEmptyDir noteServiceConfig (\conf -> do
 
 modifyAnExistingNote :: ContentGen crudConfig a => crudConfig -> IO ()
 modifyAnExistingNote config = do
-    Right creationId <- runExceptT $ postItem config (generateExample config 1)
-    Right newcreationId <- runExceptT $ putItem config (arbitraryItemUpdate creationId)
-    assertEqual "Updated note id should be the same as original note" (id creationId) (id newcreationId)
+    Right creationId@StorageId { id = creationRawId } <- runExceptT $ postItem config (generateExample config 1)
+    Right newcreationId@StorageId { id = newCreationRawId } <- runExceptT $ putItem config (arbitraryItemUpdate creationId)
+    assertEqual "Updated note id should be the same as original note" creationRawId newCreationRawId
     assertNotEqual "Updated note version should be different from original note's version" (version creationId) (version newcreationId)
     where
         arbitraryItemUpdate creationId = Identifiable creationId (generateExample config 20)
@@ -161,7 +164,7 @@ assertEqualWithoutOrder s as bs = do
 assertNotEqual s a b = assertBool s (a /= b)
 
 filePath :: CRUDEngine crudConfig a => crudConfig -> StorageId -> String
-filePath config storageId = getStorageDirectoryPath config ++ id storageId ++ ".txt"
+filePath config StorageId { id = storageId } = getStorageDirectoryPath config ++ storageId ++ ".txt"
 
 retrieveContentInDir :: CRUDEngine crudConfig a => crudConfig -> IO [FilePath]
 retrieveContentInDir config = do

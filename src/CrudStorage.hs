@@ -61,11 +61,11 @@ deleteItem :: DiskFileStorageConfig confType => confType -> String -> EitherT Cr
 deleteItem config id = handleEitherT IOWriteException (removePathForcibly $ fileName config id)
 
 modifyItem :: CRUDEngine crudConfig a => crudConfig -> Identifiable a -> EitherT CrudModificationException IO StorageId
-modifyItem config (Identifiable targetStorageId new) = do
+modifyItem config (Identifiable targetStorageId@(StorageId { id = targetId }) new) = do
     log ("modifying file with id " ++ show targetStorageId)
-    (Identifiable retrievedStorageId content) <- firstEitherT fromCrudReadException $ readItemFromFile config (id targetStorageId ++ txtExtension)
+    (Identifiable retrievedStorageId content) <- firstEitherT fromCrudReadException $ readItemFromFile config (targetId ++ txtExtension)
     if retrievedStorageId == targetStorageId
-        then firstEitherT fromCrudWriteException $ writeContentToFile config new (id targetStorageId)
+        then firstEitherT fromCrudWriteException $ writeContentToFile config new targetId
         else throwError $ NotCurrentVersion targetStorageId
 
 

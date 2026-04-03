@@ -180,9 +180,9 @@ validateTripContent validPlaceNames existingItems mCurrentItemId tripContent =
       case tripInterval tripContent of
         Nothing -> TripWriteBadRequest "windowStart and windowEnd must be valid ISO date-time strings"
         Just interval
-          | not (Agenda.departurePlaceId tripContent `elem` validPlaceNames) ->
+          | Agenda.departurePlaceId tripContent `notElem` validPlaceNames ->
               TripWriteBadRequest "departurePlaceId must reference an existing trip place"
-          | not (Agenda.arrivalPlaceId tripContent `elem` validPlaceNames) ->
+          | Agenda.arrivalPlaceId tripContent `notElem` validPlaceNames ->
               TripWriteBadRequest "arrivalPlaceId must reference an existing trip place"
           | Agenda.departurePlaceId tripContent == Agenda.arrivalPlaceId tripContent ->
               TripWriteBadRequest "departurePlaceId and arrivalPlaceId must be different"

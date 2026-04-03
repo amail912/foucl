@@ -60,12 +60,12 @@ removeById :: DiskFileStorageConfig confType => confType -> String -> EitherT Cr
 removeById config id = handleEitherT IOWriteException (removePathForcibly $ fileName config id)
 
 updateIfCurrent :: (DiskFileStorageConfig crudConfig, Content a) => crudConfig -> Identifiable a -> EitherT CrudModificationException IO StorageId
-updateIfCurrent config (Identifiable targetStorageId new) = do
+updateIfCurrent config (Identifiable targetStorageId@(StorageId { id = targetId }) new) = do
     log ("modifying file with id " ++ show targetStorageId)
-    (Identifiable retrievedStorageId content) <- firstEitherT fromCrudReadException $
-        (readItemFromFile config (id targetStorageId ++ txtExtension) :: EitherT CrudReadException IO (Identifiable a))
+    (Identifiable retrievedStorageId content) <- firstEitherT fromCrudReadException
+        (readItemFromFile config (targetId ++ txtExtension) :: EitherT CrudReadException IO (Identifiable a))
     if retrievedStorageId == targetStorageId
-        then firstEitherT fromCrudWriteException $ writeContentToFile config new (id targetStorageId)
+        then firstEitherT fromCrudWriteException $ writeContentToFile config new targetId
         else throwError $ NotCurrentVersion targetStorageId
 
 
@@ -97,7 +97,7 @@ listFiles :: DiskFileStorageConfig crudConfig => crudConfig -> EitherT IOError I
 listFiles config = handleEitherT ioError
                                  (listDirectory (rootPath config))
   where ioError :: IOError -> IOError
-        ioError = Prelude.id
+        ioError = id
 
 
 readFileImpl :: FilePath -> EitherT CrudReadException IO ByteString

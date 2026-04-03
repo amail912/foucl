@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE LambdaCase #-}
 module Auth
   ( AuthRequest(..)
   , AuthError(..)
@@ -33,7 +34,7 @@ import Data.List (isPrefixOf)
 import Control.Exception (try, IOException)
 import System.IO.Error (isAlreadyExistsError)
 import qualified Data.ByteString.Lazy as BL
-import Data.Maybe (mapMaybe)
+import Data.Maybe (catMaybes)
 
 data AuthError = BadRequest !AuthRequestError | UserAlreadyExists | InvalidCredentials | AccountPendingApproval | TechnicalError !AuthTechnicalError
 data AuthRequestError = EmptyUsername | EmptyPassword | UsernameDoesNotRespectPattern | UsernameTooShort | UsernameTooLong | PasswordTooShort
@@ -83,22 +84,20 @@ instance ToJSON UserRole where
   toJSON MemberRole = "member"
 
 instance FromJSON UserRole where
-  parseJSON = withText "UserRole" $ \raw ->
-    case raw of
-      "admin" -> pure AdminRole
-      "member" -> pure MemberRole
-      _ -> fail "Invalid user role"
+  parseJSON = withText "UserRole" $ \case
+    "admin" -> pure AdminRole
+    "member" -> pure MemberRole
+    _ -> fail "Invalid user role"
 
 instance ToJSON ApprovalStatus where
   toJSON ApprovedStatus = "approved"
   toJSON PendingStatus = "pending"
 
 instance FromJSON ApprovalStatus where
-  parseJSON = withText "ApprovalStatus" $ \raw ->
-    case raw of
-      "approved" -> pure ApprovedStatus
-      "pending" -> pure PendingStatus
-      _ -> fail "Invalid approval status"
+  parseJSON = withText "ApprovalStatus" $ \case
+    "approved" -> pure ApprovedStatus
+    "pending" -> pure PendingStatus
+    _ -> fail "Invalid approval status"
 
 createUser :: AuthRequest -> AuthAppM ()
 createUser = createUserWithBootstrapAdmin Nothing
@@ -208,9 +207,8 @@ isApprovedAdmin username = do
       Right (userRole == AdminRole && approvalStatus == ApprovedStatus)
 
 listPendingUsers :: IO (Either AuthTechnicalError [String])
-listPendingUsers = do
-  userEntries <- listPersistedUsers
-  pure $ fmap (map uname . filter isPending) userEntries
+listPendingUsers =
+  fmap (map uname . filter isPending) <$> listPersistedUsers
   where
     isPending PersistedUser {approvalStatus} = approvalStatus == PendingStatus
 
@@ -270,7 +268,7 @@ listPersistedUsers = do
     sequenceUsers entries =
       case sequence entries of
         Left err -> Left err
-        Right loaded -> Right (mapMaybe id loaded)
+        Right loaded -> Right (catMaybes loaded)
 
 usersDirectory :: IO FilePath
 usersDirectory = do

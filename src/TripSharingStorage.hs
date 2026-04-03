@@ -1,5 +1,3 @@
-{-# LANGUAGE NamedFieldPuns #-}
-
 module TripSharingStorage
   ( TripShareStorageConfig(..)
   , defaultTripShareStorageConfig

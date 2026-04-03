@@ -8,6 +8,7 @@
 module IntegrationTests (runIntegrationTests) where
 
 import Prelude hiding (id)
+import qualified Prelude
 import           Data.Aeson
 import           Data.Aeson.Types (parseMaybe)
 import           Data.ByteString       (ByteString)
@@ -23,6 +24,7 @@ import           Test.Hspec
 import           Test.HUnit
 import           Control.Exception (bracket_)
 import           Control.Monad.Trans.Except (runExceptT)
+import           Control.Monad (when)
 import           Data.Time.Clock.POSIX (getPOSIXTime)
 import           Data.List (isInfixOf, sortOn)
 import           Data.Char (toLower)
@@ -766,9 +768,7 @@ resetSandboxUser username = do
   cwd <- getCurrentDirectory
   let userDir = cwd ++ "/dist-newstyle/sandbox/foucl/data/users/" ++ username
   exists <- doesDirectoryExist userDir
-  if exists
-    then removeDirectoryRecursive userDir
-    else pure ()
+  when exists $ removeDirectoryRecursive userDir
 
 getFirstSetCookie :: Response a -> Maybe ByteString
 getFirstSetCookie response =
@@ -909,7 +909,10 @@ runCrudLifecycle cookie endpoint initialContent updatedContent = do
   [createdItem] <- assertGetWithContent cookie endpoint initialContent
   modifyItem cookie endpoint $ Identifiable (storageId createdItem) updatedContent
   [updatedItem] <- assertGetWithContent cookie endpoint updatedContent
-  deleteItem cookie endpoint $ (id . storageId) updatedItem
+  let updatedItemId =
+        case storageId updatedItem of
+          StorageId { id = itemId } -> itemId
+  deleteItem cookie endpoint updatedItemId
   assertNoItemAtEndpoint cookie endpoint
 
 assertNoItemAtEndpoint :: (Content contentType, RequestType GET endpointType () [Identifiable contentType]) => String -> endpointType -> Expectation
@@ -958,7 +961,7 @@ sendRequestWithJSONBodyImplWithCookie :: (RequestType methodType endpointType re
 sendRequestWithJSONBodyImplWithCookie mCookie method endpoint body = do
     req <- parseRequest ("http://localhost:8081" ++ getEndpoint endpoint)
     let withCookie :: Request -> Request
-        withCookie = maybe (\req' -> req') (\cookie -> setRequestHeader "Cookie" [BS.pack cookie]) mCookie
+        withCookie = maybe Prelude.id (\cookie -> setRequestHeader "Cookie" [BS.pack cookie]) mCookie
     httpJSON $ (setRequestMethod (getMethod method) . withCookie . setRequestHeader "Content-Type" ["application/json"] . setRequestBodyJSON body) req
 
 
@@ -1183,7 +1186,7 @@ periodTripsRequest mCookie mStart mEnd = do
   let withCookie :: Request -> Request
       withCookie =
         case mCookie of
-          Nothing -> \req' -> req'
+          Nothing -> Prelude.id
           Just cookie -> setRequestHeader "Cookie" [BS.pack cookie]
       query =
         maybe [] (\start -> [("start", Just (BS.pack start))]) mStart ++
@@ -1238,12 +1241,11 @@ updateAgendaItemExpectStatus cookie item expectedStatus = do
   assertStatusCode "Agenda update should return expected status" expectedStatus resp
 
 assertTripCreateValidationError :: String -> Agenda.CalendarItemContent -> String -> IO ()
-assertTripCreateValidationError cookie content expectedMessage =
-  assertAgendaPostValidationError cookie (Agenda.NewCalendarItem { Agenda.content = content }) expectedMessage
+assertTripCreateValidationError cookie content =
+  assertAgendaPostValidationError cookie (Agenda.NewCalendarItem { Agenda.content = content })
 
 assertTripUpdateValidationError :: String -> Agenda.CalendarItem -> String -> IO ()
-assertTripUpdateValidationError cookie item expectedMessage =
-  assertAgendaPostValidationError cookie item expectedMessage
+assertTripUpdateValidationError = assertAgendaPostValidationError
 
 assertAgendaPostValidationError :: String -> Agenda.CalendarItem -> String -> IO ()
 assertAgendaPostValidationError cookie item expectedMessage = do

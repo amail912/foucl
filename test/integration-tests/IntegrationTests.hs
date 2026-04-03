@@ -200,6 +200,87 @@ runIntegrationTests = do
         assertStatusCode "Pending signup delete should require auth" 401 deleteResp
         assertMessageResponse "Not authenticated" deleteResp
 
+      it "should allow an admin to list approved users" $ do
+        uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
+        let approvedUsername = "list-app-" ++ show uniquenessSuffix
+            pendingUsername = "list-pend-" ++ show uniquenessSuffix
+        ensureApprovedSandboxUser baseUsername approvedUsername basePassword
+        ensurePendingSandboxUser baseUsername pendingUsername basePassword
+
+        adminCookie <- signinOnly baseUsername basePassword
+        approvedUsers <- getAdminUsers adminCookie
+        assertBool "Bootstrap admin should be visible in approved users" (adminUserValue baseUsername ["admin"] True `elem` approvedUsers)
+        assertBool "Approved member should be visible in approved users" (adminUserValue approvedUsername ["member"] True `elem` approvedUsers)
+        assertBool "Pending user should not be visible in approved users" (adminUserValue pendingUsername ["member"] True `notElem` approvedUsers)
+
+      it "should allow an admin to delete another approved user" $ do
+        uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
+        let approvedUsername = "del-app-" ++ show uniquenessSuffix
+        ensureApprovedSandboxUser baseUsername approvedUsername basePassword
+
+        adminCookie <- signinOnly baseUsername basePassword
+        approvedUsersBeforeDelete <- getAdminUsers adminCookie
+        assertBool "Approved user should be visible before delete" (adminUserValue approvedUsername ["member"] True `elem` approvedUsersBeforeDelete)
+
+        deleteAdminUser adminCookie approvedUsername
+
+        approvedUsersAfterDelete <- getAdminUsers adminCookie
+        assertBool "Deleted approved user should no longer be visible" (adminUserValue approvedUsername ["member"] True `notElem` approvedUsersAfterDelete)
+
+        deletedSigninResponse <- performSigninJSON approvedUsername basePassword
+        assertStatusCode "Deleted approved user should no longer be able to sign in" 401 deletedSigninResponse
+        assertMessageResponse "Invalid credentials" deletedSigninResponse
+
+      it "should return not found when deleting an unknown approved user" $ do
+        adminCookie <- signinOnly baseUsername basePassword
+        deleteResponse <- deleteAdminUserResponse adminCookie "missing-approved-user"
+        assertStatusCode "Deleting an unknown approved user should return not found" 404 deleteResponse
+        assertMessageResponse "Not found" deleteResponse
+
+      it "should return not found when deleting a pending user through the approved-user route" $ do
+        uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
+        let pendingUsername = "pend-users-" ++ show uniquenessSuffix
+        ensurePendingSandboxUser baseUsername pendingUsername basePassword
+
+        adminCookie <- signinOnly baseUsername basePassword
+        deleteResponse <- deleteAdminUserResponse adminCookie pendingUsername
+        assertStatusCode "Deleting a pending user through the approved-user route should return not found" 404 deleteResponse
+        assertMessageResponse "Not found" deleteResponse
+
+      it "should reject non-admin access to approved-user admin endpoints" $ do
+        uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
+        let memberUsername = "approved-member-" ++ show uniquenessSuffix
+        ensureApprovedSandboxUser baseUsername memberUsername basePassword
+        memberCookie <- signinOnly memberUsername basePassword
+
+        usersReq <- parseRequest "GET http://localhost:8081/api/v1/admin/users"
+        usersResp <- httpJSON $ setRequestMethod "GET"
+                           $ setRequestHeader "Cookie" [BS.pack memberCookie]
+                           usersReq
+        assertStatusCode "Non-admin should be forbidden from listing approved users" 403 usersResp
+        assertMessageResponse "Admin privileges required" usersResp
+
+        deleteResp <- deleteAdminUserResponse memberCookie baseUsername
+        assertStatusCode "Non-admin should be forbidden from deleting approved users" 403 deleteResp
+        assertMessageResponse "Admin privileges required" deleteResp
+
+      it "should reject unauthenticated approved-user admin access" $ do
+        usersReq <- parseRequest "GET http://localhost:8081/api/v1/admin/users"
+        usersResp <- httpJSON $ setRequestMethod "GET" usersReq
+        assertStatusCode "Approved users list should require auth" 401 usersResp
+        assertMessageResponse "Not authenticated" usersResp
+
+        deleteReq <- parseRequest "DELETE http://localhost:8081/api/v1/admin/users/admin"
+        deleteResp <- httpJSON $ setRequestMethod "DELETE" deleteReq
+        assertStatusCode "Approved user delete should require auth" 401 deleteResp
+        assertMessageResponse "Not authenticated" deleteResp
+
+      it "should reject deleting the bootstrap admin through the approved-user route" $ do
+        adminCookie <- signinOnly baseUsername basePassword
+        deleteResponse <- deleteAdminUserResponse adminCookie baseUsername
+        assertStatusCode "Deleting the bootstrap admin should return conflict" 409 deleteResponse
+        assertMessageResponse "Cannot delete bootstrap admin" deleteResponse
+
       it "should set session cookie attributes on signin" $ do
         signinResponse <- performSignin baseUsername basePassword
         assertStatusCode "Signin should succeed" 200 signinResponse
@@ -924,6 +1005,17 @@ getPendingSignups cookie = do
     Array items -> pure (toList items)
     _ -> assertFailure "Expected pending signups array" >> pure []
 
+getAdminUsers :: String -> IO [Value]
+getAdminUsers cookie = do
+  req <- parseRequest "GET http://localhost:8081/api/v1/admin/users"
+  resp <- httpJSON $ setRequestMethod "GET"
+                  $ setRequestHeader "Cookie" [BS.pack cookie]
+                  req
+  assertStatusCode "Approved users list should succeed" 200 resp
+  case getResponseBody resp of
+    Array items -> pure (toList items)
+    _ -> assertFailure "Expected approved users array" >> pure []
+
 approvePendingSignup :: String -> String -> IO ()
 approvePendingSignup cookie username = do
   req <- parseRequest "POST http://localhost:8081/api/v1/admin/pending-signups/approve"
@@ -944,8 +1036,26 @@ deletePendingSignupResponse cookie username = do
   httpJSON $ setRequestMethod "DELETE"
            $ setRequestHeader "Cookie" [BS.pack cookie] req
 
+deleteAdminUser :: String -> String -> IO ()
+deleteAdminUser cookie username = do
+  resp <- deleteAdminUserResponse cookie username
+  assertStatusCode "Approved user delete should succeed" 200 resp
+
+deleteAdminUserResponse :: String -> String -> IO (Response Value)
+deleteAdminUserResponse cookie username = do
+  req <- parseRequest ("DELETE http://localhost:8081/api/v1/admin/users/" ++ username)
+  httpJSON $ setRequestMethod "DELETE"
+           $ setRequestHeader "Cookie" [BS.pack cookie] req
+
 pendingSignupValue :: String -> Value
 pendingSignupValue username = object ["username" .= username]
+
+adminUserValue :: String -> [String] -> Bool -> Value
+adminUserValue username roles approved =
+  object [ "username" .= username
+         , "roles" .= roles
+         , "approved" .= approved
+         ]
 
 runCrudLifecycle
   :: ( Content contentType

@@ -16,8 +16,10 @@ module Auth
   , userExists
   , isApprovedAdmin
   , listPendingUsers
+  , listApprovedUsers
   , approveUser
   , deletePendingUser
+  , deleteApprovedUser
   ) where
 
 import Prelude hiding (writeFile)
@@ -37,7 +39,7 @@ import System.IO.Error (isAlreadyExistsError)
 import qualified Data.ByteString.Lazy as BL
 import Data.Maybe (catMaybes)
 
-data AuthError = BadRequest !AuthRequestError | UserAlreadyExists | InvalidCredentials | AccountPendingApproval | ResourceNotFound | TechnicalError !AuthTechnicalError
+data AuthError = BadRequest !AuthRequestError | UserAlreadyExists | InvalidCredentials | AccountPendingApproval | ResourceNotFound | ResourceConflict !String | TechnicalError !AuthTechnicalError
 data AuthRequestError = EmptyUsername | EmptyPassword | UsernameDoesNotRespectPattern | UsernameTooShort | UsernameTooLong | PasswordTooShort
 data AuthTechnicalError = UsersDirDoesNotExist | UserStorageFailure | UserReadFailure deriving Eq
 type AuthAppM a = ExceptT AuthError IO a
@@ -213,6 +215,12 @@ listPendingUsers =
   where
     isPending PersistedUser {approvalStatus} = approvalStatus == PendingStatus
 
+listApprovedUsers :: IO (Either AuthTechnicalError [AuthenticatedProfile])
+listApprovedUsers =
+  fmap (map toAuthenticatedProfile . filter isApproved) <$> listPersistedUsers
+  where
+    isApproved PersistedUser {approvalStatus} = approvalStatus == ApprovedStatus
+
 approveUser :: String -> AuthAppM ()
 approveUser username = do
   maybeUser <- liftIO $ loadPersistedUser username
@@ -234,6 +242,23 @@ deletePendingUser username = do
           case deleteResult of
             Left err -> throwError $ TechnicalError err
             Right () -> pure ()
+
+deleteApprovedUser :: String -> String -> String -> AuthAppM ()
+deleteApprovedUser bootstrapAdminUsername currentUsername targetUsername
+  | targetUsername == bootstrapAdminUsername = throwError $ ResourceConflict "Cannot delete bootstrap admin"
+  | targetUsername == currentUsername = throwError $ ResourceConflict "Cannot delete your own account"
+  | otherwise = do
+      maybeUser <- liftIO $ loadPersistedUser targetUsername
+      case maybeUser of
+        Left err -> throwError $ TechnicalError err
+        Right Nothing -> throwError ResourceNotFound
+        Right (Just PersistedUser {approvalStatus})
+          | approvalStatus /= ApprovedStatus -> throwError ResourceNotFound
+          | otherwise -> do
+              deleteResult <- liftIO $ deletePersistedUser targetUsername
+              case deleteResult of
+                Left err -> throwError $ TechnicalError err
+                Right () -> pure ()
 
 loadAuthenticatedProfile :: String -> AuthAppM AuthenticatedProfile
 loadAuthenticatedProfile username = do

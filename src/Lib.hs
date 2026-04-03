@@ -24,7 +24,7 @@ import Data.ByteString.Char8 (unpack)
 import Data.List (isPrefixOf, sortOn)
 import Data.Char (toLower)
 import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
-import Happstack.Server (FilterMonad, Response, ServerPartT, RqBody, takeRequestBody, unBody, rqBody, decodeBody, askRq, defaultBodyPolicy, nullDir, path, serveFileFrom, guessContentTypeM, mimeTypes, uriRest, nullConf, simpleHTTP, toResponse, method, ok, internalServerError, notFound, dir, Method(GET, POST, DELETE, PUT), Conf(..), addCookie, mkCookie, CookieLife(Session, Expired), getHeaderM, unauthorized, requestEntityTooLarge, look)
+import Happstack.Server (FilterMonad, Response, ServerPartT, RqBody, takeRequestBody, unBody, rqBody, decodeBody, askRq, defaultBodyPolicy, nullDir, path, serveFileFrom, guessContentTypeM, mimeTypes, uriRest, nullConf, simpleHTTP, toResponse, method, ok, internalServerError, notFound, dir, Method(GET, POST, DELETE, PUT), Conf(..), addCookie, mkCookie, CookieLife(Session, Expired), getHeaderM, unauthorized, requestEntityTooLarge, look, setResponseCode)
 import qualified Happstack.Server as HServer
 import Happstack.Server.Internal.Cookie (Cookie(..), SameSite(..))
 import Happstack.Server.Internal.MessageWrap (bodyInput, BodyPolicy)
@@ -57,7 +57,7 @@ import Data.Time.Format.ISO8601 (iso8601ParseM)
 import GHC.Generics (Generic)
 import Data.ByteString.Lazy.Char8 (writeFile)
 import Filesystem.Path.CurrentOS    (commonPrefix, encodeString, decodeString, collapse, append)
-import Auth (AuthRequest(..), AuthRequestError(..), AuthError(..), AuthenticatedProfile(..), createUserWithBootstrapAdmin, loadAuthenticatedProfile, signinUser, userExists, isApprovedAdmin, listPendingUsers, approveUser, deletePendingUser)
+import Auth (AuthRequest(..), AuthRequestError(..), AuthError(..), AuthenticatedProfile(..), createUserWithBootstrapAdmin, loadAuthenticatedProfile, signinUser, userExists, isApprovedAdmin, listPendingUsers, listApprovedUsers, approveUser, deletePendingUser, deleteApprovedUser)
 import Session (SessionConfig(..), SessionPrincipal(..), SessionStore(..), defaultSessionConfig, mkFileSessionStore, signSessionId, verifyAndExtractSessionId)
 
 type AppM a = ExceptT String (ServerPartT IO) a
@@ -339,6 +339,7 @@ instance ToServerResponse AuthError where
   toServerResponse InvalidCredentials = unauthorized $ jsonMessage "Invalid credentials"
   toServerResponse AccountPendingApproval = HServer.forbidden $ jsonMessage "Account pending approval"
   toServerResponse ResourceNotFound = notFound $ jsonMessage "Not found"
+  toServerResponse (ResourceConflict message) = setResponseCode 409 >> pure (jsonMessage message)
   toServerResponse (TechnicalError _) = internalServerError $ jsonMessage "Unable to process authentication"
 
 loadAppConfigFromFile :: IO (Either String AppConfig)
@@ -422,7 +423,7 @@ apiController signupRateLimitState tmpDir appConfig sessionStore =
                       , requireAuth sessionCfg sessionStore tripPlacesController
                       , requireAuth sessionCfg sessionStore tripSharingController
                       , requireAuth sessionCfg sessionStore agendaController
-                      , requireAuth sessionCfg sessionStore adminController
+                      , requireAuth sessionCfg sessionStore (adminController bootstrapAdmin)
                       ]
 
 homePage :: ServerPartT IO Response
@@ -648,13 +649,19 @@ tripPlacesController _ = dir "v1" $ dir "trip-places" $ do
   method GET
   ok (jsonResponse tripPlacesCatalog)
 
-adminController :: AppContext -> ServerPartT IO Response
-adminController appContext =
+adminController :: String -> AppContext -> ServerPartT IO Response
+adminController bootstrapAdminUsername appContext@AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
   dir "v1" $ dir "admin" $
-    dir "pending-signups" $ requireApprovedAdmin appContext $
-      msum [ pendingSignupsList
-           , pendingSignupApprove
-           , pendingSignupDelete
+    requireApprovedAdmin appContext $
+      msum [ dir "pending-signups" $
+               msum [ pendingSignupsList
+                    , pendingSignupApprove
+                    , pendingSignupDelete
+                    ]
+           , dir "users" $
+               msum [ approvedUsersList
+                    , approvedUserDelete
+                    ]
            ]
   where
     pendingSignupsList = do
@@ -677,6 +684,23 @@ adminController appContext =
         nullDir
         method DELETE
         result <- liftIO $ runExceptT $ deletePendingUser username
+        either toServerResponse
+               (const $ ok emptyResponse)
+               result
+
+    approvedUsersList = do
+      nullDir
+      method GET
+      approvedUsersResult <- liftIO listApprovedUsers
+      case approvedUsersResult of
+        Left _ -> internalServerError emptyResponse
+        Right approvedUsers -> ok (jsonResponse approvedUsers)
+
+    approvedUserDelete = do
+      path $ \username -> do
+        nullDir
+        method DELETE
+        result <- liftIO $ runExceptT $ deleteApprovedUser bootstrapAdminUsername principalUserId username
         either toServerResponse
                (const $ ok emptyResponse)
                result

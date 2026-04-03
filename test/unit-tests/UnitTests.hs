@@ -619,6 +619,7 @@ signinValidationTests = test [ "Signin should reject pending users even with val
                              , "Signin should authenticate with valid credentials once approved" ~: signinNominal
                              , "Signin should reject invalid password" ~: signinRejectsInvalidPassword
                              , "Signin should reject unknown users" ~: signinRejectsUnknownUser
+                             , "Approved-user deletion should reject deleting the current user" ~: approvedUserDeletionRejectsSelfDelete
                              ]
 
 signinNominal :: IO ()
@@ -675,6 +676,26 @@ signinRejectsUnknownUser = do
       Left InvalidCredentials -> assertBool "InvalidCredentials expected" True
       _ -> assertFailure "Expected InvalidCredentials"
 
+approvedUserDeletionRejectsSelfDelete :: IO ()
+approvedUserDeletionRejectsSelfDelete = withCleanSignupUsers ["approved-delete-self-bootstrap", "approved-delete-self-user"] $ \[bootstrapUsername, username] -> do
+    let validPassword = pack "averystrongpass"
+    bootstrapResult <- runExceptT $ createUserWithBootstrapAdmin (Just bootstrapUsername) $ AuthRequest { username = bootstrapUsername, password = validPassword }
+    case bootstrapResult of
+      Right () -> do
+        signupResult <- runExceptT $ createUser $ AuthRequest { username = username, password = validPassword }
+        case signupResult of
+          Right () -> do
+            approvalResult <- runExceptT $ approveUser username
+            case approvalResult of
+              Left _ -> assertFailure "Expected signup approval"
+              Right () -> pure ()
+            deleteResult <- runExceptT $ deleteApprovedUser bootstrapUsername username username
+            case deleteResult of
+              Left (ResourceConflict "Cannot delete your own account") -> assertBool "ResourceConflict expected" True
+              _ -> assertFailure "Expected self-delete conflict"
+          _ -> assertFailure "Expected signup success"
+      _ -> assertFailure "Expected bootstrap admin signup success"
+
 withCleanSignupUser :: String -> (String -> IO ()) -> IO ()
 withCleanSignupUser username action = do
     cd <- getCurrentDirectory
@@ -684,6 +705,17 @@ withCleanSignupUser username action = do
     cleanupSignupUserDir userDir
     action username `finally` do
       cleanupSignupUserDir userDir
+      cleanupUsersDirIfCreatedByTest usersDirCreatedByTest usersDir
+
+withCleanSignupUsers :: [String] -> ([String] -> IO ()) -> IO ()
+withCleanSignupUsers usernames action = do
+    cd <- getCurrentDirectory
+    let usersDir = cd ++ "/data/users"
+        userDirs = map (\username -> usersDir ++ "/" ++ username) usernames
+    usersDirCreatedByTest <- ensureUsersDir usersDir
+    mapM_ cleanupSignupUserDir userDirs
+    action usernames `finally` do
+      mapM_ cleanupSignupUserDir userDirs
       cleanupUsersDirIfCreatedByTest usersDirCreatedByTest usersDir
 
 ensureUsersDir :: FilePath -> IO Bool

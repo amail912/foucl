@@ -17,10 +17,10 @@ Let the frontend render authenticated state immediately after signin, restore au
 ## Stories
 
 ### To Refine
-- [005 Normalize Auth Admin Error Semantics](to-refine/005-normalize-auth-admin-error-semantics.md) - Make auth and admin endpoints return stable frontend-usable status classes.
 
 ### Done
 - [001 Return Profile On Signin](done/001-return-profile-on-signin.md) - Return the authenticated profile body on successful signin with implementation-ready contract detail.
 - [002 Add Auth Profile Endpoint](done/002-add-auth-profile-endpoint.md) - Add a cookie-authenticated profile endpoint with implementation-ready contract detail.
 - [003 Admin Pending User Deletion](done/003-admin-pending-user-deletion.md) - Delete pending signups through an implementation-ready admin moderation contract.
 - [004 Admin Approved User Management](done/004-admin-approved-user-management.md) - Let admins list and delete approved users with an implementation-ready contract.
+- [005 Normalize Auth Admin Error Semantics](done/005-normalize-auth-admin-error-semantics.md) - Make auth and admin endpoints return stable frontend-usable status classes with an implementation-ready contract.

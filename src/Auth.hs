@@ -226,7 +226,7 @@ approveUser username = do
   maybeUser <- liftIO $ loadPersistedUser username
   case maybeUser of
     Left err -> throwError $ TechnicalError err
-    Right Nothing -> throwError InvalidCredentials
+    Right Nothing -> throwError ResourceNotFound
     Right (Just persistedUser) -> liftIO $ storePersistedUser persistedUser { approvalStatus = ApprovedStatus }
 
 deletePendingUser :: String -> AuthAppM ()

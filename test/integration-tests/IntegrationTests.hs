@@ -136,6 +136,12 @@ runIntegrationTests = do
         approvedSigninResponse <- performSigninNoBody pendingUsername basePassword
         assertStatusCode "Approved user should be able to sign in" 200 approvedSigninResponse
 
+      it "should return not found when approving an unknown pending signup" $ do
+        adminCookie <- signinOnly baseUsername basePassword
+        approveResponse <- approvePendingSignupResponse adminCookie "missing-pending-user"
+        assertStatusCode "Approving an unknown pending signup should return not found" 404 approveResponse
+        assertMessageResponse "Not found" approveResponse
+
       it "should allow an admin to delete pending signups" $ do
         uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
         let pendingUsername = "deletable-" ++ show uniquenessSuffix
@@ -1018,12 +1024,24 @@ getAdminUsers cookie = do
 
 approvePendingSignup :: String -> String -> IO ()
 approvePendingSignup cookie username = do
-  req <- parseRequest "POST http://localhost:8081/api/v1/admin/pending-signups/approve"
-  resp <- httpNoBody $ setRequestMethod "POST"
-                   $ setRequestHeader "Cookie" [BS.pack cookie]
-                   $ setRequestHeader "Content-Type" ["application/json"]
-                   $ setRequestBodyJSON (object ["username" .= username]) req
+  resp <- approvePendingSignupResponseNoBody cookie username
   assertStatusCode "Pending signup approval should succeed" 200 resp
+
+approvePendingSignupResponse :: String -> String -> IO (Response Value)
+approvePendingSignupResponse cookie username = do
+  req <- parseRequest "POST http://localhost:8081/api/v1/admin/pending-signups/approve"
+  httpJSON $ setRequestMethod "POST"
+           $ setRequestHeader "Cookie" [BS.pack cookie]
+           $ setRequestHeader "Content-Type" ["application/json"]
+           $ setRequestBodyJSON (object ["username" .= username]) req
+
+approvePendingSignupResponseNoBody :: String -> String -> IO (Response ())
+approvePendingSignupResponseNoBody cookie username = do
+  req <- parseRequest "POST http://localhost:8081/api/v1/admin/pending-signups/approve"
+  httpNoBody $ setRequestMethod "POST"
+           $ setRequestHeader "Cookie" [BS.pack cookie]
+           $ setRequestHeader "Content-Type" ["application/json"]
+           $ setRequestBodyJSON (object ["username" .= username]) req
 
 deletePendingSignup :: String -> String -> IO ()
 deletePendingSignup cookie username = do

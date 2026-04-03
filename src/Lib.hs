@@ -323,6 +323,9 @@ jsonMessage msg = jsonResponse $ object ["message" .= msg]
 emptyResponse :: Response
 emptyResponse = jsonResponse $ object []
 
+authInternalError :: Response
+authInternalError = jsonMessage "Unable to process authentication"
+
 class ToServerResponse e where
   toServerResponse :: Monad m => e -> ServerPartT m Response
 
@@ -622,7 +625,7 @@ requireApprovedAdmin :: AppContext -> ServerPartT IO Response -> ServerPartT IO 
 requireApprovedAdmin AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } handler = do
   adminCheck <- liftIO $ isApprovedAdmin principalUserId
   case adminCheck of
-    Left _ -> internalServerError emptyResponse
+    Left _ -> internalServerError authInternalError
     Right False -> HServer.forbidden $ jsonMessage "Admin privileges required"
     Right True -> handler
 
@@ -669,7 +672,7 @@ adminController bootstrapAdminUsername appContext@AppContext { sessionPrincipal 
       method GET
       pendingUsersResult <- liftIO listPendingUsers
       case pendingUsersResult of
-        Left _ -> internalServerError emptyResponse
+        Left _ -> internalServerError authInternalError
         Right pendingUsers -> ok (jsonResponse (map PendingSignupApproval pendingUsers))
 
     pendingSignupApprove = do
@@ -693,7 +696,7 @@ adminController bootstrapAdminUsername appContext@AppContext { sessionPrincipal 
       method GET
       approvedUsersResult <- liftIO listApprovedUsers
       case approvedUsersResult of
-        Left _ -> internalServerError emptyResponse
+        Left _ -> internalServerError authInternalError
         Right approvedUsers -> ok (jsonResponse approvedUsers)
 
     approvedUserDelete = do

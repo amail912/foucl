@@ -33,7 +33,7 @@ import           System.Directory (getCurrentDirectory, setCurrentDirectory, doe
 import           Data.Text (pack)
 import AgendaModel (ItemStatus(..), ItemType(..))
 import qualified AgendaModel as Agenda (CalendarItem(..), CalendarItemContent(..), TripItemContent(..))
-import Auth (AuthRequest(..), AuthError(..), createUserWithBootstrapAdmin, approveUser)
+import Auth (AuthRequest(..), AuthError(..), defaultAuthRepository, createUserWithBootstrapAdmin, approveUser)
 import Model
 
 -- ===================== Constants ==============================
@@ -956,15 +956,15 @@ ensureApprovedSandboxUser bootstrapAdminUsername username password = do
   cwd <- getCurrentDirectory
   let sandboxDir = cwd ++ "/dist-newstyle/sandbox/foucl"
   bracket_ (setCurrentDirectory sandboxDir) (setCurrentDirectory cwd) $ do
-    result <- runExceptT $ createUserWithBootstrapAdmin (Just bootstrapAdminUsername) $ AuthRequest { username = username, password = pack password }
+    result <- runExceptT $ createUserWithBootstrapAdmin defaultAuthRepository (Just bootstrapAdminUsername) $ AuthRequest { username = username, password = pack password }
     case result of
       Right () -> do
-        approvalResult <- runExceptT $ approveUser username
+        approvalResult <- runExceptT $ approveUser defaultAuthRepository username
         case approvalResult of
           Right () -> pure ()
           Left _ -> assertFailure "Expected sandbox user approval to succeed"
       Left UserAlreadyExists -> do
-        approvalResult <- runExceptT $ approveUser username
+        approvalResult <- runExceptT $ approveUser defaultAuthRepository username
         case approvalResult of
           Right () -> pure ()
           Left _ -> assertFailure "Expected sandbox user approval to succeed"
@@ -975,7 +975,7 @@ ensurePendingSandboxUser bootstrapAdminUsername username password = do
   cwd <- getCurrentDirectory
   let sandboxDir = cwd ++ "/dist-newstyle/sandbox/foucl"
   bracket_ (setCurrentDirectory sandboxDir) (setCurrentDirectory cwd) $ do
-    result <- runExceptT $ createUserWithBootstrapAdmin (Just bootstrapAdminUsername) $ AuthRequest { username = username, password = pack password }
+    result <- runExceptT $ createUserWithBootstrapAdmin defaultAuthRepository (Just bootstrapAdminUsername) $ AuthRequest { username = username, password = pack password }
     case result of
       Right () -> pure ()
       Left UserAlreadyExists -> pure ()

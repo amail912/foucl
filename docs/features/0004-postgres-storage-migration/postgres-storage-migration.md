@@ -30,9 +30,12 @@ Move persistence to Postgres incrementally, with per-domain cutover control, and
 
 ## Stories
 
+### Done
+
+- [011 Auth Repository Contract](done/011-auth-repository-contract.md)
+
 ### Ready
 
-- [011 Auth Repository Contract](ready/011-auth-repository-contract.md)
 - [012 Auth Backend Selection And Wiring](ready/012-auth-backend-selection-and-wiring.md)
 - [013 Auth Filesystem Adapter Parity](ready/013-auth-filesystem-adapter-parity.md)
 - [014 Auth Postgres Schema And Migrations](ready/014-auth-postgres-schema-and-migrations.md)

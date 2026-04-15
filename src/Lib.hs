@@ -57,7 +57,7 @@ import Data.Time.Format.ISO8601 (iso8601ParseM)
 import GHC.Generics (Generic)
 import Data.ByteString.Lazy.Char8 (writeFile)
 import Filesystem.Path.CurrentOS    (commonPrefix, encodeString, decodeString, collapse, append)
-import Auth (AuthRequest(..), AuthRequestError(..), AuthError(..), AuthenticatedProfile(..), createUserWithBootstrapAdmin, loadAuthenticatedProfile, signinUser, userExists, isApprovedAdmin, listPendingUsers, listApprovedUsers, approveUser, deletePendingUser, deleteApprovedUser)
+import Auth (AuthRequest(..), AuthRequestError(..), AuthError(..), AuthenticatedProfile(..), AuthRepository, defaultAuthRepository, createUserWithBootstrapAdmin, loadAuthenticatedProfile, signinUser, userExists, isApprovedAdmin, listPendingUsers, listApprovedUsers, approveUser, deletePendingUser, deleteApprovedUser)
 import Session (SessionConfig(..), SessionPrincipal(..), SessionStore(..), defaultSessionConfig, mkFileSessionStore, signSessionId, verifyAndExtractSessionId)
 
 type AppM a = ExceptT String (ServerPartT IO) a
@@ -417,16 +417,17 @@ apiController :: MVar [UTCTime] -> FilePath -> AppConfig -> SessionStore -> Serv
 apiController signupRateLimitState tmpDir appConfig sessionStore =
   let sessionCfg = sessionConfig appConfig
       bootstrapAdmin = bootstrapAdminUsername appConfig
-  in dir "api" $ msum [ signupController signupRateLimitState tmpDir bootstrapAdmin
-                      , signinController sessionCfg sessionStore
+      authRepo = defaultAuthRepository
+  in dir "api" $ msum [ signupController authRepo signupRateLimitState tmpDir bootstrapAdmin
+                      , signinController authRepo sessionCfg sessionStore
                       , signoutController sessionCfg sessionStore
-                      , requireAuth sessionCfg sessionStore authController
+                      , requireAuth sessionCfg sessionStore (authController authRepo)
                       , requireAuth sessionCfg sessionStore noteController
                       , requireAuth sessionCfg sessionStore checklistController
                       , requireAuth sessionCfg sessionStore tripPlacesController
-                      , requireAuth sessionCfg sessionStore tripSharingController
+                      , requireAuth sessionCfg sessionStore (tripSharingController authRepo)
                       , requireAuth sessionCfg sessionStore agendaController
-                      , requireAuth sessionCfg sessionStore (adminController bootstrapAdmin)
+                      , requireAuth sessionCfg sessionStore (adminController authRepo bootstrapAdmin)
                       ]
 
 homePage :: ServerPartT IO Response
@@ -444,8 +445,8 @@ signupBodyPolicy tmpDir = defaultBodyPolicy tmpDir 0 maxSignupBodyBytes maxSignu
 isTooLargeBodyError :: String -> Bool
 isTooLargeBodyError err = "x-www-form-urlencoded content longer than BodyPolicy.maxRAM=" `isPrefixOf` err
 
-signupController :: MVar [UTCTime] -> FilePath -> String -> ServerPartT IO Response
-signupController signupRateLimitState tmpDir bootstrapAdmin = dir "signup" $ do
+signupController :: AuthRepository -> MVar [UTCTime] -> FilePath -> String -> ServerPartT IO Response
+signupController authRepo signupRateLimitState tmpDir bootstrapAdmin = dir "signup" $ do
     nullDir
     method POST
     rq <- askRq
@@ -471,16 +472,16 @@ signupController signupRateLimitState tmpDir bootstrapAdmin = dir "signup" $ do
 
           doCreateUser :: AuthRequest -> ServerPartT IO Response --AppM Response
           doCreateUser signupRequest = do
-            res <- liftIO $ runExceptT $ createUserWithBootstrapAdmin (Just bootstrapAdmin) signupRequest
+            res <- liftIO $ runExceptT $ createUserWithBootstrapAdmin authRepo (Just bootstrapAdmin) signupRequest
             either toServerResponse
                    (const $ ok emptyResponse)
                    res
 
-signinController :: SessionConfig -> SessionStore -> ServerPartT IO Response
-signinController sessionConfig sessionStore = dir "signin" $ do
+signinController :: AuthRepository -> SessionConfig -> SessionStore -> ServerPartT IO Response
+signinController authRepo sessionConfig sessionStore = dir "signin" $ do
   nullDir
   method POST
-  withBusinessHandlingAndInput signinUser $ \profile -> do
+  withBusinessHandlingAndInput (signinUser authRepo) $ \profile -> do
     sid <- liftIO $ createSessionForUser sessionStore (authProfileUsername profile)
     let cookieValue = signSessionId (sessionSecret sessionConfig) sid
     addCookie Session (buildSessionCookie sessionConfig cookieValue)
@@ -499,13 +500,13 @@ signoutController sessionConfig sessionStore = dir "signout" $ do
       addCookie Expired (buildSessionCookie sessionConfig "")
       ok emptyResponse
 
-authController :: AppContext -> ServerPartT IO Response
-authController AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
+authController :: AuthRepository -> AppContext -> ServerPartT IO Response
+authController authRepo AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
   dir "auth" $
     dir "profile" $ do
       nullDir
       method GET
-      profileResult <- liftIO $ runExceptT $ loadAuthenticatedProfile principalUserId
+      profileResult <- liftIO $ runExceptT $ loadAuthenticatedProfile authRepo principalUserId
       either toServerResponse
              (ok . jsonResponse)
              profileResult
@@ -621,9 +622,9 @@ requireAuth sessionConfig sessionStore handler = do
         Nothing -> unauthorized $ jsonMessage "Not authenticated"
         Just principal -> handler AppContext { sessionPrincipal = principal }
 
-requireApprovedAdmin :: AppContext -> ServerPartT IO Response -> ServerPartT IO Response
-requireApprovedAdmin AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } handler = do
-  adminCheck <- liftIO $ isApprovedAdmin principalUserId
+requireApprovedAdmin :: AuthRepository -> AppContext -> ServerPartT IO Response -> ServerPartT IO Response
+requireApprovedAdmin authRepo AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } handler = do
+  adminCheck <- liftIO $ isApprovedAdmin authRepo principalUserId
   case adminCheck of
     Left _ -> internalServerError authInternalError
     Right False -> HServer.forbidden $ jsonMessage "Admin privileges required"
@@ -652,10 +653,10 @@ tripPlacesController _ = dir "v1" $ dir "trip-places" $ do
   method GET
   ok (jsonResponse tripPlacesCatalog)
 
-adminController :: String -> AppContext -> ServerPartT IO Response
-adminController bootstrapAdminUsername appContext@AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
+adminController :: AuthRepository -> String -> AppContext -> ServerPartT IO Response
+adminController authRepo bootstrapAdminUsername appContext@AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
   dir "v1" $ dir "admin" $
-    requireApprovedAdmin appContext $
+    requireApprovedAdmin authRepo appContext $
       msum [ dir "pending-signups" $
                msum [ pendingSignupsList
                     , pendingSignupApprove
@@ -670,7 +671,7 @@ adminController bootstrapAdminUsername appContext@AppContext { sessionPrincipal 
     pendingSignupsList = do
       nullDir
       method GET
-      pendingUsersResult <- liftIO listPendingUsers
+      pendingUsersResult <- liftIO $ listPendingUsers authRepo
       case pendingUsersResult of
         Left _ -> internalServerError authInternalError
         Right pendingUsers -> ok (jsonResponse (map PendingSignupApproval pendingUsers))
@@ -686,7 +687,7 @@ adminController bootstrapAdminUsername appContext@AppContext { sessionPrincipal 
       path $ \username -> do
         nullDir
         method DELETE
-        result <- liftIO $ runExceptT $ deletePendingUser username
+        result <- liftIO $ runExceptT $ deletePendingUser authRepo username
         either toServerResponse
                (const $ ok emptyResponse)
                result
@@ -694,7 +695,7 @@ adminController bootstrapAdminUsername appContext@AppContext { sessionPrincipal 
     approvedUsersList = do
       nullDir
       method GET
-      approvedUsersResult <- liftIO listApprovedUsers
+      approvedUsersResult <- liftIO $ listApprovedUsers authRepo
       case approvedUsersResult of
         Left _ -> internalServerError authInternalError
         Right approvedUsers -> ok (jsonResponse approvedUsers)
@@ -703,7 +704,7 @@ adminController bootstrapAdminUsername appContext@AppContext { sessionPrincipal 
       path $ \username -> do
         nullDir
         method DELETE
-        result <- liftIO $ runExceptT $ deleteApprovedUser bootstrapAdminUsername principalUserId username
+        result <- liftIO $ runExceptT $ deleteApprovedUser authRepo bootstrapAdminUsername principalUserId username
         either toServerResponse
                (const $ ok emptyResponse)
                result
@@ -715,13 +716,13 @@ adminController bootstrapAdminUsername appContext@AppContext { sessionPrincipal 
         Just (PendingSignupApproval username)
           | null username -> badRequest "username is required"
           | otherwise -> do
-              result <- liftIO $ runExceptT $ approveUser username
+              result <- liftIO $ runExceptT $ approveUser authRepo username
               either toServerResponse
                      (const $ ok emptyResponse)
                      result
 
-tripSharingController :: AppContext -> ServerPartT IO Response
-tripSharingController AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
+tripSharingController :: AuthRepository -> AppContext -> ServerPartT IO Response
+tripSharingController authRepo AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
   dir "v1" $ dir "trip-sharing" $ msum [ dir "shares" $ msum [ sharesList
                                                              , sharesAdd
                                                              , sharesDelete
@@ -772,7 +773,7 @@ tripSharingController AppContext { sessionPrincipal = SessionPrincipal { princip
               | null username -> badRequest "username is required"
               | username == principalUserId -> badRequest "username must not be the authenticated user"
               | otherwise -> do
-                  exists <- liftIO $ userExists username
+                  exists <- liftIO $ userExists authRepo username
                   if not exists
                     then badRequest "username must reference an existing user"
                     else do
@@ -812,7 +813,7 @@ tripSharingController AppContext { sessionPrincipal = SessionPrincipal { princip
               | null username -> badRequest "username is required"
               | username == principalUserId -> badRequest "username must not be the authenticated user"
               | otherwise -> do
-                  exists <- liftIO $ userExists username
+                  exists <- liftIO $ userExists authRepo username
                   if not exists
                     then badRequest "username must reference an existing user"
                     else do

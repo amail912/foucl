@@ -27,6 +27,8 @@ library
       , AgendaStorage
       , TripSharingStorage
       , Auth
+      , AuthRepository
+      , Repository
       , Session
   other-modules:
       Paths_foucl

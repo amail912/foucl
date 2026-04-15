@@ -539,14 +539,14 @@ signupValidationTests = test [ "Signup should reject short passwords" ~: rejectS
 
 rejectShortPassword :: IO ()
 rejectShortPassword = do
-    result <- runExceptT $ createUser $ AuthRequest { username = "valid-user", password = pack "short" }
+    result <- runExceptT $ createUser defaultAuthRepository $ AuthRequest { username = "valid-user", password = pack "short" }
     case result of
       Left (BadRequest PasswordTooShort) -> assertBool "PasswordTooShort expected" True
       _ -> assertFailure "Expected PasswordTooShort"
 
 rejectInvalidUsername :: IO ()
 rejectInvalidUsername = do
-    result <- runExceptT $ createUser $ AuthRequest { username = "bad/name", password = pack "averystrongpass" }
+    result <- runExceptT $ createUser defaultAuthRepository $ AuthRequest { username = "bad/name", password = pack "averystrongpass" }
     case result of
       Left (BadRequest UsernameDoesNotRespectPattern) -> assertBool "UsernameDoesNotRespectPattern expected" True
       _ -> assertFailure "Expected UsernameDoesNotRespectPattern"
@@ -555,7 +555,7 @@ rejectInvalidUsername = do
 signupNominal :: IO ()
 signupNominal = withCleanSignupUser "signup-nominal-user" $ \username -> do
     let validPassword = pack "averystrongpass"
-    result <- runExceptT $ createUser $ AuthRequest { username = username, password = validPassword }
+    result <- runExceptT $ createUser defaultAuthRepository $ AuthRequest { username = username, password = validPassword }
     case result of
       Right () -> do
         cd <- getCurrentDirectory
@@ -570,10 +570,10 @@ signupNominal = withCleanSignupUser "signup-nominal-user" $ \username -> do
 signupBootstrapAdmin :: IO ()
 signupBootstrapAdmin = withCleanSignupUser "bootstrap-admin-user" $ \username -> do
     let validPassword = pack "averystrongpass"
-    result <- runExceptT $ createUserWithBootstrapAdmin (Just username) $ AuthRequest { username = username, password = validPassword }
+    result <- runExceptT $ createUserWithBootstrapAdmin defaultAuthRepository (Just username) $ AuthRequest { username = username, password = validPassword }
     case result of
       Right () -> do
-        signinResult <- runExceptT $ signinUser $ AuthRequest { username = username, password = validPassword }
+        signinResult <- runExceptT $ signinUser defaultAuthRepository $ AuthRequest { username = username, password = validPassword }
         case signinResult of
           Right profile -> do
             assertEqual "Expected bootstrap admin username in signin profile" username (authProfileUsername profile)
@@ -585,10 +585,10 @@ signupBootstrapAdmin = withCleanSignupUser "bootstrap-admin-user" $ \username ->
 signupAlreadyExistingUser :: IO ()
 signupAlreadyExistingUser = withCleanSignupUser "signup-existing-user" $ \username -> do
     let validPassword = pack "averystrongpass"
-    firstTry <- runExceptT $ createUser $ AuthRequest { username = username, password = validPassword }
+    firstTry <- runExceptT $ createUser defaultAuthRepository $ AuthRequest { username = username, password = validPassword }
     case firstTry of
       Right () -> do
-        secondTry <- runExceptT $ createUser $ AuthRequest { username = username, password = validPassword }
+        secondTry <- runExceptT $ createUser defaultAuthRepository $ AuthRequest { username = username, password = validPassword }
         case secondTry of
           Left UserAlreadyExists -> assertBool "UserAlreadyExists expected" True
           _ -> assertFailure "Expected UserAlreadyExists"
@@ -599,7 +599,7 @@ signupAlreadyExistingUser = withCleanSignupUser "signup-existing-user" $ \userna
 signupUsesRestrictedPermissions :: IO ()
 signupUsesRestrictedPermissions = withCleanSignupUser "signup-permissions-user" $ \username -> do
     let validPassword = pack "averystrongpass"
-    result <- runExceptT $ createUser $ AuthRequest { username = username, password = validPassword }
+    result <- runExceptT $ createUser defaultAuthRepository $ AuthRequest { username = username, password = validPassword }
     case result of
       Right () -> do
         cd <- getCurrentDirectory
@@ -625,14 +625,14 @@ signinValidationTests = test [ "Signin should reject pending users even with val
 signinNominal :: IO ()
 signinNominal = withCleanSignupUser "signin-nominal-user" $ \username -> do
     let validPassword = pack "averystrongpass"
-    signupResult <- runExceptT $ createUser $ AuthRequest { username = username, password = validPassword }
+    signupResult <- runExceptT $ createUser defaultAuthRepository $ AuthRequest { username = username, password = validPassword }
     case signupResult of
       Right () -> do
-        approvalResult <- runExceptT $ approveUser username
+        approvalResult <- runExceptT $ approveUser defaultAuthRepository username
         case approvalResult of
           Left _ -> assertFailure "Expected signup approval"
           Right () -> pure ()
-        signinResult <- runExceptT $ signinUser $ AuthRequest { username = username, password = validPassword }
+        signinResult <- runExceptT $ signinUser defaultAuthRepository $ AuthRequest { username = username, password = validPassword }
         case signinResult of
           Right profile -> do
             assertEqual "Expected signin username to match" username (authProfileUsername profile)
@@ -644,10 +644,10 @@ signinNominal = withCleanSignupUser "signin-nominal-user" $ \username -> do
 signinRejectsPendingUser :: IO ()
 signinRejectsPendingUser = withCleanSignupUser "signin-pending-user" $ \username -> do
     let validPassword = pack "averystrongpass"
-    signupResult <- runExceptT $ createUser $ AuthRequest { username = username, password = validPassword }
+    signupResult <- runExceptT $ createUser defaultAuthRepository $ AuthRequest { username = username, password = validPassword }
     case signupResult of
       Right () -> do
-        signinResult <- runExceptT $ signinUser $ AuthRequest { username = username, password = validPassword }
+        signinResult <- runExceptT $ signinUser defaultAuthRepository $ AuthRequest { username = username, password = validPassword }
         case signinResult of
           Left AccountPendingApproval -> assertBool "AccountPendingApproval expected" True
           _ -> assertFailure "Expected AccountPendingApproval"
@@ -656,14 +656,14 @@ signinRejectsPendingUser = withCleanSignupUser "signin-pending-user" $ \username
 signinRejectsInvalidPassword :: IO ()
 signinRejectsInvalidPassword = withCleanSignupUser "signin-invalid-password-user" $ \username -> do
     let validPassword = pack "averystrongpass"
-    signupResult <- runExceptT $ createUser $ AuthRequest { username = username, password = validPassword }
+    signupResult <- runExceptT $ createUser defaultAuthRepository $ AuthRequest { username = username, password = validPassword }
     case signupResult of
       Right () -> do
-        approvalResult <- runExceptT $ approveUser username
+        approvalResult <- runExceptT $ approveUser defaultAuthRepository username
         case approvalResult of
           Left _ -> assertFailure "Expected signup approval"
           Right () -> pure ()
-        signinResult <- runExceptT $ signinUser $ AuthRequest { username = username, password = pack "wrongpassword!!" }
+        signinResult <- runExceptT $ signinUser defaultAuthRepository $ AuthRequest { username = username, password = pack "wrongpassword!!" }
         case signinResult of
           Left InvalidCredentials -> assertBool "InvalidCredentials expected" True
           _ -> assertFailure "Expected InvalidCredentials"
@@ -671,7 +671,7 @@ signinRejectsInvalidPassword = withCleanSignupUser "signin-invalid-password-user
 
 signinRejectsUnknownUser :: IO ()
 signinRejectsUnknownUser = do
-    signinResult <- runExceptT $ signinUser $ AuthRequest { username = "signin-unknown-user", password = pack "averystrongpass" }
+    signinResult <- runExceptT $ signinUser defaultAuthRepository $ AuthRequest { username = "signin-unknown-user", password = pack "averystrongpass" }
     case signinResult of
       Left InvalidCredentials -> assertBool "InvalidCredentials expected" True
       _ -> assertFailure "Expected InvalidCredentials"
@@ -679,17 +679,17 @@ signinRejectsUnknownUser = do
 approvedUserDeletionRejectsSelfDelete :: IO ()
 approvedUserDeletionRejectsSelfDelete = withCleanSignupUsers ["approved-delete-self-bootstrap", "approved-delete-self-user"] $ \[bootstrapUsername, username] -> do
     let validPassword = pack "averystrongpass"
-    bootstrapResult <- runExceptT $ createUserWithBootstrapAdmin (Just bootstrapUsername) $ AuthRequest { username = bootstrapUsername, password = validPassword }
+    bootstrapResult <- runExceptT $ createUserWithBootstrapAdmin defaultAuthRepository (Just bootstrapUsername) $ AuthRequest { username = bootstrapUsername, password = validPassword }
     case bootstrapResult of
       Right () -> do
-        signupResult <- runExceptT $ createUser $ AuthRequest { username = username, password = validPassword }
+        signupResult <- runExceptT $ createUser defaultAuthRepository $ AuthRequest { username = username, password = validPassword }
         case signupResult of
           Right () -> do
-            approvalResult <- runExceptT $ approveUser username
+            approvalResult <- runExceptT $ approveUser defaultAuthRepository username
             case approvalResult of
               Left _ -> assertFailure "Expected signup approval"
               Right () -> pure ()
-            deleteResult <- runExceptT $ deleteApprovedUser bootstrapUsername username username
+            deleteResult <- runExceptT $ deleteApprovedUser defaultAuthRepository bootstrapUsername username username
             case deleteResult of
               Left (ResourceConflict "Cannot delete your own account") -> assertBool "ResourceConflict expected" True
               _ -> assertFailure "Expected self-delete conflict"

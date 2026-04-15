@@ -87,6 +87,7 @@ test-suite foucl-unit-tests
     , text
     , time
     , bytestring
+    , password
   default-language: Haskell2010
 
 test-suite foucl-integration-tests

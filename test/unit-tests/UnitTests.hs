@@ -9,7 +9,7 @@ import Test.HUnit.Base(Counts(..), (@?), (~:), test, assertBool, assertFailure)
 import Test.HUnit.Text (runTestTT)
 import Crud (CRUDEngine(..), DiskFileStorageConfig(..), Error(..), CrudModificationException(..), CrudReadException(..), CrudWriteException(..))
 import Model (Identifiable(..), NoteContent(..), ChecklistContent(..), ChecklistItem(..), StorageId(..)) 
-import System.Directory (removeDirectoryRecursive, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, getCurrentDirectory, getPermissions, Permissions(..))
+import System.Directory (removeDirectoryRecursive, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, getCurrentDirectory, getPermissions, setPermissions, setCurrentDirectory, Permissions(..))
 import Data.Maybe (fromJust)
 import Data.Either (isRight)
 import Data.List ((\\), sortOn, isInfixOf)
@@ -26,14 +26,18 @@ import qualified AgendaModel as Agenda (CalendarItem(..), CalendarItemContent(..
 import AgendaStorage
 import TripSharingStorage
 import Auth
+import AuthRepository (AuthRepository(..), PersistedUser(..))
+import Repository (RepositoryError(..))
 import Session
 import Lib (AuthBackend(..), parseAuthBackend)
 import Data.Text (Text, pack)
+import Data.Password.Argon2 (hashPassword, mkPassword)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import qualified Data.ByteString.Lazy.Char8 as BL8
+import qualified Data.ByteString.Lazy as BL
 
 runUnitTests :: IO ()
-runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, agendaStorageTests, tripSharingStorageTests, signupValidationTests, signinValidationTests, authBackendConfigTests, sessionTests]
+runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, agendaStorageTests, tripSharingStorageTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionTests]
 
 runTestTTAndExit tests = do
   c <- runTestTT tests
@@ -734,6 +738,194 @@ cleanupSignupUserDir :: FilePath -> IO ()
 cleanupSignupUserDir userDir = do
     userExists <- doesDirectoryExist userDir
     when userExists $ removeDirectoryRecursive userDir
+
+authRepositoryFilesystemTests = test
+  [ "Auth FS repo create/load/list/update/delete nominal" ~: authRepoNominalLifecycle
+  , "Auth FS repo create fails with AlreadyExists on duplicate username" ~: authRepoCreateDuplicate
+  , "Auth FS repo create fails with StorageFailure when users dir is missing" ~: authRepoCreateMissingUsersRoot
+  , "Auth FS repo load fails with NotFound for unknown user" ~: authRepoLoadUnknown
+  , "Auth FS repo load fails with ReadFailure for malformed persisted user" ~: authRepoLoadMalformed
+  , "Auth FS repo update fails with NotFound for unknown user" ~: authRepoUpdateUnknown
+  , "Auth FS repo update fails with WriteFailure when profile is not writable" ~: authRepoUpdateWriteFailure
+  , "Auth FS repo delete fails with NotFound for unknown user" ~: authRepoDeleteUnknown
+  , "Auth FS repo delete fails with WriteFailure when users parent dir is not writable" ~: authRepoDeleteWriteFailure
+  , "Auth FS repo list fails with StorageFailure when users dir is missing" ~: authRepoListMissingUsersRoot
+  , "Auth FS repo list fails with ReadFailure when one profile is malformed" ~: authRepoListMalformed
+  ]
+
+authRepoNominalLifecycle :: IO ()
+authRepoNominalLifecycle = withAuthRepositorySandbox True $ \_ usersDir -> do
+    user <- mkPersistedUser "repo-nominal-user" MemberRole PendingStatus
+    created <- runExceptT $ repoCreateUser defaultAuthRepository user
+    case created of
+      Right () -> pure ()
+      Left err -> assertFailure ("Expected create success, got " ++ show err)
+
+    loaded <- runExceptT $ repoLoadUserByUsername defaultAuthRepository "repo-nominal-user"
+    case loaded of
+      Left err -> assertFailure ("Expected load success, got " ++ show err)
+      Right stored -> do
+        assertEqual "Expected loaded username" "repo-nominal-user" (uname stored)
+        assertEqual "Expected loaded role" MemberRole (userRole stored)
+        assertEqual "Expected loaded approval" PendingStatus (approvalStatus stored)
+
+    listed <- runExceptT $ repoListUsers defaultAuthRepository
+    case listed of
+      Left err -> assertFailure ("Expected list success, got " ++ show err)
+      Right users -> assertBool "Expected listed users to include created user" ("repo-nominal-user" `elem` map uname users)
+
+    let approvedUser = user {approvalStatus = ApprovedStatus, userRole = AdminRole}
+    updated <- runExceptT $ repoUpdateUser defaultAuthRepository approvedUser
+    case updated of
+      Right () -> pure ()
+      Left err -> assertFailure ("Expected update success, got " ++ show err)
+
+    reloaded <- runExceptT $ repoLoadUserByUsername defaultAuthRepository "repo-nominal-user"
+    case reloaded of
+      Left err -> assertFailure ("Expected reload success, got " ++ show err)
+      Right stored -> do
+        assertEqual "Expected updated role" AdminRole (userRole stored)
+        assertEqual "Expected updated approval status" ApprovedStatus (approvalStatus stored)
+
+    deleted <- runExceptT $ repoDeleteUserByUsername defaultAuthRepository "repo-nominal-user"
+    case deleted of
+      Right () -> pure ()
+      Left err -> assertFailure ("Expected delete success, got " ++ show err)
+
+    profileExists <- doesFileExist (usersDir ++ "/repo-nominal-user/profile.json")
+    assertBool "Expected deleted user profile to be removed" (not profileExists)
+
+authRepoCreateDuplicate :: IO ()
+authRepoCreateDuplicate = withAuthRepositorySandbox True $ \_ _ -> do
+    user <- mkPersistedUser "repo-duplicate-user" MemberRole PendingStatus
+    first <- runExceptT $ repoCreateUser defaultAuthRepository user
+    second <- runExceptT $ repoCreateUser defaultAuthRepository user
+    case (first, second) of
+      (Right (), Left AlreadyExists) -> assertBool "Expected duplicate create to return AlreadyExists" True
+      _ -> assertFailure ("Expected (Right (), Left AlreadyExists), got " ++ show (first, second))
+
+authRepoCreateMissingUsersRoot :: IO ()
+authRepoCreateMissingUsersRoot = withAuthRepositorySandbox False $ \_ _ -> do
+    user <- mkPersistedUser "repo-missing-root-user" MemberRole PendingStatus
+    result <- runExceptT $ repoCreateUser defaultAuthRepository user
+    case result of
+      Left StorageFailure -> assertBool "Expected StorageFailure for missing users root" True
+      _ -> assertFailure ("Expected Left StorageFailure, got " ++ show result)
+
+authRepoLoadUnknown :: IO ()
+authRepoLoadUnknown = withAuthRepositorySandbox True $ \_ _ -> do
+    result <- runExceptT $ repoLoadUserByUsername defaultAuthRepository "repo-unknown-user"
+    case result of
+      Left NotFound -> assertBool "Expected NotFound for unknown user" True
+      _ -> assertFailure "Expected Left NotFound"
+
+authRepoLoadMalformed :: IO ()
+authRepoLoadMalformed = withAuthRepositorySandbox True $ \_ usersDir -> do
+    let userDir = usersDir ++ "/repo-malformed-user"
+        profilePath = userDir ++ "/profile.json"
+    createDirectoryIfMissing True userDir
+    BL.writeFile profilePath (BL8.pack "{not-valid-json")
+    result <- runExceptT $ repoLoadUserByUsername defaultAuthRepository "repo-malformed-user"
+    case result of
+      Left ReadFailure -> assertBool "Expected ReadFailure for malformed profile" True
+      _ -> assertFailure "Expected Left ReadFailure"
+
+authRepoUpdateUnknown :: IO ()
+authRepoUpdateUnknown = withAuthRepositorySandbox True $ \_ _ -> do
+    user <- mkPersistedUser "repo-update-unknown-user" MemberRole PendingStatus
+    result <- runExceptT $ repoUpdateUser defaultAuthRepository user
+    case result of
+      Left NotFound -> assertBool "Expected NotFound for unknown user update" True
+      _ -> assertFailure "Expected Left NotFound"
+
+authRepoUpdateWriteFailure :: IO ()
+authRepoUpdateWriteFailure = withAuthRepositorySandbox True $ \_ usersDir -> do
+    user <- mkPersistedUser "repo-update-writefail-user" MemberRole PendingStatus
+    created <- runExceptT $ repoCreateUser defaultAuthRepository user
+    case created of
+      Left err -> assertFailure ("Expected create success, got " ++ show err)
+      Right () -> pure ()
+
+    let profilePath = usersDir ++ "/repo-update-writefail-user/profile.json"
+    originalPermissions <- getPermissions profilePath
+    setPermissions profilePath originalPermissions { writable = False }
+    result <- runExceptT $ repoUpdateUser defaultAuthRepository user {approvalStatus = ApprovedStatus}
+    setPermissions profilePath originalPermissions
+    case result of
+      Left WriteFailure -> assertBool "Expected WriteFailure for non-writable profile" True
+      _ -> assertFailure ("Expected Left WriteFailure, got " ++ show result)
+
+authRepoDeleteUnknown :: IO ()
+authRepoDeleteUnknown = withAuthRepositorySandbox True $ \_ _ -> do
+    result <- runExceptT $ repoDeleteUserByUsername defaultAuthRepository "repo-delete-unknown-user"
+    case result of
+      Left NotFound -> assertBool "Expected NotFound for unknown user delete" True
+      _ -> assertFailure ("Expected Left NotFound, got " ++ show result)
+
+authRepoDeleteWriteFailure :: IO ()
+authRepoDeleteWriteFailure = withAuthRepositorySandbox True $ \_ usersDir -> do
+    user <- mkPersistedUser "repo-delete-writefail-user" MemberRole PendingStatus
+    created <- runExceptT $ repoCreateUser defaultAuthRepository user
+    case created of
+      Left err -> assertFailure ("Expected create success, got " ++ show err)
+      Right () -> pure ()
+
+    originalUsersDirPermissions <- getPermissions usersDir
+    setPermissions usersDir originalUsersDirPermissions { writable = False }
+    result <- runExceptT $ repoDeleteUserByUsername defaultAuthRepository "repo-delete-writefail-user"
+    setPermissions usersDir originalUsersDirPermissions
+    case result of
+      Left WriteFailure -> assertBool "Expected WriteFailure for non-writable users dir" True
+      _ -> assertFailure ("Expected Left WriteFailure, got " ++ show result)
+
+authRepoListMissingUsersRoot :: IO ()
+authRepoListMissingUsersRoot = withAuthRepositorySandbox False $ \_ _ -> do
+    result <- runExceptT $ repoListUsers defaultAuthRepository
+    case result of
+      Left StorageFailure -> assertBool "Expected StorageFailure when users root is missing" True
+      _ -> assertFailure "Expected Left StorageFailure"
+
+authRepoListMalformed :: IO ()
+authRepoListMalformed = withAuthRepositorySandbox True $ \_ usersDir -> do
+    good <- mkPersistedUser "repo-list-good-user" MemberRole PendingStatus
+    created <- runExceptT $ repoCreateUser defaultAuthRepository good
+    case created of
+      Left err -> assertFailure ("Expected create success, got " ++ show err)
+      Right () -> pure ()
+
+    let badUserDir = usersDir ++ "/repo-list-bad-user"
+        badProfile = badUserDir ++ "/profile.json"
+    createDirectoryIfMissing True badUserDir
+    BL.writeFile badProfile (BL8.pack "{not-valid-json")
+
+    result <- runExceptT $ repoListUsers defaultAuthRepository
+    case result of
+      Left ReadFailure -> assertBool "Expected ReadFailure for malformed listed profile" True
+      _ -> assertFailure "Expected Left ReadFailure"
+
+withAuthRepositorySandbox :: Bool -> (FilePath -> FilePath -> IO ()) -> IO ()
+withAuthRepositorySandbox createUsersDir action = do
+    cwd <- getCurrentDirectory
+    nonce <- round . (* 1000000) <$> getPOSIXTime
+    let baseDir = cwd ++ "/dist-newstyle/sandbox/auth-repo-tests/" ++ show (nonce :: Integer)
+        usersDir = baseDir ++ "/data/users"
+    createDirectoryIfMissing True baseDir
+    when createUsersDir $ createDirectoryIfMissing True usersDir
+    setCurrentDirectory baseDir
+    action baseDir usersDir `finally` do
+      setCurrentDirectory cwd
+      exists <- doesDirectoryExist baseDir
+      when exists $ removeDirectoryRecursive baseDir
+
+mkPersistedUser :: String -> UserRole -> ApprovalStatus -> IO PersistedUser
+mkPersistedUser username role approval = do
+    pHash <- hashPassword $ mkPassword (pack "averystrongpass")
+    pure PersistedUser
+      { uname = username
+      , passwordHash = pHash
+      , userRole = role
+      , approvalStatus = approval
+      }
 
 authBackendConfigTests = test [ "Auth backend defaults to filesystem when omitted" ~: authBackendDefaultsToFilesystem
                               , "Auth backend accepts filesystem" ~: authBackendAcceptsFilesystem

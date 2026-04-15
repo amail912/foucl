@@ -56,6 +56,7 @@ Out of scope:
 - Unit tests for adapter success/failure paths across all repository operations.
 - Tests verifying each failure class maps to the required shared repository error.
 - Contract tests verifying adapter satisfies `SessionRepository` and does not leak backend-specific errors.
+- Real-Postgres parity signoff is delegated to story 021 with strict no-mock verification mode.
 
 ## Out Of Scope
 

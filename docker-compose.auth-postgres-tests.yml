@@ -1,0 +1,21 @@
+services:
+  auth-postgres-test-db:
+    image: postgres:17
+    container_name: foucl-auth-postgres-test-db
+    environment:
+      POSTGRES_DB: foucl
+      POSTGRES_USER: foucl
+      POSTGRES_PASSWORD: foucl
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U foucl -d foucl"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    volumes:
+      - auth-postgres-test-db-data:/var/lib/postgresql/data
+      - ./db/init/auth-postgres-tests-init.sql:/docker-entrypoint-initdb.d/001-auth-postgres-tests-init.sql:ro
+
+volumes:
+  auth-postgres-test-db-data:

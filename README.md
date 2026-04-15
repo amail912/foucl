@@ -11,6 +11,12 @@ Optional env vars:
 
 Required config fields:
 - `auth.bootstrapAdminUsername`: username that is bootstrapped as the first approved admin.
+- When using `auth.authBackend = "postgres"`, a top-level `database` object is required:
+  - `database.host`
+  - `database.port`
+  - `database.name`
+  - `database.user`
+  - `database.password`
 
 ## API
 
@@ -60,3 +66,22 @@ Run:
 ```bash
 make lint
 ```
+
+## Integration tests
+
+- Filesystem-backed integration suite:
+  - `make integration-test`
+- Auth Postgres parity suite (real DB, hard fail when unavailable):
+  - `make integration-test-auth-postgres`
+  - Uses fixed local test DB endpoint: `127.0.0.1:5432`, `dbname=foucl`, `user=foucl`, `password=foucl`.
+  - The Make target orchestrates Docker automatically:
+    - starts DB,
+    - waits for readiness,
+    - runs the parity suite,
+    - stops DB and removes the volume.
+  - Compose stack details:
+    - Postgres image: `postgres:17`
+    - Persistent volume: `auth-postgres-test-db-data`
+    - Init SQL script (first startup only): `db/init/auth-postgres-tests-init.sql`
+  - Reset DB volume when you need to re-run init SQL from scratch:
+    - `docker compose -f docker-compose.auth-postgres-tests.yml down -v`

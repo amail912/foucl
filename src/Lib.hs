@@ -578,15 +578,11 @@ signupController authRepo signupRateLimitState tmpDir bootstrapAdmin = dir "sign
       Just bodyErr | isTooLargeBodyError bodyErr -> requestEntityTooLarge $ jsonMessage "Body too large"
       Just _ -> badRequest "Unable to decode request body"
       Nothing -> do
-        allowed <- liftIO $ allowSignupRequest signupRateLimitState
-        if not allowed
-          then tooManyRequests "Too many signup attempts. Please retry later."
-          else do
-            log "Reading signup body"
-            body <- askRq >>= takeRequestBody
-            maybe (badRequest "Empty body")
-                  handleBody
-                  body
+        log "Reading signup body"
+        body <- askRq >>= takeRequestBody
+        maybe (badRequest "Empty body")
+              handleBody
+              body
     where handleBody :: RqBody -> ServerPartT IO Response --AppM Response
           handleBody body =
             maybe (badRequest "Unable to decode the body as a SignupData")
@@ -595,10 +591,17 @@ signupController authRepo signupRateLimitState tmpDir bootstrapAdmin = dir "sign
 
           doCreateUser :: AuthRequest -> ServerPartT IO Response --AppM Response
           doCreateUser signupRequest = do
-            res <- liftIO $ runExceptT $ createUserWithBootstrapAdmin authRepo (Just bootstrapAdmin) signupRequest
-            either toServerResponse
-                   (const $ ok emptyResponse)
-                   res
+            let isBootstrapSignup = username signupRequest == bootstrapAdmin
+            allowed <- if isBootstrapSignup
+              then pure True
+              else liftIO $ allowSignupRequest signupRateLimitState
+            if not allowed
+              then tooManyRequests "Too many signup attempts. Please retry later."
+              else do
+                res <- liftIO $ runExceptT $ createUserWithBootstrapAdmin authRepo (Just bootstrapAdmin) signupRequest
+                either toServerResponse
+                       (const $ ok emptyResponse)
+                       res
 
 signinController :: AuthRepository -> SessionConfig -> SessionStore -> ServerPartT IO Response
 signinController authRepo sessionConfig sessionStore = dir "signin" $ do

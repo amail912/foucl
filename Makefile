@@ -1,4 +1,4 @@
-.PHONY: help lint build test ci start-sandbox restart-sandbox stop-sandbox integration-test _prepare-sandbox _wait-server
+.PHONY: help lint build test ci start-sandbox restart-sandbox stop-sandbox integration-test integration-test-auth-postgres _prepare-sandbox _wait-server _prepare-auth-postgres-test-db _write-auth-postgres-config _start-auth-postgres-test-db _stop-auth-postgres-test-db
 
 SHELL := /bin/bash
 
@@ -7,6 +7,14 @@ SANDBOX_DIR := ./dist-newstyle/sandbox/foucl
 SANDBOX_EXE := $(SANDBOX_DIR)/foucl
 SANDBOX_PIDFILE := $(abspath $(SANDBOX_DIR)/.foucl/foucl.pid)
 FOUCL_CONFIG_FILE_DEFAULT := $(CURDIR)/config/app-config.json
+AUTH_PG_TEST_HOST := 127.0.0.1
+AUTH_PG_TEST_PORT := 5432
+AUTH_PG_TEST_DB := foucl
+AUTH_PG_TEST_USER := foucl
+AUTH_PG_TEST_PASSWORD := foucl
+AUTH_PG_TEST_CONN := host=$(AUTH_PG_TEST_HOST) port=$(AUTH_PG_TEST_PORT) dbname=$(AUTH_PG_TEST_DB) user=$(AUTH_PG_TEST_USER) password=$(AUTH_PG_TEST_PASSWORD)
+SANDBOX_AUTH_PG_CONFIG := $(abspath $(SANDBOX_DIR)/config/app-config.auth-postgres.json)
+AUTH_PG_COMPOSE_FILE := $(CURDIR)/docker-compose.auth-postgres-tests.yml
 
 help:
 	@echo "Available targets:"
@@ -18,6 +26,7 @@ help:
 	@echo "  make restart-sandbox  Restart sandbox server"
 	@echo "  make stop-sandbox     Stop sandbox server"
 	@echo "  make integration-test Run integration tests against sandbox server"
+	@echo "  make integration-test-auth-postgres Run auth parity integration tests against postgres auth backend"
 
 lint:
 	./scripts/lint.sh
@@ -42,6 +51,43 @@ _prepare-sandbox:
 	mkdir -p "$(SANDBOX_DIR)/data/note" "$(SANDBOX_DIR)/data/checklist" "$(SANDBOX_DIR)/data/users" "$(SANDBOX_DIR)/data/calendar-items"; \
 	cp "$$built_exe" "$(SANDBOX_EXE)"; \
 	chmod +x "$(SANDBOX_EXE)"
+
+_prepare-auth-postgres-test-db:
+	@set -euo pipefail; \
+	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/auth/0001_auth_schema.down.sql"; \
+	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/auth/0001_auth_schema.up.sql"; \
+	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -c "TRUNCATE TABLE auth_users";
+
+_start-auth-postgres-test-db:
+	@set -euo pipefail; \
+	docker compose -f "$(AUTH_PG_COMPOSE_FILE)" up -d --wait
+
+_stop-auth-postgres-test-db:
+	@set -euo pipefail; \
+	docker compose -f "$(AUTH_PG_COMPOSE_FILE)" down -v --remove-orphans
+
+_write-auth-postgres-config:
+	@set -euo pipefail; \
+	mkdir -p "$(SANDBOX_DIR)/config"; \
+	printf '%s\n' \
+	'{' \
+	'  "auth": {' \
+	'    "bootstrapAdminUsername": "admin",' \
+	'    "authBackend": "postgres"' \
+	'  },' \
+	'  "session": {' \
+	'    "cookieName": "foucl_session",' \
+	'    "absoluteTtlSeconds": 604800,' \
+	'    "idleTtlSeconds": 86400' \
+	'  },' \
+	'  "database": {' \
+	'    "host": "127.0.0.1",' \
+	'    "port": 5432,' \
+	'    "name": "foucl",' \
+	'    "user": "foucl",' \
+	'    "password": "foucl"' \
+	'  }' \
+	'}' > "$(SANDBOX_AUTH_PG_CONFIG)"
 
 _wait-server:
 	@set -euo pipefail; \
@@ -90,3 +136,21 @@ integration-test:
 	); \
 	$(MAKE) --no-print-directory _wait-server; \
 	cabal test foucl-integration-tests
+
+integration-test-auth-postgres:
+	@set -euo pipefail; \
+	$(MAKE) --no-print-directory _prepare-sandbox; \
+	$(MAKE) --no-print-directory _start-auth-postgres-test-db; \
+	$(MAKE) --no-print-directory _prepare-auth-postgres-test-db; \
+	$(MAKE) --no-print-directory _write-auth-postgres-config; \
+	trap '$(DAEMON_SCRIPT) stop --pidfile "$(SANDBOX_PIDFILE)" >/dev/null 2>&1 || true; $(MAKE) --no-print-directory _stop-auth-postgres-test-db >/dev/null 2>&1 || true' EXIT INT TERM; \
+	export FOUCL_SESSION_COOKIE_SECURE="$${FOUCL_SESSION_COOKIE_SECURE:-false}"; \
+	( \
+		export FOUCL_SESSION_SECRET="$${FOUCL_SESSION_SECRET:-dev-only-session-secret}"; \
+		export FOUCL_CONFIG_FILE="$(SANDBOX_AUTH_PG_CONFIG)"; \
+		export FOUCL_SESSION_COOKIE_SECURE="$$FOUCL_SESSION_COOKIE_SECURE"; \
+		cd "$(SANDBOX_DIR)"; \
+		$(DAEMON_SCRIPT) start --bin "$(abspath $(SANDBOX_EXE))" --pidfile "$(abspath $(SANDBOX_PIDFILE))"; \
+	); \
+	$(MAKE) --no-print-directory _wait-server; \
+	cabal test foucl-integration-auth-postgres-tests

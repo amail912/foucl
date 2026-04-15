@@ -50,4 +50,4 @@ Implement Postgres-backed auth repository behavior against the `AuthRepository` 
 - Schema migration definition.
 - Runtime backend wiring behavior.
 - Startup import behavior.
-- Full parity verification signoff.
+- Full parity verification signoff (covered by story 016 real-Postgres auth parity suite).

@@ -15,6 +15,7 @@ Validate that session behavior remains contract-compatible when `sessionBackend=
 
 - This story certifies real Postgres runtime integration for session flows using the 020 adapter and 022 schema.
 - Mock-only checks are insufficient for completion.
+- Missing/unreachable Postgres test environment is a hard failure for this parity run (no skip fallback).
 
 ## Scenario Matrix
 

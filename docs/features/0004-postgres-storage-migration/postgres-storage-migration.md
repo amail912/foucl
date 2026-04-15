@@ -28,6 +28,8 @@ Move persistence to Postgres incrementally, with per-domain cutover control, and
 - Postgres connection is configured through a top-level split `database` object (`host`, `port`, `name`, `user`, `password`).
 - Import routines must be idempotent and safe to run at each startup.
 - Migration system documentation: [Postgres Migration System](migration-system.md).
+- Parity certification stories use real Postgres integration tests (no mocked signoff).
+- Auth parity (016) uses fixed local test DB endpoint `127.0.0.1:5432/foucl` with `foucl/foucl` credentials and fails hard when unavailable.
 
 ## Stories
 
@@ -38,10 +40,10 @@ Move persistence to Postgres incrementally, with per-domain cutover control, and
 - [013 Auth Filesystem Adapter Parity](done/013-auth-filesystem-adapter-parity.md)
 - [014 Auth Postgres Schema And Migrations](done/014-auth-postgres-schema-and-migrations.md)
 - [015 Auth Postgres Adapter Implementation](done/015-auth-postgres-adapter-implementation.md)
+- [016 Auth Postgres Parity Verification](done/016-auth-postgres-parity-verification.md)
 
 ### Ready
 
-- [016 Auth Postgres Parity Verification](ready/016-auth-postgres-parity-verification.md)
 - [017 Session Repository Contract](ready/017-session-repository-contract.md)
 - [018 Session Backend Selection And Wiring](ready/018-session-backend-selection-and-wiring.md)
 - [019 Session Filesystem Adapter Parity](ready/019-session-filesystem-adapter-parity.md)

@@ -118,3 +118,25 @@ test-suite foucl-integration-tests
     , transformers
     , text
   default-language: Haskell2010
+
+test-suite foucl-integration-auth-postgres-tests
+  type: exitcode-stdio-1.0
+  main-is: AuthPostgresIntegrationTestsExec.hs
+  other-modules:
+      Paths_foucl
+    , AuthPostgresIntegrationTests
+  hs-source-dirs:
+    test/integration-auth-postgres-tests
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      base >=4.7 && <5
+    , hspec
+    , HUnit
+    , http-conduit
+    , aeson
+    , bytestring
+    , utf8-string
+    , case-insensitive
+    , process
+    , time
+  default-language: Haskell2010

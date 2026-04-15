@@ -57,6 +57,7 @@ library
     , time
     , unordered-containers
     , process
+    , postgresql-simple
   default-language: Haskell2010
 
 executable foucl

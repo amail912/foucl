@@ -11,13 +11,14 @@ Introduce runtime backend selection for the session domain and wire startup comp
 - Validate backend flag at startup; unsupported values fail startup configuration.
 - Wire startup composition so session logic receives exactly one implementation selected from `sessionBackend`.
 - Emit startup log for selected session backend.
+- Consume top-level split `database` config (`host`, `port`, `name`, `user`, `password`) for postgres session mode.
 
 ## Runtime Selection Contract
 
 - `sessionBackend=filesystem` selects only filesystem session composition.
 - `sessionBackend=postgres` selects only Postgres session composition.
 - Mixed session backend composition in one runtime is not allowed.
-- This story consumes existing global Postgres connection configuration and introduces no new schema rules.
+- In postgres mode, startup must fail fast if database config is missing or DB connect/schema checks fail.
 
 ## Startup And Composition Contract
 

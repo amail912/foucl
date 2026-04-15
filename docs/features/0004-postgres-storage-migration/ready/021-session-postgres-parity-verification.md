@@ -2,19 +2,19 @@
 
 ## Objective
 
-Validate that session behavior remains contract-compatible when `sessionBackend=postgres`, using mocked repository checks.
+Validate that session behavior remains contract-compatible when `sessionBackend=postgres` with real Postgres-backed execution.
 
 ## Scope
 
-- Execute session-focused parity verification with mocked Postgres repository behavior.
+- Execute session-focused parity verification against real Postgres-backed repository behavior.
 - Verify client-visible session behavior remains aligned with existing expectations at session/auth business/controller boundaries.
 - Verify state lifecycle semantics remain compatible for resolve, idle refresh, and revoke flows.
 - Verify status/message semantics remain unchanged for covered scenarios.
 
 ## Verification Mode
 
-- This story uses mocked repository checks only.
-- It does not certify real Postgres runtime integration.
+- This story certifies real Postgres runtime integration for session flows using the 020 adapter and 022 schema.
+- Mock-only checks are insufficient for completion.
 
 ## Scenario Matrix
 
@@ -40,8 +40,8 @@ Out of scope:
 
 ## Acceptance Criteria
 
-1. Mocked parity checks pass for all scenarios in scope.
+1. Real Postgres-backed parity checks pass for all scenarios in scope.
 2. Session create/resolve/refresh/revoke behaviors remain contract-compatible.
 3. Status codes and error messages remain compatible with current contract at the business/controller boundary.
 4. No new client-visible error category is introduced.
-5. Story explicitly documents that real Postgres integration verification is out of scope.
+5. Story explicitly documents that real Postgres integration verification is in scope and required.

@@ -15,6 +15,7 @@ import Data.Function ((&))
 import Data.Functor ((<$>))
 import Data.Maybe (Maybe(..), fromMaybe, mapMaybe, catMaybes)
 import Data.Int (Int64)
+import Data.List (intercalate)
 import Control.Monad (msum, mzero, join, foldM, when, mplus)
 import Control.Monad.Except (catchError, throwError)
 import Control.Monad.Trans.Class (lift, MonadTrans)
@@ -60,6 +61,7 @@ import GHC.Generics (Generic)
 import Data.ByteString.Lazy.Char8 (writeFile)
 import Filesystem.Path.CurrentOS    (commonPrefix, encodeString, decodeString, collapse, append)
 import Auth (AuthRequest(..), AuthRequestError(..), AuthError(..), AuthenticatedProfile(..), AuthRepository, defaultAuthRepository, createUserWithBootstrapAdmin, loadAuthenticatedProfile, signinUser, userExists, isApprovedAdmin, listPendingUsers, listApprovedUsers, approveUser, deletePendingUser, deleteApprovedUser)
+import qualified AuthRepository as AuthRepository
 import Session (SessionConfig(..), SessionPrincipal(..), SessionStore(..), defaultSessionConfig, mkFileSessionStore, signSessionId, verifyAndExtractSessionId)
 
 type AppM a = ExceptT String (ServerPartT IO) a
@@ -90,17 +92,44 @@ instance FromJSON AuthConfigFile where
 data AppConfigFile = AppConfigFile
   { appSession :: SessionConfigFile
   , appAuth :: AuthConfigFile
+  , appDatabase :: !(Maybe DatabaseConfigFile)
   } deriving (Generic)
 
 instance FromJSON AppConfigFile where
   parseJSON = withObject "AppConfigFile" $ \v -> AppConfigFile
     <$> v .: "session"
     <*> v .: "auth"
+    <*> v .:? "database"
+
+data DatabaseConfigFile = DatabaseConfigFile
+  { databaseHostFile :: String
+  , databasePortFile :: Int
+  , databaseNameFile :: String
+  , databaseUserFile :: String
+  , databasePasswordFile :: String
+  } deriving (Generic)
+
+instance FromJSON DatabaseConfigFile where
+  parseJSON = withObject "DatabaseConfigFile" $ \v -> DatabaseConfigFile
+    <$> v .: "host"
+    <*> v .: "port"
+    <*> v .: "name"
+    <*> v .: "user"
+    <*> v .: "password"
 
 data AppConfig = AppConfig
   { sessionConfig :: SessionConfig
   , bootstrapAdminUsername :: String
   , authBackend :: AuthBackend
+  , databaseConfig :: !(Maybe DatabaseConfig)
+  }
+
+data DatabaseConfig = DatabaseConfig
+  { databaseHost :: String
+  , databasePort :: Int
+  , databaseName :: String
+  , databaseUser :: String
+  , databasePassword :: String
   }
 
 data AuthBackend
@@ -378,24 +407,28 @@ loadAppConfigFromFile = do
                 Right appConfig -> pure $ Right appConfig
 
 toAppConfig :: String -> AppConfigFile -> Maybe Bool -> Either String AppConfig
-toAppConfig secret AppConfigFile {appSession = SessionConfigFile {sessionCookieNameFile, sessionAbsoluteTtlSecondsFile, sessionIdleTtlSecondsFile}, appAuth = AuthConfigFile {bootstrapAdminUsernameFile, authBackendFile}} mCookieSecure
+toAppConfig secret AppConfigFile {appSession = SessionConfigFile {sessionCookieNameFile, sessionAbsoluteTtlSecondsFile, sessionIdleTtlSecondsFile}, appAuth = AuthConfigFile {bootstrapAdminUsernameFile, authBackendFile}, appDatabase} mCookieSecure
   | null bootstrapAdminUsernameFile = Left "Configuration auth.bootstrapAdminUsername cannot be empty"
   | otherwise =
       case parseAuthBackend authBackendFile of
         Left err -> Left err
         Right selectedAuthBackend ->
-          Right AppConfig
-            { sessionConfig =
-                defaultSessionConfig
-                  { sessionSecret = secret
-                  , sessionCookieName = fromMaybe (sessionCookieName defaultSessionConfig) sessionCookieNameFile
-                  , sessionAbsoluteTtlSeconds = fromIntegral (fromMaybe (round (sessionAbsoluteTtlSeconds defaultSessionConfig)) sessionAbsoluteTtlSecondsFile)
-                  , sessionIdleTtlSeconds = fromIntegral (fromMaybe (round (sessionIdleTtlSeconds defaultSessionConfig)) sessionIdleTtlSecondsFile)
-                  , sessionCookieSecure = fromMaybe (sessionCookieSecure defaultSessionConfig) mCookieSecure
-                  }
-            , bootstrapAdminUsername = bootstrapAdminUsernameFile
-            , authBackend = selectedAuthBackend
-            }
+          case traverse validateDatabaseConfig appDatabase of
+            Left err -> Left err
+            Right parsedDatabaseConfig ->
+              Right AppConfig
+                { sessionConfig =
+                    defaultSessionConfig
+                      { sessionSecret = secret
+                      , sessionCookieName = fromMaybe (sessionCookieName defaultSessionConfig) sessionCookieNameFile
+                      , sessionAbsoluteTtlSeconds = fromIntegral (fromMaybe (round (sessionAbsoluteTtlSeconds defaultSessionConfig)) sessionAbsoluteTtlSecondsFile)
+                      , sessionIdleTtlSeconds = fromIntegral (fromMaybe (round (sessionIdleTtlSeconds defaultSessionConfig)) sessionIdleTtlSecondsFile)
+                      , sessionCookieSecure = fromMaybe (sessionCookieSecure defaultSessionConfig) mCookieSecure
+                      }
+                , bootstrapAdminUsername = bootstrapAdminUsernameFile
+                , authBackend = selectedAuthBackend
+                , databaseConfig = parsedDatabaseConfig
+                }
 
 parseAuthBackend :: Maybe String -> Either String AuthBackend
 parseAuthBackend Nothing = Right AuthBackendFilesystem
@@ -428,7 +461,11 @@ runApp = do
         sessionStore <- mkFileSessionStore (cd </> "data" </> "sessions") sessionCfg
         let selectedAuthBackend = authBackend appConfig
         putStrLn ("[startup] auth backend: " ++ renderAuthBackend selectedAuthBackend)
-        case makeAuthRepository selectedAuthBackend of
+        case databaseConfig appConfig of
+          Nothing -> pure ()
+          Just dbCfg -> putStrLn ("[startup] database target: " ++ renderDatabaseTarget dbCfg)
+        authRepoResult <- makeAuthRepository selectedAuthBackend (databaseConfig appConfig)
+        case authRepoResult of
           Left err -> do
             putStrLn ("[startup] auth backend wiring failed for: " ++ renderAuthBackend selectedAuthBackend)
             putStrLn $ "[startup-error] " ++ err
@@ -443,13 +480,62 @@ runApp = do
                      , mzero
                      ]
 
-makeAuthRepository :: AuthBackend -> Either String AuthRepository
-makeAuthRepository AuthBackendFilesystem = Right defaultAuthRepository
-makeAuthRepository AuthBackendPostgres = Left "Configuration auth.authBackend=postgres is not yet implemented (expected in story 015)"
+makeAuthRepository :: AuthBackend -> Maybe DatabaseConfig -> IO (Either String AuthRepository)
+makeAuthRepository AuthBackendFilesystem _ = pure (Right defaultAuthRepository)
+makeAuthRepository AuthBackendPostgres mDatabaseCfg =
+  case mDatabaseCfg of
+    Nothing -> pure (Left "Configuration database is required when auth.authBackend=postgres")
+    Just dbCfg -> do
+      let connectionString = renderPostgresConnectionString dbCfg
+      validationResult <- AuthRepository.verifyPostgresAuthStorage connectionString
+      case validationResult of
+        Left err -> pure (Left ("Postgres auth storage validation failed: " ++ err))
+        Right () -> pure (Right (AuthRepository.postgresAuthRepository connectionString))
 
 renderAuthBackend :: AuthBackend -> String
 renderAuthBackend AuthBackendFilesystem = "filesystem"
 renderAuthBackend AuthBackendPostgres = "postgres"
+
+validateDatabaseConfig :: DatabaseConfigFile -> Either String DatabaseConfig
+validateDatabaseConfig DatabaseConfigFile {databaseHostFile, databasePortFile, databaseNameFile, databaseUserFile, databasePasswordFile}
+  | null databaseHostFile = Left "Configuration database.host cannot be empty"
+  | databasePortFile <= 0 = Left "Configuration database.port must be a positive integer"
+  | null databaseNameFile = Left "Configuration database.name cannot be empty"
+  | null databaseUserFile = Left "Configuration database.user cannot be empty"
+  | null databasePasswordFile = Left "Configuration database.password cannot be empty"
+  | otherwise =
+      Right DatabaseConfig
+        { databaseHost = databaseHostFile
+        , databasePort = databasePortFile
+        , databaseName = databaseNameFile
+        , databaseUser = databaseUserFile
+        , databasePassword = databasePasswordFile
+        }
+
+renderPostgresConnectionString :: DatabaseConfig -> String
+renderPostgresConnectionString cfg =
+  intercalate
+    " "
+    [ "host=" ++ pgQuote (databaseHost cfg)
+    , "port=" ++ show (databasePort cfg)
+    , "dbname=" ++ pgQuote (databaseName cfg)
+    , "user=" ++ pgQuote (databaseUser cfg)
+    , "password=" ++ pgQuote (databasePassword cfg)
+    ]
+
+renderDatabaseTarget :: DatabaseConfig -> String
+renderDatabaseTarget cfg =
+  "host=" ++ databaseHost cfg
+    ++ " port=" ++ show (databasePort cfg)
+    ++ " dbname=" ++ databaseName cfg
+    ++ " user=" ++ databaseUser cfg
+
+pgQuote :: String -> String
+pgQuote raw = "'" ++ concatMap escape raw ++ "'"
+  where
+    escape '\'' = "\\'"
+    escape '\\' = "\\\\"
+    escape c = [c]
 
 apiController :: AuthRepository -> MVar [UTCTime] -> FilePath -> AppConfig -> SessionStore -> ServerPartT IO Response
 apiController authRepo signupRateLimitState tmpDir appConfig sessionStore =

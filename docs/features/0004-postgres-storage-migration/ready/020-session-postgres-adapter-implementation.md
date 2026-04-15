@@ -9,8 +9,10 @@ Implement Postgres-backed session repository behavior against the `SessionReposi
 - Implement Postgres adapter for all session repository operations defined by story 017.
 - Use schema and migrations delivered by story 022.
 - Integrate adapter into session backend selection path delivered by story 018.
+- Use `postgresql-simple` directly for repository queries and commands.
 - Emit only shared generic repository errors from the common `Repository` module.
 - Align adapter behavior with existing session/auth business mapping semantics.
+- Consume top-level split `database` config (`host`, `port`, `name`, `user`, `password`) through startup composition.
 
 ## Operational Contract
 

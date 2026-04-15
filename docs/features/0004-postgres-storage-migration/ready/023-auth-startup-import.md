@@ -7,6 +7,7 @@ Add startup filesystem-to-Postgres bootstrap import for the auth domain when aut
 ## Scope
 
 - Run auth import only when `authBackend=postgres`.
+- Require top-level `database` split config (`host`, `port`, `name`, `user`, `password`) to be present in postgres auth mode.
 - Read filesystem auth records at startup.
 - Read existing Postgres auth records at startup.
 - If both stores contain auth data, log a warning with auth domain context.
@@ -44,11 +45,12 @@ Out of scope:
 
 1. Auth import runs only when `authBackend=postgres`.
 2. Auth import is skipped when `authBackend=filesystem`.
-3. Warning log is emitted when filesystem and Postgres both already contain auth domain data.
-4. When same `username` exists in both stores, Postgres record is preserved and filesystem conflicting record is skipped.
-5. Filesystem auth records that do not conflict are imported deterministically.
-6. Repeated startup runs preserve stable auth data state (no incorrect duplicates or drift).
-7. No auth HTTP contract drift is introduced.
+3. Postgres auth mode fails startup before import if DB connect or auth schema sanity checks fail.
+4. Warning log is emitted when filesystem and Postgres both already contain auth domain data.
+5. When same `username` exists in both stores, Postgres record is preserved and filesystem conflicting record is skipped.
+6. Filesystem auth records that do not conflict are imported deterministically.
+7. Repeated startup runs preserve stable auth data state (no incorrect duplicates or drift).
+8. No auth HTTP contract drift is introduced.
 
 ## Test Cases And Scenarios
 

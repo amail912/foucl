@@ -11,7 +11,7 @@ This story combined three separate concerns in one unit: Postgres schema and mig
 ## Replacement Stories
 
 - [014 Auth Postgres Schema And Migrations](../ready/014-auth-postgres-schema-and-migrations.md)
-- [015 Auth Postgres Adapter Implementation](../ready/015-auth-postgres-adapter-implementation.md)
+- [015 Auth Postgres Adapter Implementation](../done/015-auth-postgres-adapter-implementation.md)
 - [016 Auth Postgres Parity Verification](../ready/016-auth-postgres-parity-verification.md)
 
 ## Note

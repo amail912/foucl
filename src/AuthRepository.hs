@@ -9,6 +9,8 @@ module AuthRepository
   , UserRole(..)
   , ApprovalStatus(..)
   , defaultAuthRepository
+  , postgresAuthRepository
+  , verifyPostgresAuthStorage
   ) where
 
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
@@ -26,7 +28,21 @@ import Data.Aeson
   , (.=)
   )
 import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteString.Char8 as BS8
 import Data.Password.Argon2 (Argon2, PasswordHash(..))
+import Data.Int (Int64)
+import Data.Text (Text)
+import qualified Data.Text as Text
+import Database.PostgreSQL.Simple
+  ( Connection
+  , SqlError(..)
+  , Only(..)
+  , connectPostgreSQL
+  , close
+  , execute
+  , query
+  , query_
+  )
 import Repository (RepositoryError(..))
 import System.Directory
   ( canonicalizePath
@@ -46,6 +62,7 @@ import System.Directory
 import System.FilePath ((</>), addTrailingPathSeparator, normalise, takeDirectory, takeFileName)
 import System.IO.Error (isAlreadyExistsError)
 import qualified Control.Exception as Ex
+import Control.Monad (when)
 
 data UserRole = AdminRole | MemberRole deriving (Eq, Show)
 
@@ -112,6 +129,37 @@ defaultAuthRepository =
     , repoDeleteUserByUsername = fsDeleteUserByUsername
     , repoListUsers = fsListUsers
     }
+
+postgresAuthRepository :: String -> AuthRepository
+postgresAuthRepository connectionString =
+  AuthRepository
+    { repoCreateUser = pgCreateUser connectionString
+    , repoLoadUserByUsername = pgLoadUserByUsername connectionString
+    , repoUpdateUser = pgUpdateUser connectionString
+    , repoDeleteUserByUsername = pgDeleteUserByUsername connectionString
+    , repoListUsers = pgListUsers connectionString
+    }
+
+verifyPostgresAuthStorage :: String -> IO (Either String ())
+verifyPostgresAuthStorage connectionString = do
+  connResult <- Ex.try (connectPostgreSQL (BS8.pack connectionString)) :: IO (Either Ex.SomeException Connection)
+  case connResult of
+    Left err -> pure (Left ("Unable to connect to Postgres: " ++ show err))
+    Right conn -> do
+      pingResult <- Ex.try (query_ conn "SELECT 1" :: IO [Only Int]) :: IO (Either Ex.SomeException [Only Int])
+      tableResult <- Ex.try (query_ conn "SELECT username, password_hash, role::text, approved FROM auth_users LIMIT 0" :: IO [(String, Text, Text, Bool)]) :: IO (Either Ex.SomeException [(String, Text, Text, Bool)])
+      enumResult <- Ex.try (query conn "SELECT EXISTS(SELECT 1 FROM pg_type WHERE typname = ?)" (Only ("auth_user_role" :: String)) :: IO [Only Bool]) :: IO (Either Ex.SomeException [Only Bool])
+      close conn
+      case pingResult of
+        Left err -> pure (Left ("Postgres ping query failed: " ++ show err))
+        Right _ ->
+          case tableResult of
+            Left err -> pure (Left ("Auth schema check failed: " ++ show err))
+            Right _ ->
+              case enumResult of
+                Left err -> pure (Left ("Auth enum check failed: " ++ show err))
+                Right [Only True] -> pure (Right ())
+                Right _ -> pure (Left "Auth schema check failed: enum auth_user_role is missing")
 
 fsCreateUser :: PersistedUser -> ExceptT RepositoryError IO ()
 fsCreateUser persistedUser@PersistedUser {uname = username} = do
@@ -237,3 +285,139 @@ isPrefixOf :: String -> String -> Bool
 isPrefixOf [] _ = True
 isPrefixOf _ [] = False
 isPrefixOf (x:xs) (y:ys) = x == y && isPrefixOf xs ys
+
+pgCreateUser :: String -> PersistedUser -> ExceptT RepositoryError IO ()
+pgCreateUser connectionString persistedUser =
+  withPgConnection connectionString StorageFailure $ \conn -> do
+    let roleValue = userRoleToDb (userRole persistedUser)
+        approvedValue = approvalStatusToDb (approvalStatus persistedUser)
+    writeResult <- liftIO (Ex.try
+      (execute
+        conn
+        "INSERT INTO auth_users (username, password_hash, role, approved) VALUES (?, ?, ?::auth_user_role, ?)"
+        (uname persistedUser, unPasswordHash (passwordHash persistedUser), roleValue, approvedValue))
+      :: IO (Either Ex.SomeException Int64))
+    case writeResult of
+      Left err -> throwError (mapWriteException err)
+      Right _ -> pure ()
+
+pgLoadUserByUsername :: String -> String -> ExceptT RepositoryError IO PersistedUser
+pgLoadUserByUsername connectionString username =
+  withPgConnection connectionString StorageFailure $ \conn -> do
+    readResult <- liftIO (Ex.try
+      (query
+        conn
+        "SELECT username, password_hash, role::text, approved FROM auth_users WHERE username = ?"
+        (Only username))
+      :: IO (Either Ex.SomeException [(String, Text, Text, Bool)]))
+    case readResult of
+      Left err -> throwError (mapReadException err)
+      Right [] -> throwError NotFound
+      Right ((dbUsername, dbPasswordHash, dbRole, dbApproved):_) ->
+        case dbRoleToUserRole dbRole of
+          Nothing -> throwError ReadFailure
+          Just role ->
+            pure PersistedUser
+              { uname = dbUsername
+              , passwordHash = PasswordHash dbPasswordHash
+              , userRole = role
+              , approvalStatus = dbToApprovalStatus dbApproved
+              }
+
+pgUpdateUser :: String -> PersistedUser -> ExceptT RepositoryError IO ()
+pgUpdateUser connectionString persistedUser =
+  withPgConnection connectionString StorageFailure $ \conn -> do
+    let roleValue = userRoleToDb (userRole persistedUser)
+        approvedValue = approvalStatusToDb (approvalStatus persistedUser)
+    writeResult <- liftIO (Ex.try
+      (execute
+        conn
+        "UPDATE auth_users SET password_hash = ?, role = ?::auth_user_role, approved = ? WHERE username = ?"
+        (unPasswordHash (passwordHash persistedUser), roleValue, approvedValue, uname persistedUser))
+      :: IO (Either Ex.SomeException Int64))
+    case writeResult of
+      Left err -> throwError (mapWriteException err)
+      Right affected -> when (affected == 0) (throwError NotFound)
+
+pgDeleteUserByUsername :: String -> String -> ExceptT RepositoryError IO ()
+pgDeleteUserByUsername connectionString username =
+  withPgConnection connectionString StorageFailure $ \conn -> do
+    writeResult <- liftIO (Ex.try
+      (execute conn "DELETE FROM auth_users WHERE username = ?" (Only username))
+      :: IO (Either Ex.SomeException Int64))
+    case writeResult of
+      Left err -> throwError (mapWriteException err)
+      Right affected -> when (affected == 0) (throwError NotFound)
+
+pgListUsers :: String -> ExceptT RepositoryError IO [PersistedUser]
+pgListUsers connectionString =
+  withPgConnection connectionString StorageFailure $ \conn -> do
+    readResult <- liftIO (Ex.try
+      (query_ conn "SELECT username, password_hash, role::text, approved FROM auth_users ORDER BY username" :: IO [(String, Text, Text, Bool)])
+      :: IO (Either Ex.SomeException [(String, Text, Text, Bool)]))
+    case readResult of
+      Left err -> throwError (mapReadException err)
+      Right rows -> mapM decodeRow rows
+  where
+    decodeRow :: (String, Text, Text, Bool) -> ExceptT RepositoryError IO PersistedUser
+    decodeRow (dbUsername, dbPasswordHash, dbRole, dbApproved) =
+      case dbRoleToUserRole dbRole of
+        Nothing -> throwError ReadFailure
+        Just role ->
+          pure PersistedUser
+            { uname = dbUsername
+            , passwordHash = PasswordHash dbPasswordHash
+            , userRole = role
+            , approvalStatus = dbToApprovalStatus dbApproved
+            }
+
+withPgConnection :: String -> RepositoryError -> (Connection -> ExceptT RepositoryError IO a) -> ExceptT RepositoryError IO a
+withPgConnection connectionString connectionError action = do
+  connResult <- liftIO $ Ex.try (connectPostgreSQL (BS8.pack connectionString)) :: ExceptT RepositoryError IO (Either Ex.SomeException Connection)
+  case connResult of
+    Left _ -> throwError connectionError
+    Right conn -> do
+      runResult <- liftIO (runExceptT (action conn))
+      _ <- liftIO $ Ex.try (close conn) :: ExceptT RepositoryError IO (Either Ex.SomeException ())
+      either throwError pure runResult
+
+mapReadException :: Ex.SomeException -> RepositoryError
+mapReadException ex =
+  case Ex.fromException ex :: Maybe SqlError of
+    Just sqlErr ->
+      if isStorageSqlError sqlErr
+        then StorageFailure
+        else ReadFailure
+    Nothing -> StorageFailure
+
+mapWriteException :: Ex.SomeException -> RepositoryError
+mapWriteException ex =
+  case Ex.fromException ex :: Maybe SqlError of
+    Just sqlErr
+      | isUniqueViolation sqlErr -> AlreadyExists
+      | isStorageSqlError sqlErr -> StorageFailure
+      | otherwise -> WriteFailure
+    Nothing -> StorageFailure
+
+isUniqueViolation :: SqlError -> Bool
+isUniqueViolation sqlErr = sqlState sqlErr == BS8.pack "23505"
+
+isStorageSqlError :: SqlError -> Bool
+isStorageSqlError sqlErr = "08" `BS8.isPrefixOf` sqlState sqlErr
+
+userRoleToDb :: UserRole -> Text
+userRoleToDb AdminRole = "admin"
+userRoleToDb MemberRole = "member"
+
+dbRoleToUserRole :: Text -> Maybe UserRole
+dbRoleToUserRole "admin" = Just AdminRole
+dbRoleToUserRole "member" = Just MemberRole
+dbRoleToUserRole _ = Nothing
+
+approvalStatusToDb :: ApprovalStatus -> Bool
+approvalStatusToDb ApprovedStatus = True
+approvalStatusToDb PendingStatus = False
+
+dbToApprovalStatus :: Bool -> ApprovalStatus
+dbToApprovalStatus True = ApprovedStatus
+dbToApprovalStatus False = PendingStatus

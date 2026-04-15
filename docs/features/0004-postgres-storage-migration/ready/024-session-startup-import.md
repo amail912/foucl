@@ -7,6 +7,7 @@ Add startup filesystem-to-Postgres bootstrap import for the session domain when 
 ## Scope
 
 - Run session import only when `sessionBackend=postgres`.
+- Require top-level `database` split config (`host`, `port`, `name`, `user`, `password`) to be present in postgres session mode.
 - Read filesystem session records (handles, states, user-state bindings) at startup.
 - Read existing Postgres session records at startup.
 - If both stores contain session data, log a warning with session domain context.
@@ -49,12 +50,13 @@ Out of scope:
 
 1. Session import runs only when `sessionBackend=postgres`.
 2. Session import is skipped when `sessionBackend=filesystem`.
-3. Warning log is emitted when filesystem and Postgres both already contain session domain data.
-4. When same key exists in both stores (`state_id`, `session_id`, or `user_id`), Postgres record is preserved and filesystem conflicting record is skipped.
-5. Filesystem session records that do not conflict are imported deterministically.
-6. Import order is FK-safe and stable (`states -> handles -> user bindings`).
-7. Repeated startup runs preserve stable session data state (no incorrect duplicates or drift).
-8. No session HTTP/cookie contract drift is introduced.
+3. Postgres session mode fails startup before import if DB connect or session schema sanity checks fail.
+4. Warning log is emitted when filesystem and Postgres both already contain session domain data.
+5. When same key exists in both stores (`state_id`, `session_id`, or `user_id`), Postgres record is preserved and filesystem conflicting record is skipped.
+6. Filesystem session records that do not conflict are imported deterministically.
+7. Import order is FK-safe and stable (`states -> handles -> user bindings`).
+8. Repeated startup runs preserve stable session data state (no incorrect duplicates or drift).
+9. No session HTTP/cookie contract drift is introduced.
 
 ## Test Cases And Scenarios
 

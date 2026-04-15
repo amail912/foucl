@@ -7,12 +7,14 @@ Define and deliver Postgres schema and migration artifacts required for session 
 ## Scope
 
 - Define Postgres schema for persisted session handles, session states, and user-state bindings required by the `SessionRepository` contract.
+- Ensure schema is consumable by runtime adapters implemented with `postgresql-simple`.
 - Use native Postgres `uuid` columns for `session_id` and `state_id`.
 - Enforce one active user-state binding per user.
 - Define FK relations with restrict/no-cascade delete behavior.
 - Define constraints and indexes required for token/state lookup, handle/state linking, and revoke/revoke-all flows.
 - Define deterministic up and down migrations for creating and evolving session schema.
 - Ensure migration artifacts are executable in target environments.
+- Ensure startup schema sanity checks can validate required session tables/constraints before serving requests in postgres mode.
 
 ## Schema Contract
 

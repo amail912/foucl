@@ -18,7 +18,9 @@ import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import Control.Monad.Trans.Except (runExceptT)
 import Control.Exception (finally)
 import Control.Concurrent (threadDelay)
-import System.Exit (exitSuccess, exitFailure)
+import System.Exit (ExitCode(..), exitSuccess, exitFailure)
+import System.Environment (lookupEnv)
+import System.Process (readProcessWithExitCode)
 import NoteCrud (NoteServiceConfig(..))
 import ChecklistCrud (ChecklistServiceConfig(..))
 import AgendaModel (ItemStatus(..), ItemType(..))
@@ -30,6 +32,7 @@ import AuthRepository (AuthRepository(..), PersistedUser(..))
 import Repository (RepositoryError(..))
 import Session
 import Lib (AuthBackend(..), parseAuthBackend)
+import PostgresMigrations (MigrationDirection(..), runAuthMigrationsAtPath, psqlAvailable)
 import Data.Text (Text, pack)
 import Data.Password.Argon2 (hashPassword, mkPassword)
 import Data.Time.Clock.POSIX (getPOSIXTime)
@@ -37,7 +40,7 @@ import qualified Data.ByteString.Lazy.Char8 as BL8
 import qualified Data.ByteString.Lazy as BL
 
 runUnitTests :: IO ()
-runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, agendaStorageTests, tripSharingStorageTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionTests]
+runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, agendaStorageTests, tripSharingStorageTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, postgresMigrationTests, sessionTests]
 
 runTestTTAndExit tests = do
   c <- runTestTT tests
@@ -957,6 +960,167 @@ authBackendRejectsInvalid =
     Left "Configuration auth.authBackend must be one of: filesystem, postgres" ->
       assertBool "Expected invalid auth backend rejection" True
     _ -> assertFailure "Expected invalid auth backend value to be rejected"
+
+postgresMigrationTests = test
+  [ "Postgres auth migrations: up creates schema contract" ~: migrationUpCreatesAuthSchema
+  , "Postgres auth migrations: down removes schema objects" ~: migrationDownRemovesAuthSchema
+  , "Postgres auth migrations: up/down/up is repeatable" ~: migrationReapplyAfterDown
+  ]
+
+migrationUpCreatesAuthSchema :: IO ()
+migrationUpCreatesAuthSchema =
+  withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchema ctx $ do
+      result <- runAuthMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      case result of
+        Left err -> assertFailure ("Expected migration up success, got " ++ err)
+        Right () -> do
+          tableExists <- fetchTableExists ctx "auth_users"
+          assertBool "Expected auth_users table to exist" tableExists
+
+          enumExists <- fetchEnumExists ctx "auth_user_role"
+          assertBool "Expected auth_user_role enum to exist" enumExists
+
+          roleType <- fetchColumnType ctx "auth_users" "role"
+          assertEqual "Expected role column to use auth_user_role enum" (Just "USER-DEFINED:auth_user_role") roleType
+
+          approvedType <- fetchColumnType ctx "auth_users" "approved"
+          assertEqual "Expected approved column to be boolean" (Just "boolean") approvedType
+
+          insertAlice <- runSqlCommandCtx ctx "INSERT INTO auth_users (username, password_hash, role, approved) VALUES ('Alice', 'h1', 'member', false)"
+          case insertAlice of
+            Left err -> assertFailure ("Expected insert Alice success, got " ++ err)
+            Right () -> pure ()
+          insertalice <- runSqlCommandCtx ctx "INSERT INTO auth_users (username, password_hash, role, approved) VALUES ('alice', 'h2', 'member', false)"
+          case insertalice of
+            Left err -> assertFailure ("Expected insert alice success, got " ++ err)
+            Right () -> pure ()
+          duplicateResult <- tryInsertDuplicateUsername ctx
+          assertBool "Expected exact duplicate username insert to fail" duplicateResult
+
+migrationDownRemovesAuthSchema :: IO ()
+migrationDownRemovesAuthSchema =
+  withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchema ctx $ do
+      upResult <- runAuthMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      case upResult of
+        Left err -> assertFailure ("Expected migration up success, got " ++ err)
+        Right () -> do
+          downResult <- runAuthMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown
+          case downResult of
+            Left err -> assertFailure ("Expected migration down success, got " ++ err)
+            Right () -> do
+              tableExists <- fetchTableExists ctx "auth_users"
+              assertBool "Expected auth_users table to be removed" (not tableExists)
+
+              enumExists <- fetchEnumExists ctx "auth_user_role"
+              assertBool "Expected auth_user_role enum to be removed" (not enumExists)
+
+migrationReapplyAfterDown :: IO ()
+migrationReapplyAfterDown =
+  withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchema ctx $ do
+      firstUp <- runAuthMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      case firstUp of
+        Left err -> assertFailure ("Expected first up success, got " ++ err)
+        Right () -> do
+          downResult <- runAuthMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown
+          case downResult of
+            Left err -> assertFailure ("Expected down success, got " ++ err)
+            Right () -> do
+              secondUp <- runAuthMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+              case secondUp of
+                Left err -> assertFailure ("Expected second up success, got " ++ err)
+                Right () -> do
+                  tableExists <- fetchTableExists ctx "auth_users"
+                  assertBool "Expected auth_users table to exist after reapply" tableExists
+
+data PostgresTestContext = PostgresTestContext
+  { ctxConnUrl :: String
+  , ctxSchemaName :: String
+  }
+
+withOptionalPostgresContext :: String -> (PostgresTestContext -> IO ()) -> IO ()
+withOptionalPostgresContext skipMessage action = do
+    mConnStr <- lookupEnv "FOUCL_TEST_POSTGRES_URL"
+    psqlIsAvailable <- psqlAvailable
+    case (mConnStr, psqlIsAvailable) of
+      (Just connStr, True) -> do
+        nonce <- round . (* 1000000) <$> getPOSIXTime
+        let schemaName = "foucl_mig_test_" ++ show (nonce :: Integer)
+        action PostgresTestContext {ctxConnUrl = connStr, ctxSchemaName = schemaName}
+      _ -> assertBool skipMessage True
+
+withIsolatedPostgresSchema :: PostgresTestContext -> IO () -> IO ()
+withIsolatedPostgresSchema ctx action = do
+    createResult <- runSqlCommandCtx ctx ("CREATE SCHEMA " ++ ctxSchemaName ctx)
+    case createResult of
+      Left err -> assertFailure ("Failed creating schema: " ++ err)
+      Right () -> do
+        setPathResult <- runSqlCommandCtx ctx ("SET search_path TO " ++ ctxSchemaName ctx ++ ", public")
+        case setPathResult of
+          Left err -> assertFailure ("Failed setting search_path: " ++ err)
+          Right () ->
+            action `finally` do
+              _ <- runSqlCommandCtx ctx "SET search_path TO public"
+              _ <- runSqlCommandCtx ctx ("DROP SCHEMA IF EXISTS " ++ ctxSchemaName ctx ++ " CASCADE")
+              pure ()
+
+fetchTableExists :: PostgresTestContext -> String -> IO Bool
+fetchTableExists ctx tableName = do
+    scalar <- runScalarQueryCtx ctx ("SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = '" ++ tableName ++ "')")
+    pure $
+      case scalar of
+        Right "t\n" -> True
+        Right "t" -> True
+        _ -> False
+
+fetchEnumExists :: PostgresTestContext -> String -> IO Bool
+fetchEnumExists ctx enumName = do
+    scalar <- runScalarQueryCtx ctx ("SELECT EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.typname = '" ++ enumName ++ "' AND n.nspname = current_schema())")
+    pure $
+      case scalar of
+        Right "t\n" -> True
+        Right "t" -> True
+        _ -> False
+
+fetchColumnType :: PostgresTestContext -> String -> String -> IO (Maybe String)
+fetchColumnType ctx tableName columnName = do
+    scalar <- runScalarQueryCtx ctx ("SELECT CASE WHEN data_type = 'USER-DEFINED' THEN data_type || ':' || udt_name ELSE data_type END FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = '" ++ tableName ++ "' AND column_name = '" ++ columnName ++ "'")
+    pure $
+      case scalar of
+        Right value -> Just (trimTrailingNewline value)
+        Left _ -> Nothing
+
+tryInsertDuplicateUsername :: PostgresTestContext -> IO Bool
+tryInsertDuplicateUsername ctx = do
+    dupResult <- runSqlCommandCtx ctx "INSERT INTO auth_users (username, password_hash, role, approved) VALUES ('Alice', 'h3', 'member', false)"
+    pure $
+      case dupResult of
+        Left _ -> True
+        Right () -> False
+
+runSqlCommandCtx :: PostgresTestContext -> String -> IO (Either String ())
+runSqlCommandCtx ctx sqlCommand = do
+    result <- readProcessWithExitCode "psql" ["--dbname", ctxConnUrl ctx, "-v", "ON_ERROR_STOP=1", "-c", sqlCommand] ""
+    pure $
+      case result of
+        (ExitSuccess, _, _) -> Right ()
+        (_, _, err) -> Left err
+
+runScalarQueryCtx :: PostgresTestContext -> String -> IO (Either String String)
+runScalarQueryCtx ctx sqlCommand = do
+    result <- readProcessWithExitCode "psql" ["--dbname", ctxConnUrl ctx, "-tA", "-c", sqlCommand] ""
+    pure $
+      case result of
+        (ExitSuccess, out, _) -> Right out
+        (_, _, err) -> Left err
+
+trimTrailingNewline :: String -> String
+trimTrailingNewline value =
+  case reverse value of
+    '\n':rest -> reverse rest
+    _ -> value
 
 
 sessionTests = test [ "Signed token should reject tampering" ~: signedTokenRejectsTampering

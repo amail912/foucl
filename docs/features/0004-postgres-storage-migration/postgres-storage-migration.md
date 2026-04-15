@@ -27,6 +27,7 @@ Move persistence to Postgres incrementally, with per-domain cutover control, and
 - Backend activation is controlled per domain through configuration.
 - Postgres connection is configured globally.
 - Import routines must be idempotent and safe to run at each startup.
+- Migration system documentation: [Postgres Migration System](migration-system.md).
 
 ## Stories
 
@@ -35,10 +36,10 @@ Move persistence to Postgres incrementally, with per-domain cutover control, and
 - [011 Auth Repository Contract](done/011-auth-repository-contract.md)
 - [012 Auth Backend Selection And Wiring](done/012-auth-backend-selection-and-wiring.md)
 - [013 Auth Filesystem Adapter Parity](done/013-auth-filesystem-adapter-parity.md)
+- [014 Auth Postgres Schema And Migrations](done/014-auth-postgres-schema-and-migrations.md)
 
 ### Ready
 
-- [014 Auth Postgres Schema And Migrations](ready/014-auth-postgres-schema-and-migrations.md)
 - [015 Auth Postgres Adapter Implementation](ready/015-auth-postgres-adapter-implementation.md)
 - [016 Auth Postgres Parity Verification](ready/016-auth-postgres-parity-verification.md)
 - [017 Session Repository Contract](ready/017-session-repository-contract.md)

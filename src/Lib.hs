@@ -5,6 +5,8 @@
 
 module Lib
     ( runApp
+    , AuthBackend(..)
+    , parseAuthBackend
     ) where
 
 import Prelude hiding (log, writeFile)
@@ -75,13 +77,15 @@ instance FromJSON SessionConfigFile where
     <*> v .:? "absoluteTtlSeconds"
     <*> v .:? "idleTtlSeconds"
 
-newtype AuthConfigFile = AuthConfigFile
+data AuthConfigFile = AuthConfigFile
   { bootstrapAdminUsernameFile :: String
+  , authBackendFile :: !(Maybe String)
   } deriving (Generic)
 
 instance FromJSON AuthConfigFile where
   parseJSON = withObject "AuthConfigFile" $ \v -> AuthConfigFile
     <$> v .: "bootstrapAdminUsername"
+    <*> v .:? "authBackend"
 
 data AppConfigFile = AppConfigFile
   { appSession :: SessionConfigFile
@@ -96,7 +100,13 @@ instance FromJSON AppConfigFile where
 data AppConfig = AppConfig
   { sessionConfig :: SessionConfig
   , bootstrapAdminUsername :: String
+  , authBackend :: AuthBackend
   }
+
+data AuthBackend
+  = AuthBackendFilesystem
+  | AuthBackendPostgres
+  deriving (Eq, Show)
 
 newtype AppContext = AppContext
   { sessionPrincipal :: SessionPrincipal
@@ -368,19 +378,30 @@ loadAppConfigFromFile = do
                 Right appConfig -> pure $ Right appConfig
 
 toAppConfig :: String -> AppConfigFile -> Maybe Bool -> Either String AppConfig
-toAppConfig secret AppConfigFile {appSession = SessionConfigFile {sessionCookieNameFile, sessionAbsoluteTtlSecondsFile, sessionIdleTtlSecondsFile}, appAuth = AuthConfigFile {bootstrapAdminUsernameFile}} mCookieSecure
+toAppConfig secret AppConfigFile {appSession = SessionConfigFile {sessionCookieNameFile, sessionAbsoluteTtlSecondsFile, sessionIdleTtlSecondsFile}, appAuth = AuthConfigFile {bootstrapAdminUsernameFile, authBackendFile}} mCookieSecure
   | null bootstrapAdminUsernameFile = Left "Configuration auth.bootstrapAdminUsername cannot be empty"
-  | otherwise = Right AppConfig
-      { sessionConfig =
-          defaultSessionConfig
-            { sessionSecret = secret
-            , sessionCookieName = fromMaybe (sessionCookieName defaultSessionConfig) sessionCookieNameFile
-            , sessionAbsoluteTtlSeconds = fromIntegral (fromMaybe (round (sessionAbsoluteTtlSeconds defaultSessionConfig)) sessionAbsoluteTtlSecondsFile)
-            , sessionIdleTtlSeconds = fromIntegral (fromMaybe (round (sessionIdleTtlSeconds defaultSessionConfig)) sessionIdleTtlSecondsFile)
-            , sessionCookieSecure = fromMaybe (sessionCookieSecure defaultSessionConfig) mCookieSecure
+  | otherwise =
+      case parseAuthBackend authBackendFile of
+        Left err -> Left err
+        Right selectedAuthBackend ->
+          Right AppConfig
+            { sessionConfig =
+                defaultSessionConfig
+                  { sessionSecret = secret
+                  , sessionCookieName = fromMaybe (sessionCookieName defaultSessionConfig) sessionCookieNameFile
+                  , sessionAbsoluteTtlSeconds = fromIntegral (fromMaybe (round (sessionAbsoluteTtlSeconds defaultSessionConfig)) sessionAbsoluteTtlSecondsFile)
+                  , sessionIdleTtlSeconds = fromIntegral (fromMaybe (round (sessionIdleTtlSeconds defaultSessionConfig)) sessionIdleTtlSecondsFile)
+                  , sessionCookieSecure = fromMaybe (sessionCookieSecure defaultSessionConfig) mCookieSecure
+                  }
+            , bootstrapAdminUsername = bootstrapAdminUsernameFile
+            , authBackend = selectedAuthBackend
             }
-      , bootstrapAdminUsername = bootstrapAdminUsernameFile
-      }
+
+parseAuthBackend :: Maybe String -> Either String AuthBackend
+parseAuthBackend Nothing = Right AuthBackendFilesystem
+parseAuthBackend (Just "filesystem") = Right AuthBackendFilesystem
+parseAuthBackend (Just "postgres") = Right AuthBackendPostgres
+parseAuthBackend (Just _) = Left "Configuration auth.authBackend must be one of: filesystem, postgres"
 
 parseBool :: String -> Maybe Bool
 parseBool raw =
@@ -405,19 +426,35 @@ runApp = do
         cd <- getCurrentDirectory
         let sessionCfg = sessionConfig appConfig
         sessionStore <- mkFileSessionStore (cd </> "data" </> "sessions") sessionCfg
-        simpleHTTP nullConf { port = 8081 } $ do
-            log "Incoming request" >> log "=========================END REQUEST====================\n"
-            msum [ homePage
-                 , apiController signupRateLimitState tmpDir appConfig sessionStore
-                 , serveStaticResource
-                 , mzero
-                 ]
+        let selectedAuthBackend = authBackend appConfig
+        putStrLn ("[startup] auth backend: " ++ renderAuthBackend selectedAuthBackend)
+        case makeAuthRepository selectedAuthBackend of
+          Left err -> do
+            putStrLn ("[startup] auth backend wiring failed for: " ++ renderAuthBackend selectedAuthBackend)
+            putStrLn $ "[startup-error] " ++ err
+            exitFailure
+          Right authRepo -> do
+            putStrLn ("[startup] auth backend wiring ready: " ++ renderAuthBackend selectedAuthBackend)
+            simpleHTTP nullConf { port = 8081 } $ do
+                log "Incoming request" >> log "=========================END REQUEST====================\n"
+                msum [ homePage
+                     , apiController authRepo signupRateLimitState tmpDir appConfig sessionStore
+                     , serveStaticResource
+                     , mzero
+                     ]
 
-apiController :: MVar [UTCTime] -> FilePath -> AppConfig -> SessionStore -> ServerPartT IO Response
-apiController signupRateLimitState tmpDir appConfig sessionStore =
+makeAuthRepository :: AuthBackend -> Either String AuthRepository
+makeAuthRepository AuthBackendFilesystem = Right defaultAuthRepository
+makeAuthRepository AuthBackendPostgres = Left "Configuration auth.authBackend=postgres is not yet implemented (expected in story 015)"
+
+renderAuthBackend :: AuthBackend -> String
+renderAuthBackend AuthBackendFilesystem = "filesystem"
+renderAuthBackend AuthBackendPostgres = "postgres"
+
+apiController :: AuthRepository -> MVar [UTCTime] -> FilePath -> AppConfig -> SessionStore -> ServerPartT IO Response
+apiController authRepo signupRateLimitState tmpDir appConfig sessionStore =
   let sessionCfg = sessionConfig appConfig
       bootstrapAdmin = bootstrapAdminUsername appConfig
-      authRepo = defaultAuthRepository
   in dir "api" $ msum [ signupController authRepo signupRateLimitState tmpDir bootstrapAdmin
                       , signinController authRepo sessionCfg sessionStore
                       , signoutController sessionCfg sessionStore

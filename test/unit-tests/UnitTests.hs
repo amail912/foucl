@@ -27,12 +27,13 @@ import AgendaStorage
 import TripSharingStorage
 import Auth
 import Session
+import Lib (AuthBackend(..), parseAuthBackend)
 import Data.Text (Text, pack)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import qualified Data.ByteString.Lazy.Char8 as BL8
 
 runUnitTests :: IO ()
-runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, agendaStorageTests, tripSharingStorageTests, signupValidationTests, signinValidationTests, sessionTests]
+runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, agendaStorageTests, tripSharingStorageTests, signupValidationTests, signinValidationTests, authBackendConfigTests, sessionTests]
 
 runTestTTAndExit tests = do
   c <- runTestTT tests
@@ -733,6 +734,37 @@ cleanupSignupUserDir :: FilePath -> IO ()
 cleanupSignupUserDir userDir = do
     userExists <- doesDirectoryExist userDir
     when userExists $ removeDirectoryRecursive userDir
+
+authBackendConfigTests = test [ "Auth backend defaults to filesystem when omitted" ~: authBackendDefaultsToFilesystem
+                              , "Auth backend accepts filesystem" ~: authBackendAcceptsFilesystem
+                              , "Auth backend accepts postgres" ~: authBackendAcceptsPostgres
+                              , "Auth backend rejects invalid values" ~: authBackendRejectsInvalid
+                              ]
+
+authBackendDefaultsToFilesystem :: IO ()
+authBackendDefaultsToFilesystem =
+  case parseAuthBackend Nothing of
+    Right AuthBackendFilesystem -> assertBool "Expected filesystem default" True
+    _ -> assertFailure "Expected omitted auth backend to default to filesystem"
+
+authBackendAcceptsFilesystem :: IO ()
+authBackendAcceptsFilesystem =
+  case parseAuthBackend (Just "filesystem") of
+    Right AuthBackendFilesystem -> assertBool "Expected filesystem backend" True
+    _ -> assertFailure "Expected filesystem backend to be accepted"
+
+authBackendAcceptsPostgres :: IO ()
+authBackendAcceptsPostgres =
+  case parseAuthBackend (Just "postgres") of
+    Right AuthBackendPostgres -> assertBool "Expected postgres backend" True
+    _ -> assertFailure "Expected postgres backend to be accepted"
+
+authBackendRejectsInvalid :: IO ()
+authBackendRejectsInvalid =
+  case parseAuthBackend (Just "sqlite") of
+    Left "Configuration auth.authBackend must be one of: filesystem, postgres" ->
+      assertBool "Expected invalid auth backend rejection" True
+    _ -> assertFailure "Expected invalid auth backend value to be rejected"
 
 
 sessionTests = test [ "Signed token should reject tampering" ~: signedTokenRejectsTampering

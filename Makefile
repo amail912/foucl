@@ -1,4 +1,4 @@
-.PHONY: help lint build test ci start-sandbox restart-sandbox stop-sandbox integration-test integration-test-auth-postgres _prepare-sandbox _wait-server _prepare-auth-postgres-test-db _write-auth-postgres-config _start-auth-postgres-test-db _stop-auth-postgres-test-db
+.PHONY: help lint build test ci start-sandbox restart-sandbox stop-sandbox integration-test integration-test-postgres integration-test-auth-postgres _prepare-sandbox _wait-server _prepare-postgres-test-db _write-postgres-config _start-postgres-test-db _stop-postgres-test-db
 
 SHELL := /bin/bash
 
@@ -26,7 +26,7 @@ help:
 	@echo "  make restart-sandbox  Restart sandbox server"
 	@echo "  make stop-sandbox     Stop sandbox server"
 	@echo "  make integration-test Run integration tests against sandbox server"
-	@echo "  make integration-test-auth-postgres Run auth parity integration tests against postgres auth backend"
+	@echo "  make integration-test-postgres Run postgres parity integration tests (auth + session) against postgres backends"
 
 lint:
 	./scripts/lint.sh
@@ -52,21 +52,23 @@ _prepare-sandbox:
 	cp "$$built_exe" "$(SANDBOX_EXE)"; \
 	chmod +x "$(SANDBOX_EXE)"
 
-_prepare-auth-postgres-test-db:
+_prepare-postgres-test-db:
 	@set -euo pipefail; \
+	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/session/0001_session_schema.down.sql"; \
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/auth/0001_auth_schema.down.sql"; \
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/auth/0001_auth_schema.up.sql"; \
+	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/session/0001_session_schema.up.sql"; \
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -c "TRUNCATE TABLE auth_users";
 
-_start-auth-postgres-test-db:
+_start-postgres-test-db:
 	@set -euo pipefail; \
 	docker compose -f "$(AUTH_PG_COMPOSE_FILE)" up -d --wait
 
-_stop-auth-postgres-test-db:
+_stop-postgres-test-db:
 	@set -euo pipefail; \
 	docker compose -f "$(AUTH_PG_COMPOSE_FILE)" down -v --remove-orphans
 
-_write-auth-postgres-config:
+_write-postgres-config:
 	@set -euo pipefail; \
 	mkdir -p "$(SANDBOX_DIR)/config"; \
 	printf '%s\n' \
@@ -78,7 +80,8 @@ _write-auth-postgres-config:
 	'  "session": {' \
 	'    "cookieName": "foucl_session",' \
 	'    "absoluteTtlSeconds": 604800,' \
-	'    "idleTtlSeconds": 86400' \
+	'    "idleTtlSeconds": 86400,' \
+	'    "sessionBackend": "postgres"' \
 	'  },' \
 	'  "database": {' \
 	'    "host": "127.0.0.1",' \
@@ -137,13 +140,13 @@ integration-test:
 	$(MAKE) --no-print-directory _wait-server; \
 	cabal test foucl-integration-tests
 
-integration-test-auth-postgres:
+integration-test-postgres:
 	@set -euo pipefail; \
 	$(MAKE) --no-print-directory _prepare-sandbox; \
-	$(MAKE) --no-print-directory _start-auth-postgres-test-db; \
-	$(MAKE) --no-print-directory _prepare-auth-postgres-test-db; \
-	$(MAKE) --no-print-directory _write-auth-postgres-config; \
-	trap '$(DAEMON_SCRIPT) stop --pidfile "$(SANDBOX_PIDFILE)" >/dev/null 2>&1 || true; $(MAKE) --no-print-directory _stop-auth-postgres-test-db >/dev/null 2>&1 || true' EXIT INT TERM; \
+	$(MAKE) --no-print-directory _start-postgres-test-db; \
+	$(MAKE) --no-print-directory _prepare-postgres-test-db; \
+	$(MAKE) --no-print-directory _write-postgres-config; \
+	trap '$(DAEMON_SCRIPT) stop --pidfile "$(SANDBOX_PIDFILE)" >/dev/null 2>&1 || true; $(MAKE) --no-print-directory _stop-postgres-test-db >/dev/null 2>&1 || true' EXIT INT TERM; \
 	export FOUCL_SESSION_COOKIE_SECURE="$${FOUCL_SESSION_COOKIE_SECURE:-false}"; \
 	( \
 		export FOUCL_SESSION_SECRET="$${FOUCL_SESSION_SECRET:-dev-only-session-secret}"; \
@@ -153,4 +156,6 @@ integration-test-auth-postgres:
 		$(DAEMON_SCRIPT) start --bin "$(abspath $(SANDBOX_EXE))" --pidfile "$(abspath $(SANDBOX_PIDFILE))"; \
 	); \
 	$(MAKE) --no-print-directory _wait-server; \
-	cabal test foucl-integration-auth-postgres-tests
+	cabal test foucl-integration-postgres-tests
+
+integration-test-auth-postgres: integration-test-postgres

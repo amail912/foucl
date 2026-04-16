@@ -35,7 +35,7 @@ Validate that auth behavior remains contract-compatible when `authBackend=postgr
 4. No new client-visible error category is introduced.
 5. Test setup deterministically resets auth schema/data before scenarios execute.
 6. Story explicitly documents that real Postgres integration verification is in scope and required.
-7. A dedicated executable test path exists for this parity run (`make integration-test-auth-postgres` / `cabal test foucl-integration-auth-postgres-tests`).
+7. A dedicated executable test path exists for this parity run (`make integration-test-postgres` or alias `make integration-test-auth-postgres` / `cabal test foucl-integration-postgres-tests`).
 
 ## Out Of Scope
 

@@ -71,8 +71,9 @@ make lint
 
 - Filesystem-backed integration suite:
   - `make integration-test`
-- Auth Postgres parity suite (real DB, hard fail when unavailable):
-  - `make integration-test-auth-postgres`
+- Postgres parity suite (auth + session, real DB, hard fail when unavailable):
+  - `make integration-test-postgres`
+  - Alias: `make integration-test-auth-postgres`
   - Uses fixed local test DB endpoint: `127.0.0.1:5432`, `dbname=foucl`, `user=foucl`, `password=foucl`.
   - The Make target orchestrates Docker automatically:
     - starts DB,

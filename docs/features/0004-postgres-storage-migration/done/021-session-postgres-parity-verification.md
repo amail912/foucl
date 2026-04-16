@@ -16,6 +16,7 @@ Validate that session behavior remains contract-compatible when `sessionBackend=
 - This story certifies real Postgres runtime integration for session flows using the 020 adapter and 022 schema.
 - Mock-only checks are insufficient for completion.
 - Missing/unreachable Postgres test environment is a hard failure for this parity run (no skip fallback).
+- Verification is executed through the generalized postgres parity suite shared with auth coverage (`make integration-test-postgres`, with `make integration-test-auth-postgres` retained as an alias).
 
 ## Scenario Matrix
 
@@ -45,3 +46,11 @@ Out of scope:
 3. Status codes and error messages remain compatible with current contract at the business/controller boundary.
 4. No new client-visible error category is introduced.
 5. Story explicitly documents that real Postgres integration verification is in scope and required.
+
+## Implementation Decisions
+
+- Postgres parity coverage runs in a shared generalized integration suite (`IntegrationPostgresTests`) that includes both auth parity (016) and session parity (021) scenarios.
+- Session revoke-single parity uses `POST /api/signout?all=false` to exercise explicit single-session revocation semantics.
+- Session technical-failure parity verifies current contract behavior:
+  - resolve/authenticated access degrades to `401 Not authenticated`,
+  - signout remains `200` with expired cookie emission.

@@ -46,11 +46,11 @@ Move persistence to Postgres incrementally, with per-domain cutover control, and
 - [018 Session Backend Selection And Wiring](done/018-session-backend-selection-and-wiring.md)
 - [019 Session Filesystem Adapter Parity](done/019-session-filesystem-adapter-parity.md)
 - [020 Session Postgres Adapter Implementation](done/020-session-postgres-adapter-implementation.md)
+- [021 Session Postgres Parity Verification](done/021-session-postgres-parity-verification.md)
 - [022 Session Postgres Schema And Migrations](done/022-session-postgres-schema-and-migrations.md)
 
 ### Ready
 
-- [021 Session Postgres Parity Verification](ready/021-session-postgres-parity-verification.md)
 - [023 Auth Startup Import](ready/023-auth-startup-import.md)
 - [024 Session Startup Import](ready/024-session-startup-import.md)
 

@@ -119,14 +119,14 @@ test-suite foucl-integration-tests
     , text
   default-language: Haskell2010
 
-test-suite foucl-integration-auth-postgres-tests
+test-suite foucl-integration-postgres-tests
   type: exitcode-stdio-1.0
-  main-is: AuthPostgresIntegrationTestsExec.hs
+  main-is: IntegrationPostgresTestsExec.hs
   other-modules:
       Paths_foucl
-    , AuthPostgresIntegrationTests
+    , IntegrationPostgresTests
   hs-source-dirs:
-    test/integration-auth-postgres-tests
+    test/integration-postgres-tests
   ghc-options: -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5

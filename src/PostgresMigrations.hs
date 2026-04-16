@@ -2,6 +2,8 @@ module PostgresMigrations
   ( MigrationDirection(..)
   , runAuthMigrations
   , runAuthMigrationsAtPath
+  , runSessionMigrations
+  , runSessionMigrationsAtPath
   , psqlAvailable
   ) where
 
@@ -32,9 +34,20 @@ runAuthMigrations :: String -> MigrationDirection -> IO (Either String ())
 runAuthMigrations = runAuthMigrationsAtPath "."
 
 runAuthMigrationsAtPath :: FilePath -> String -> MigrationDirection -> IO (Either String ())
-runAuthMigrationsAtPath basePath connectionUrl direction = do
+runAuthMigrationsAtPath basePath connectionUrl direction =
+  runMigrationsAtPath "auth" basePath connectionUrl direction authMigrations
+
+runSessionMigrations :: String -> MigrationDirection -> IO (Either String ())
+runSessionMigrations = runSessionMigrationsAtPath "."
+
+runSessionMigrationsAtPath :: FilePath -> String -> MigrationDirection -> IO (Either String ())
+runSessionMigrationsAtPath basePath connectionUrl direction =
+  runMigrationsAtPath "session" basePath connectionUrl direction sessionMigrations
+
+runMigrationsAtPath :: String -> FilePath -> String -> MigrationDirection -> [SqlMigration] -> IO (Either String ())
+runMigrationsAtPath domain basePath connectionUrl direction migrations = do
   startedAt <- getCurrentTime
-  putStrLn ("[migrations] starting auth migrations direction=" ++ show direction)
+  putStrLn ("[migrations] starting " ++ domain ++ " migrations direction=" ++ show direction)
   available <- psqlAvailable
   if not available
     then pure (Left "psql binary not found in PATH")
@@ -45,16 +58,16 @@ runAuthMigrationsAtPath basePath connectionUrl direction = do
         Right () -> do
           migrationResult <-
             case direction of
-              MigrateUp -> applyAllUp basePath connectionUrl authMigrations
-              MigrateDown -> applyAllDown basePath connectionUrl (reverse authMigrations)
+              MigrateUp -> applyAllUp basePath connectionUrl migrations
+              MigrateDown -> applyAllDown basePath connectionUrl (reverse migrations)
           endedAt <- getCurrentTime
           let elapsed = diffUTCTime endedAt startedAt
           case migrationResult of
             Left err -> do
-              putStrLn ("[migrations] auth migrations failed direction=" ++ show direction ++ " elapsed=" ++ show elapsed)
+              putStrLn ("[migrations] " ++ domain ++ " migrations failed direction=" ++ show direction ++ " elapsed=" ++ show elapsed)
               pure (Left err)
             Right stats -> do
-              putStrLn ("[migrations] auth migrations completed direction=" ++ show direction ++ " applied=" ++ show (statsApplied stats) ++ " skipped=" ++ show (statsSkipped stats) ++ " elapsed=" ++ show elapsed)
+              putStrLn ("[migrations] " ++ domain ++ " migrations completed direction=" ++ show direction ++ " applied=" ++ show (statsApplied stats) ++ " skipped=" ++ show (statsSkipped stats) ++ " elapsed=" ++ show elapsed)
               pure (Right ())
 
 psqlAvailable :: IO Bool
@@ -68,6 +81,15 @@ authMigrations =
       { migrationId = "0001_auth_schema"
       , upSqlPath = "db/migrations/auth/0001_auth_schema.up.sql"
       , downSqlPath = "db/migrations/auth/0001_auth_schema.down.sql"
+      }
+  ]
+
+sessionMigrations :: [SqlMigration]
+sessionMigrations =
+  [ SqlMigration
+      { migrationId = "0001_session_schema"
+      , upSqlPath = "db/migrations/session/0001_session_schema.up.sql"
+      , downSqlPath = "db/migrations/session/0001_session_schema.down.sql"
       }
   ]
 

@@ -32,7 +32,7 @@ import AuthRepository (AuthRepository(..), PersistedUser(..))
 import Repository (RepositoryError(..))
 import Session
 import Lib (AuthBackend(..), parseAuthBackend, SessionBackend(..), parseSessionBackend, makeSessionStore, DatabaseConfig(..))
-import PostgresMigrations (MigrationDirection(..), runAuthMigrationsAtPath, psqlAvailable)
+import PostgresMigrations (MigrationDirection(..), runAuthMigrationsAtPath, runSessionMigrationsAtPath, psqlAvailable)
 import Data.Text (Text, pack)
 import Data.Password.Argon2 (hashPassword, mkPassword)
 import Data.Time.Clock (addUTCTime, getCurrentTime)
@@ -1054,6 +1054,9 @@ postgresMigrationTests = test
   [ "Postgres auth migrations: up creates schema contract" ~: migrationUpCreatesAuthSchema
   , "Postgres auth migrations: down removes schema objects" ~: migrationDownRemovesAuthSchema
   , "Postgres auth migrations: up/down/up is repeatable" ~: migrationReapplyAfterDown
+  , "Postgres session migrations: up creates schema contract" ~: sessionMigrationUpCreatesSchema
+  , "Postgres session migrations: down removes schema objects" ~: sessionMigrationDownRemovesSchema
+  , "Postgres session migrations: up/down/up is repeatable" ~: sessionMigrationReapplyAfterDown
   ]
 
 migrationUpCreatesAuthSchema :: IO ()
@@ -1124,6 +1127,94 @@ migrationReapplyAfterDown =
                   tableExists <- fetchTableExists ctx "auth_users"
                   assertBool "Expected auth_users table to exist after reapply" tableExists
 
+sessionMigrationUpCreatesSchema :: IO ()
+sessionMigrationUpCreatesSchema =
+  withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchema ctx $ do
+      result <- runSessionMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      case result of
+        Left err -> assertFailure ("Expected session migration up success, got " ++ err)
+        Right () -> do
+          statesExists <- fetchTableExists ctx "session_states"
+          handlesExists <- fetchTableExists ctx "session_handles"
+          bindingsExists <- fetchTableExists ctx "session_user_bindings"
+          assertBool "Expected session_states table to exist" statesExists
+          assertBool "Expected session_handles table to exist" handlesExists
+          assertBool "Expected session_user_bindings table to exist" bindingsExists
+
+          stateIdType <- fetchColumnType ctx "session_states" "state_id"
+          sessionIdType <- fetchColumnType ctx "session_handles" "session_id"
+          userIdType <- fetchColumnType ctx "session_user_bindings" "user_id"
+          assertEqual "Expected session_states.state_id to be uuid" (Just "uuid") stateIdType
+          assertEqual "Expected session_handles.session_id to be uuid" (Just "uuid") sessionIdType
+          assertEqual "Expected session_user_bindings.user_id to be text" (Just "text") userIdType
+
+          stateFkRule <- fetchForeignKeyDeleteRule ctx "session_handles" "state_id"
+          bindingFkRule <- fetchForeignKeyDeleteRule ctx "session_user_bindings" "state_id"
+          assertEqual "Expected session_handles.state_id FK delete rule RESTRICT" (Just "RESTRICT") stateFkRule
+          assertEqual "Expected session_user_bindings.state_id FK delete rule RESTRICT" (Just "RESTRICT") bindingFkRule
+
+          handlesStateIdx <- fetchIndexExists ctx "idx_session_handles_state_id"
+          bindingsStateIdx <- fetchIndexExists ctx "idx_session_user_bindings_state_id"
+          statesUserIdx <- fetchIndexExists ctx "idx_session_states_user_id"
+          assertBool "Expected index idx_session_handles_state_id to exist" handlesStateIdx
+          assertBool "Expected index idx_session_user_bindings_state_id to exist" bindingsStateIdx
+          assertBool "Expected index idx_session_states_user_id to exist" statesUserIdx
+
+          insertState <- runSqlCommandCtx ctx "INSERT INTO session_states (state_id, user_id, created_at, expires_at, idle_expires_at, revoked_at) VALUES ('11111111-1111-1111-1111-111111111111', 'user-a', now(), now() + interval '1 day', now() + interval '1 day', NULL)"
+          case insertState of
+            Left err -> assertFailure ("Expected insert state success, got " ++ err)
+            Right () -> pure ()
+
+          insertBinding <- runSqlCommandCtx ctx "INSERT INTO session_user_bindings (user_id, state_id) VALUES ('user-a', '11111111-1111-1111-1111-111111111111')"
+          case insertBinding of
+            Left err -> assertFailure ("Expected insert first binding success, got " ++ err)
+            Right () -> pure ()
+
+          duplicateBinding <- runSqlCommandCtx ctx "INSERT INTO session_user_bindings (user_id, state_id) VALUES ('user-a', '11111111-1111-1111-1111-111111111111')"
+          assertBool "Expected duplicate user binding insert to fail by primary key" $
+            case duplicateBinding of
+              Left _ -> True
+              Right () -> False
+
+sessionMigrationDownRemovesSchema :: IO ()
+sessionMigrationDownRemovesSchema =
+  withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchema ctx $ do
+      upResult <- runSessionMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      case upResult of
+        Left err -> assertFailure ("Expected session migration up success, got " ++ err)
+        Right () -> do
+          downResult <- runSessionMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown
+          case downResult of
+            Left err -> assertFailure ("Expected session migration down success, got " ++ err)
+            Right () -> do
+              statesExists <- fetchTableExists ctx "session_states"
+              handlesExists <- fetchTableExists ctx "session_handles"
+              bindingsExists <- fetchTableExists ctx "session_user_bindings"
+              assertBool "Expected session_states table to be removed" (not statesExists)
+              assertBool "Expected session_handles table to be removed" (not handlesExists)
+              assertBool "Expected session_user_bindings table to be removed" (not bindingsExists)
+
+sessionMigrationReapplyAfterDown :: IO ()
+sessionMigrationReapplyAfterDown =
+  withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchema ctx $ do
+      firstUp <- runSessionMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      case firstUp of
+        Left err -> assertFailure ("Expected first session migration up success, got " ++ err)
+        Right () -> do
+          downResult <- runSessionMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown
+          case downResult of
+            Left err -> assertFailure ("Expected session migration down success, got " ++ err)
+            Right () -> do
+              secondUp <- runSessionMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+              case secondUp of
+                Left err -> assertFailure ("Expected second session migration up success, got " ++ err)
+                Right () -> do
+                  statesExists <- fetchTableExists ctx "session_states"
+                  assertBool "Expected session_states table to exist after reapply" statesExists
+
 data PostgresTestContext = PostgresTestContext
   { ctxConnUrl :: String
   , ctxSchemaName :: String
@@ -1180,6 +1271,32 @@ fetchColumnType ctx tableName columnName = do
       case scalar of
         Right value -> Just (trimTrailingNewline value)
         Left _ -> Nothing
+
+fetchForeignKeyDeleteRule :: PostgresTestContext -> String -> String -> IO (Maybe String)
+fetchForeignKeyDeleteRule ctx tableName columnName = do
+    scalar <- runScalarQueryCtx ctx
+      ("SELECT rc.delete_rule "
+      ++ "FROM information_schema.referential_constraints rc "
+      ++ "JOIN information_schema.key_column_usage kcu "
+      ++ "ON rc.constraint_name = kcu.constraint_name "
+      ++ "AND rc.constraint_schema = kcu.constraint_schema "
+      ++ "WHERE kcu.table_schema = current_schema() "
+      ++ "AND kcu.table_name = '" ++ tableName ++ "' "
+      ++ "AND kcu.column_name = '" ++ columnName ++ "' "
+      ++ "LIMIT 1")
+    pure $
+      case scalar of
+        Right value -> Just (trimTrailingNewline value)
+        Left _ -> Nothing
+
+fetchIndexExists :: PostgresTestContext -> String -> IO Bool
+fetchIndexExists ctx indexName = do
+    scalar <- runScalarQueryCtx ctx ("SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = '" ++ indexName ++ "')")
+    pure $
+      case scalar of
+        Right "t\n" -> True
+        Right "t" -> True
+        _ -> False
 
 tryInsertDuplicateUsername :: PostgresTestContext -> IO Bool
 tryInsertDuplicateUsername ctx = do

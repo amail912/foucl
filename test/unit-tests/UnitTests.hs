@@ -48,7 +48,14 @@ import Lib
   , makeTripSharingRepository
   , DatabaseConfig(..)
   )
-import PostgresMigrations (MigrationDirection(..), runAuthMigrationsAtPath, runSessionMigrationsAtPath, psqlAvailable)
+import PostgresMigrations
+  ( MigrationDirection(..)
+  , runAuthMigrationsAtPath
+  , runSessionMigrationsAtPath
+  , runCalendarMigrationsAtPath
+  , runTripSharingMigrationsAtPath
+  , psqlAvailable
+  )
 import Data.Text (Text, pack)
 import Data.Password.Argon2 (hashPassword, mkPassword)
 import Data.Time.Clock (addUTCTime, getCurrentTime)
@@ -1409,6 +1416,12 @@ postgresMigrationTests = test
   , "Postgres session migrations: up creates schema contract" ~: sessionMigrationUpCreatesSchema
   , "Postgres session migrations: down removes schema objects" ~: sessionMigrationDownRemovesSchema
   , "Postgres session migrations: up/down/up is repeatable" ~: sessionMigrationReapplyAfterDown
+  , "Postgres calendar migrations: up creates schema contract" ~: calendarMigrationUpCreatesSchema
+  , "Postgres calendar migrations: down removes schema objects" ~: calendarMigrationDownRemovesSchema
+  , "Postgres calendar migrations: up/down/up is repeatable" ~: calendarMigrationReapplyAfterDown
+  , "Postgres trip-sharing migrations: up creates schema contract" ~: tripSharingMigrationUpCreatesSchema
+  , "Postgres trip-sharing migrations: down removes schema objects" ~: tripSharingMigrationDownRemovesSchema
+  , "Postgres trip-sharing migrations: up/down/up is repeatable" ~: tripSharingMigrationReapplyAfterDown
   ]
 
 migrationUpCreatesAuthSchema :: IO ()
@@ -1566,6 +1579,184 @@ sessionMigrationReapplyAfterDown =
                 Right () -> do
                   statesExists <- fetchTableExists ctx "session_states"
                   assertBool "Expected session_states table to exist after reapply" statesExists
+
+calendarMigrationUpCreatesSchema :: IO ()
+calendarMigrationUpCreatesSchema =
+  withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchema ctx $ do
+      result <- runCalendarMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      case result of
+        Left err -> assertFailure ("Expected calendar migration up success, got " ++ err)
+        Right () -> do
+          itemsExists <- fetchTableExists ctx "calendar_items"
+          assertBool "Expected calendar_items table to exist" itemsExists
+
+          kindType <- fetchColumnType ctx "calendar_items" "item_kind"
+          tripStartType <- fetchColumnType ctx "calendar_items" "trip_window_start"
+          recurrenceDatesType <- fetchColumnType ctx "calendar_items" "legacy_recurrence_exception_dates"
+          assertEqual "Expected calendar_items.item_kind to be text" (Just "text") kindType
+          assertEqual "Expected calendar_items.trip_window_start to be text" (Just "text") tripStartType
+          assertEqual "Expected calendar_items.legacy_recurrence_exception_dates to be text array" (Just "ARRAY") recurrenceDatesType
+
+          userItemIdx <- fetchIndexExists ctx "idx_calendar_items_user_item"
+          userTripStartIdx <- fetchIndexExists ctx "idx_calendar_items_user_kind_trip_start"
+          assertBool "Expected index idx_calendar_items_user_item to exist" userItemIdx
+          assertBool "Expected index idx_calendar_items_user_kind_trip_start to exist" userTripStartIdx
+
+          insertLegacy <- runSqlCommandCtx ctx
+            "INSERT INTO calendar_items (\
+            \user_id, item_id, item_kind, legacy_item_type, legacy_title, legacy_window_start, legacy_window_end, legacy_status, legacy_source_item_id, legacy_actual_duration_minutes, legacy_category, legacy_recurrence_rule_type, legacy_recurrence_interval_days, legacy_recurrence_exception_dates\
+            \) VALUES (\
+            \'alice', 'legacy-1', 'legacy', 'INTENTION', 'Legacy title', '2025-01-01T08:00', '2025-01-01T09:00', 'TODO', NULL, NULL, NULL, NULL, NULL, '{}'\
+            \)"
+          case insertLegacy of
+            Left err -> assertFailure ("Expected insert legacy calendar item success, got " ++ err)
+            Right () -> pure ()
+
+          insertTrip <- runSqlCommandCtx ctx
+            "INSERT INTO calendar_items (\
+            \user_id, item_id, item_kind, trip_window_start, trip_window_end, trip_departure_place_id, trip_arrival_place_id\
+            \) VALUES (\
+            \'alice', 'trip-1', 'trip', '2025-01-02T10:00', '2025-01-02T12:00', 'Paris', 'Le Mesnil'\
+            \)"
+          case insertTrip of
+            Left err -> assertFailure ("Expected insert trip calendar item success, got " ++ err)
+            Right () -> pure ()
+
+          invalidTrip <- runSqlCommandCtx ctx
+            "INSERT INTO calendar_items (user_id, item_id, item_kind, trip_window_start, trip_window_end, trip_departure_place_id) VALUES ('alice', 'trip-invalid', 'trip', '2025-01-02T10:00', '2025-01-02T12:00', 'Paris')"
+          assertBool "Expected invalid trip shape insert to fail due to CHECK constraint" $
+            case invalidTrip of
+              Left _ -> True
+              Right () -> False
+
+          invalidLegacy <- runSqlCommandCtx ctx
+            "INSERT INTO calendar_items (user_id, item_id, item_kind, legacy_item_type, legacy_title, legacy_window_start, legacy_window_end, legacy_status, legacy_recurrence_rule_type) VALUES ('alice', 'legacy-invalid', 'legacy', 'INTENTION', 'Legacy title', '2025-01-01T08:00', '2025-01-01T09:00', 'TODO', 'EVERY_X_DAYS')"
+          assertBool "Expected EVERY_X_DAYS legacy insert without interval to fail due to CHECK constraint" $
+            case invalidLegacy of
+              Left _ -> True
+              Right () -> False
+
+calendarMigrationDownRemovesSchema :: IO ()
+calendarMigrationDownRemovesSchema =
+  withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchema ctx $ do
+      upResult <- runCalendarMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      case upResult of
+        Left err -> assertFailure ("Expected calendar migration up success, got " ++ err)
+        Right () -> do
+          downResult <- runCalendarMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown
+          case downResult of
+            Left err -> assertFailure ("Expected calendar migration down success, got " ++ err)
+            Right () -> do
+              itemsExists <- fetchTableExists ctx "calendar_items"
+              assertBool "Expected calendar_items table to be removed" (not itemsExists)
+
+calendarMigrationReapplyAfterDown :: IO ()
+calendarMigrationReapplyAfterDown =
+  withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchema ctx $ do
+      firstUp <- runCalendarMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      case firstUp of
+        Left err -> assertFailure ("Expected first calendar migration up success, got " ++ err)
+        Right () -> do
+          downResult <- runCalendarMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown
+          case downResult of
+            Left err -> assertFailure ("Expected calendar migration down success, got " ++ err)
+            Right () -> do
+              secondUp <- runCalendarMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+              case secondUp of
+                Left err -> assertFailure ("Expected second calendar migration up success, got " ++ err)
+                Right () -> do
+                  itemsExists <- fetchTableExists ctx "calendar_items"
+                  assertBool "Expected calendar_items table to exist after reapply" itemsExists
+
+tripSharingMigrationUpCreatesSchema :: IO ()
+tripSharingMigrationUpCreatesSchema =
+  withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchema ctx $ do
+      result <- runTripSharingMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      case result of
+        Left err -> assertFailure ("Expected trip-sharing migration up success, got " ++ err)
+        Right () -> do
+          sharesExists <- fetchTableExists ctx "trip_shares"
+          subscriptionsExists <- fetchTableExists ctx "trip_subscriptions"
+          assertBool "Expected trip_shares table to exist" sharesExists
+          assertBool "Expected trip_subscriptions table to exist" subscriptionsExists
+
+          ownerType <- fetchColumnType ctx "trip_shares" "owner_user_id"
+          targetType <- fetchColumnType ctx "trip_shares" "target_username"
+          assertEqual "Expected trip_shares.owner_user_id to be text" (Just "text") ownerType
+          assertEqual "Expected trip_shares.target_username to be text" (Just "text") targetType
+
+          sharesOwnerIdx <- fetchIndexExists ctx "idx_trip_shares_owner"
+          sharesTargetIdx <- fetchIndexExists ctx "idx_trip_shares_target"
+          subscriptionsOwnerIdx <- fetchIndexExists ctx "idx_trip_subscriptions_owner"
+          subscriptionsTargetIdx <- fetchIndexExists ctx "idx_trip_subscriptions_target"
+          assertBool "Expected idx_trip_shares_owner to exist" sharesOwnerIdx
+          assertBool "Expected idx_trip_shares_target to exist" sharesTargetIdx
+          assertBool "Expected idx_trip_subscriptions_owner to exist" subscriptionsOwnerIdx
+          assertBool "Expected idx_trip_subscriptions_target to exist" subscriptionsTargetIdx
+
+          insertShare <- runSqlCommandCtx ctx "INSERT INTO trip_shares (owner_user_id, target_username) VALUES ('alice', 'bob')"
+          case insertShare of
+            Left err -> assertFailure ("Expected insert into trip_shares success, got " ++ err)
+            Right () -> pure ()
+
+          duplicateShare <- runSqlCommandCtx ctx "INSERT INTO trip_shares (owner_user_id, target_username) VALUES ('alice', 'bob')"
+          assertBool "Expected duplicate trip_shares relation insert to fail by primary key" $
+            case duplicateShare of
+              Left _ -> True
+              Right () -> False
+
+          insertSubscription <- runSqlCommandCtx ctx "INSERT INTO trip_subscriptions (owner_user_id, target_username) VALUES ('alice', 'carol')"
+          case insertSubscription of
+            Left err -> assertFailure ("Expected insert into trip_subscriptions success, got " ++ err)
+            Right () -> pure ()
+
+          duplicateSubscription <- runSqlCommandCtx ctx "INSERT INTO trip_subscriptions (owner_user_id, target_username) VALUES ('alice', 'carol')"
+          assertBool "Expected duplicate trip_subscriptions relation insert to fail by primary key" $
+            case duplicateSubscription of
+              Left _ -> True
+              Right () -> False
+
+tripSharingMigrationDownRemovesSchema :: IO ()
+tripSharingMigrationDownRemovesSchema =
+  withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchema ctx $ do
+      upResult <- runTripSharingMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      case upResult of
+        Left err -> assertFailure ("Expected trip-sharing migration up success, got " ++ err)
+        Right () -> do
+          downResult <- runTripSharingMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown
+          case downResult of
+            Left err -> assertFailure ("Expected trip-sharing migration down success, got " ++ err)
+            Right () -> do
+              sharesExists <- fetchTableExists ctx "trip_shares"
+              subscriptionsExists <- fetchTableExists ctx "trip_subscriptions"
+              assertBool "Expected trip_shares table to be removed" (not sharesExists)
+              assertBool "Expected trip_subscriptions table to be removed" (not subscriptionsExists)
+
+tripSharingMigrationReapplyAfterDown :: IO ()
+tripSharingMigrationReapplyAfterDown =
+  withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchema ctx $ do
+      firstUp <- runTripSharingMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      case firstUp of
+        Left err -> assertFailure ("Expected first trip-sharing migration up success, got " ++ err)
+        Right () -> do
+          downResult <- runTripSharingMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown
+          case downResult of
+            Left err -> assertFailure ("Expected trip-sharing migration down success, got " ++ err)
+            Right () -> do
+              secondUp <- runTripSharingMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+              case secondUp of
+                Left err -> assertFailure ("Expected second trip-sharing migration up success, got " ++ err)
+                Right () -> do
+                  sharesExists <- fetchTableExists ctx "trip_shares"
+                  subscriptionsExists <- fetchTableExists ctx "trip_subscriptions"
+                  assertBool "Expected trip_shares table to exist after reapply" sharesExists
+                  assertBool "Expected trip_subscriptions table to exist after reapply" subscriptionsExists
 
 data PostgresTestContext = PostgresTestContext
   { ctxConnUrl :: String

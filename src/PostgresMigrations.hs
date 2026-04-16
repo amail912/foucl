@@ -4,6 +4,10 @@ module PostgresMigrations
   , runAuthMigrationsAtPath
   , runSessionMigrations
   , runSessionMigrationsAtPath
+  , runCalendarMigrations
+  , runCalendarMigrationsAtPath
+  , runTripSharingMigrations
+  , runTripSharingMigrationsAtPath
   , psqlAvailable
   ) where
 
@@ -43,6 +47,20 @@ runSessionMigrations = runSessionMigrationsAtPath "."
 runSessionMigrationsAtPath :: FilePath -> String -> MigrationDirection -> IO (Either String ())
 runSessionMigrationsAtPath basePath connectionUrl direction =
   runMigrationsAtPath "session" basePath connectionUrl direction sessionMigrations
+
+runCalendarMigrations :: String -> MigrationDirection -> IO (Either String ())
+runCalendarMigrations = runCalendarMigrationsAtPath "."
+
+runCalendarMigrationsAtPath :: FilePath -> String -> MigrationDirection -> IO (Either String ())
+runCalendarMigrationsAtPath basePath connectionUrl direction =
+  runMigrationsAtPath "calendar" basePath connectionUrl direction calendarMigrations
+
+runTripSharingMigrations :: String -> MigrationDirection -> IO (Either String ())
+runTripSharingMigrations = runTripSharingMigrationsAtPath "."
+
+runTripSharingMigrationsAtPath :: FilePath -> String -> MigrationDirection -> IO (Either String ())
+runTripSharingMigrationsAtPath basePath connectionUrl direction =
+  runMigrationsAtPath "trip-sharing" basePath connectionUrl direction tripSharingMigrations
 
 runMigrationsAtPath :: String -> FilePath -> String -> MigrationDirection -> [SqlMigration] -> IO (Either String ())
 runMigrationsAtPath domain basePath connectionUrl direction migrations = do
@@ -90,6 +108,24 @@ sessionMigrations =
       { migrationId = "0001_session_schema"
       , upSqlPath = "db/migrations/session/0001_session_schema.up.sql"
       , downSqlPath = "db/migrations/session/0001_session_schema.down.sql"
+      }
+  ]
+
+calendarMigrations :: [SqlMigration]
+calendarMigrations =
+  [ SqlMigration
+      { migrationId = "0001_calendar_schema"
+      , upSqlPath = "db/migrations/calendar/0001_calendar_schema.up.sql"
+      , downSqlPath = "db/migrations/calendar/0001_calendar_schema.down.sql"
+      }
+  ]
+
+tripSharingMigrations :: [SqlMigration]
+tripSharingMigrations =
+  [ SqlMigration
+      { migrationId = "0001_trip_sharing_schema"
+      , upSqlPath = "db/migrations/trip-sharing/0001_trip_sharing_schema.up.sql"
+      , downSqlPath = "db/migrations/trip-sharing/0001_trip_sharing_schema.down.sql"
       }
   ]
 

@@ -10,6 +10,7 @@ Implement Postgres-backed adapters for calendar and trip-sharing repositories wh
 - Map storage/query failures to the shared repository error model.
 - Preserve deterministic ordering and visibility semantics required by period-trips and list endpoints.
 - Integrate adapters into backend wiring path from 026.
+- Wire startup fail-fast schema verification for calendar/trip-sharing postgres backend mode using the schema delivered in 028.
 
 ## Dependencies And Boundaries
 

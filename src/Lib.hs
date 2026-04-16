@@ -9,7 +9,13 @@ module Lib
     , parseAuthBackend
     , SessionBackend(..)
     , parseSessionBackend
+    , CalendarBackend(..)
+    , parseCalendarBackend
+    , TripSharingBackend(..)
+    , parseTripSharingBackend
     , makeSessionStore
+    , makeCalendarRepository
+    , makeTripSharingRepository
     , DatabaseConfig(..)
     ) where
 
@@ -95,6 +101,8 @@ instance FromJSON AuthConfigFile where
 data AppConfigFile = AppConfigFile
   { appSession :: SessionConfigFile
   , appAuth :: AuthConfigFile
+  , appCalendarBackendFile :: !(Maybe String)
+  , appTripSharingBackendFile :: !(Maybe String)
   , appDatabase :: !(Maybe DatabaseConfigFile)
   } deriving (Generic)
 
@@ -102,6 +110,8 @@ instance FromJSON AppConfigFile where
   parseJSON = withObject "AppConfigFile" $ \v -> AppConfigFile
     <$> v .: "session"
     <*> v .: "auth"
+    <*> v .:? "calendarBackend"
+    <*> v .:? "tripSharingBackend"
     <*> v .:? "database"
 
 data DatabaseConfigFile = DatabaseConfigFile
@@ -125,6 +135,8 @@ data AppConfig = AppConfig
   , sessionBackend :: SessionBackend
   , bootstrapAdminUsername :: String
   , authBackend :: AuthBackend
+  , calendarBackend :: CalendarBackend
+  , tripSharingBackend :: TripSharingBackend
   , databaseConfig :: !(Maybe DatabaseConfig)
   }
 
@@ -144,6 +156,16 @@ data AuthBackend
 data SessionBackend
   = SessionBackendFilesystem
   | SessionBackendPostgres
+  deriving (Eq, Show)
+
+data CalendarBackend
+  = CalendarBackendFilesystem
+  | CalendarBackendPostgres
+  deriving (Eq, Show)
+
+data TripSharingBackend
+  = TripSharingBackendFilesystem
+  | TripSharingBackendPostgres
   deriving (Eq, Show)
 
 newtype AppContext = AppContext
@@ -423,7 +445,7 @@ loadAppConfigFromFile = do
                 Right appConfig -> pure $ Right appConfig
 
 toAppConfig :: String -> AppConfigFile -> Maybe Bool -> Either String AppConfig
-toAppConfig secret AppConfigFile {appSession = SessionConfigFile {sessionCookieNameFile, sessionAbsoluteTtlSecondsFile, sessionIdleTtlSecondsFile, sessionBackendFile}, appAuth = AuthConfigFile {bootstrapAdminUsernameFile, authBackendFile}, appDatabase} mCookieSecure
+toAppConfig secret AppConfigFile {appSession = SessionConfigFile {sessionCookieNameFile, sessionAbsoluteTtlSecondsFile, sessionIdleTtlSecondsFile, sessionBackendFile}, appAuth = AuthConfigFile {bootstrapAdminUsernameFile, authBackendFile}, appCalendarBackendFile, appTripSharingBackendFile, appDatabase} mCookieSecure
   | null bootstrapAdminUsernameFile = Left "Configuration auth.bootstrapAdminUsername cannot be empty"
   | otherwise =
       case parseSessionBackend sessionBackendFile of
@@ -432,23 +454,31 @@ toAppConfig secret AppConfigFile {appSession = SessionConfigFile {sessionCookieN
           case parseAuthBackend authBackendFile of
             Left err -> Left err
             Right selectedAuthBackend ->
-              case traverse validateDatabaseConfig appDatabase of
+              case parseCalendarBackend appCalendarBackendFile of
                 Left err -> Left err
-                Right parsedDatabaseConfig ->
-                  Right AppConfig
-                    { sessionConfig =
-                        defaultSessionConfig
-                          { sessionSecret = secret
-                          , sessionCookieName = fromMaybe (sessionCookieName defaultSessionConfig) sessionCookieNameFile
-                          , sessionAbsoluteTtlSeconds = fromIntegral (fromMaybe (round (sessionAbsoluteTtlSeconds defaultSessionConfig)) sessionAbsoluteTtlSecondsFile)
-                          , sessionIdleTtlSeconds = fromIntegral (fromMaybe (round (sessionIdleTtlSeconds defaultSessionConfig)) sessionIdleTtlSecondsFile)
-                          , sessionCookieSecure = fromMaybe (sessionCookieSecure defaultSessionConfig) mCookieSecure
-                          }
-                    , sessionBackend = selectedSessionBackend
-                    , bootstrapAdminUsername = bootstrapAdminUsernameFile
-                    , authBackend = selectedAuthBackend
-                    , databaseConfig = parsedDatabaseConfig
-                    }
+                Right selectedCalendarBackend ->
+                  case parseTripSharingBackend appTripSharingBackendFile of
+                    Left err -> Left err
+                    Right selectedTripSharingBackend ->
+                      case traverse validateDatabaseConfig appDatabase of
+                        Left err -> Left err
+                        Right parsedDatabaseConfig ->
+                          Right AppConfig
+                            { sessionConfig =
+                                defaultSessionConfig
+                                  { sessionSecret = secret
+                                  , sessionCookieName = fromMaybe (sessionCookieName defaultSessionConfig) sessionCookieNameFile
+                                  , sessionAbsoluteTtlSeconds = fromIntegral (fromMaybe (round (sessionAbsoluteTtlSeconds defaultSessionConfig)) sessionAbsoluteTtlSecondsFile)
+                                  , sessionIdleTtlSeconds = fromIntegral (fromMaybe (round (sessionIdleTtlSeconds defaultSessionConfig)) sessionIdleTtlSecondsFile)
+                                  , sessionCookieSecure = fromMaybe (sessionCookieSecure defaultSessionConfig) mCookieSecure
+                                  }
+                            , sessionBackend = selectedSessionBackend
+                            , bootstrapAdminUsername = bootstrapAdminUsernameFile
+                            , authBackend = selectedAuthBackend
+                            , calendarBackend = selectedCalendarBackend
+                            , tripSharingBackend = selectedTripSharingBackend
+                            , databaseConfig = parsedDatabaseConfig
+                            }
 
 parseAuthBackend :: Maybe String -> Either String AuthBackend
 parseAuthBackend Nothing = Right AuthBackendFilesystem
@@ -461,6 +491,18 @@ parseSessionBackend Nothing = Right SessionBackendFilesystem
 parseSessionBackend (Just "filesystem") = Right SessionBackendFilesystem
 parseSessionBackend (Just "postgres") = Right SessionBackendPostgres
 parseSessionBackend (Just _) = Left "Configuration session.sessionBackend must be one of: filesystem, postgres"
+
+parseCalendarBackend :: Maybe String -> Either String CalendarBackend
+parseCalendarBackend Nothing = Right CalendarBackendFilesystem
+parseCalendarBackend (Just "filesystem") = Right CalendarBackendFilesystem
+parseCalendarBackend (Just "postgres") = Right CalendarBackendPostgres
+parseCalendarBackend (Just _) = Left "Configuration calendarBackend must be one of: filesystem, postgres"
+
+parseTripSharingBackend :: Maybe String -> Either String TripSharingBackend
+parseTripSharingBackend Nothing = Right TripSharingBackendFilesystem
+parseTripSharingBackend (Just "filesystem") = Right TripSharingBackendFilesystem
+parseTripSharingBackend (Just "postgres") = Right TripSharingBackendPostgres
+parseTripSharingBackend (Just _) = Left "Configuration tripSharingBackend must be one of: filesystem, postgres"
 
 parseBool :: String -> Maybe Bool
 parseBool raw =
@@ -486,8 +528,12 @@ runApp = do
         let sessionCfg = sessionConfig appConfig
         let selectedAuthBackend = authBackend appConfig
             selectedSessionBackend = sessionBackend appConfig
+            selectedCalendarBackend = calendarBackend appConfig
+            selectedTripSharingBackend = tripSharingBackend appConfig
         putStrLn ("[startup] auth backend: " ++ renderAuthBackend selectedAuthBackend)
         putStrLn ("[startup] session backend: " ++ renderSessionBackend selectedSessionBackend)
+        putStrLn ("[startup] calendar backend: " ++ renderCalendarBackend selectedCalendarBackend)
+        putStrLn ("[startup] trip-sharing backend: " ++ renderTripSharingBackend selectedTripSharingBackend)
         case databaseConfig appConfig of
           Nothing -> pure ()
           Just dbCfg -> putStrLn ("[startup] database target: " ++ renderDatabaseTarget dbCfg)
@@ -519,15 +565,29 @@ runApp = do
                         putStrLn $ "[startup-error] " ++ err
                         exitFailure
                       Right () -> do
-                        let calendarRepo = defaultCalendarRepository
-                            tripSharingRepo = defaultTripSharingRepository
-                        simpleHTTP nullConf { port = 8081 } $ do
-                            log "Incoming request" >> log "=========================END REQUEST====================\n"
-                            msum [ homePage
-                                 , apiController authRepo calendarRepo tripSharingRepo signupRateLimitState tmpDir appConfig sessionStore
-                                 , serveStaticResource
-                                 , mzero
-                                 ]
+                        calendarRepoResult <- makeCalendarRepository selectedCalendarBackend (databaseConfig appConfig)
+                        case calendarRepoResult of
+                          Left err -> do
+                            putStrLn ("[startup] calendar backend wiring failed for: " ++ renderCalendarBackend selectedCalendarBackend)
+                            putStrLn $ "[startup-error] " ++ err
+                            exitFailure
+                          Right calendarRepo -> do
+                            putStrLn ("[startup] calendar backend wiring ready: " ++ renderCalendarBackend selectedCalendarBackend)
+                            tripSharingRepoResult <- makeTripSharingRepository selectedTripSharingBackend (databaseConfig appConfig)
+                            case tripSharingRepoResult of
+                              Left err -> do
+                                putStrLn ("[startup] trip-sharing backend wiring failed for: " ++ renderTripSharingBackend selectedTripSharingBackend)
+                                putStrLn $ "[startup-error] " ++ err
+                                exitFailure
+                              Right tripSharingRepo -> do
+                                putStrLn ("[startup] trip-sharing backend wiring ready: " ++ renderTripSharingBackend selectedTripSharingBackend)
+                                simpleHTTP nullConf { port = 8081 } $ do
+                                    log "Incoming request" >> log "=========================END REQUEST====================\n"
+                                    msum [ homePage
+                                         , apiController authRepo calendarRepo tripSharingRepo signupRateLimitState tmpDir appConfig sessionStore
+                                         , serveStaticResource
+                                         , mzero
+                                         ]
 
 makeAuthRepository :: AuthBackend -> Maybe DatabaseConfig -> IO (Either String AuthRepository)
 makeAuthRepository AuthBackendFilesystem _ = pure (Right defaultAuthRepository)
@@ -839,6 +899,28 @@ renderAuthBackend AuthBackendPostgres = "postgres"
 renderSessionBackend :: SessionBackend -> String
 renderSessionBackend SessionBackendFilesystem = "filesystem"
 renderSessionBackend SessionBackendPostgres = "postgres"
+
+renderCalendarBackend :: CalendarBackend -> String
+renderCalendarBackend CalendarBackendFilesystem = "filesystem"
+renderCalendarBackend CalendarBackendPostgres = "postgres"
+
+renderTripSharingBackend :: TripSharingBackend -> String
+renderTripSharingBackend TripSharingBackendFilesystem = "filesystem"
+renderTripSharingBackend TripSharingBackendPostgres = "postgres"
+
+makeCalendarRepository :: CalendarBackend -> Maybe DatabaseConfig -> IO (Either String CalendarRepository)
+makeCalendarRepository CalendarBackendFilesystem _ = pure (Right defaultCalendarRepository)
+makeCalendarRepository CalendarBackendPostgres mDatabaseCfg =
+  case mDatabaseCfg of
+    Nothing -> pure (Left "Configuration database is required when calendarBackend=postgres")
+    Just _ -> pure (Left "Postgres calendar backend wiring not implemented yet; deliver story 029 first")
+
+makeTripSharingRepository :: TripSharingBackend -> Maybe DatabaseConfig -> IO (Either String TripSharingRepository)
+makeTripSharingRepository TripSharingBackendFilesystem _ = pure (Right defaultTripSharingRepository)
+makeTripSharingRepository TripSharingBackendPostgres mDatabaseCfg =
+  case mDatabaseCfg of
+    Nothing -> pure (Left "Configuration database is required when tripSharingBackend=postgres")
+    Just _ -> pure (Left "Postgres trip-sharing backend wiring not implemented yet; deliver story 029 first")
 
 makeSessionStore :: SessionBackend -> Maybe DatabaseConfig -> FilePath -> SessionConfig -> IO (Either String SessionStore)
 makeSessionStore SessionBackendFilesystem _ cd sessionCfg =

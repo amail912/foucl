@@ -33,7 +33,20 @@ import Auth
 import AuthRepository (AuthRepository(..), PersistedUser(..))
 import Repository (RepositoryError(..))
 import Session
-import Lib (AuthBackend(..), parseAuthBackend, SessionBackend(..), parseSessionBackend, makeSessionStore, DatabaseConfig(..))
+import Lib
+  ( AuthBackend(..)
+  , parseAuthBackend
+  , SessionBackend(..)
+  , parseSessionBackend
+  , CalendarBackend(..)
+  , parseCalendarBackend
+  , TripSharingBackend(..)
+  , parseTripSharingBackend
+  , makeSessionStore
+  , makeCalendarRepository
+  , makeTripSharingRepository
+  , DatabaseConfig(..)
+  )
 import PostgresMigrations (MigrationDirection(..), runAuthMigrationsAtPath, runSessionMigrationsAtPath, psqlAvailable)
 import Data.Text (Text, pack)
 import Data.Password.Argon2 (hashPassword, mkPassword)
@@ -44,7 +57,7 @@ import qualified Data.ByteString.Lazy as BL
 import System.FilePath ((</>))
 
 runUnitTests :: IO ()
-runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, agendaStorageTests, tripSharingStorageTests, calendarRepositoryTests, tripSharingRepositoryTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionBackendConfigTests, postgresMigrationTests, sessionTests, sessionFilesystemAdapterTests, sessionPostgresRepositoryTests]
+runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, agendaStorageTests, tripSharingStorageTests, calendarRepositoryTests, tripSharingRepositoryTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionBackendConfigTests, calendarBackendConfigTests, tripSharingBackendConfigTests, postgresMigrationTests, sessionTests, sessionFilesystemAdapterTests, sessionPostgresRepositoryTests]
 
 runTestTTAndExit tests = do
   c <- runTestTT tests
@@ -1026,6 +1039,26 @@ sessionBackendConfigTests = test
   , "Session backend postgres mode fails fast on storage validation failure" ~: sessionBackendPostgresFailsFastOnStorageValidationFailure
   ]
 
+calendarBackendConfigTests = test
+  [ "Calendar backend defaults to filesystem when omitted" ~: calendarBackendDefaultsToFilesystem
+  , "Calendar backend accepts filesystem" ~: calendarBackendAcceptsFilesystem
+  , "Calendar backend accepts postgres" ~: calendarBackendAcceptsPostgres
+  , "Calendar backend rejects invalid values" ~: calendarBackendRejectsInvalid
+  , "Calendar backend wiring composes filesystem repository" ~: calendarBackendWiringComposesFilesystem
+  , "Calendar backend postgres mode requires database config" ~: calendarBackendPostgresRequiresDatabaseConfig
+  , "Calendar backend postgres mode fails fast before adapter implementation" ~: calendarBackendPostgresFailsFastBeforeAdapterImplementation
+  ]
+
+tripSharingBackendConfigTests = test
+  [ "Trip-sharing backend defaults to filesystem when omitted" ~: tripSharingBackendDefaultsToFilesystem
+  , "Trip-sharing backend accepts filesystem" ~: tripSharingBackendAcceptsFilesystem
+  , "Trip-sharing backend accepts postgres" ~: tripSharingBackendAcceptsPostgres
+  , "Trip-sharing backend rejects invalid values" ~: tripSharingBackendRejectsInvalid
+  , "Trip-sharing backend wiring composes filesystem repository" ~: tripSharingBackendWiringComposesFilesystem
+  , "Trip-sharing backend postgres mode requires database config" ~: tripSharingBackendPostgresRequiresDatabaseConfig
+  , "Trip-sharing backend postgres mode fails fast before adapter implementation" ~: tripSharingBackendPostgresFailsFastBeforeAdapterImplementation
+  ]
+
 authBackendDefaultsToFilesystem :: IO ()
 authBackendDefaultsToFilesystem =
   case parseAuthBackend Nothing of
@@ -1113,6 +1146,138 @@ sessionBackendPostgresFailsFastOnStorageValidationFailure = do
     Left err -> assertFailure ("Unexpected postgres session wiring error: " ++ err)
     Right _ -> assertFailure "Expected postgres session backend to fail fast when storage validation fails"
 
+calendarBackendDefaultsToFilesystem :: IO ()
+calendarBackendDefaultsToFilesystem =
+  case parseCalendarBackend Nothing of
+    Right CalendarBackendFilesystem -> assertBool "Expected filesystem default" True
+    _ -> assertFailure "Expected omitted calendar backend to default to filesystem"
+
+calendarBackendAcceptsFilesystem :: IO ()
+calendarBackendAcceptsFilesystem =
+  case parseCalendarBackend (Just "filesystem") of
+    Right CalendarBackendFilesystem -> assertBool "Expected filesystem calendar backend" True
+    _ -> assertFailure "Expected filesystem calendar backend to be accepted"
+
+calendarBackendAcceptsPostgres :: IO ()
+calendarBackendAcceptsPostgres =
+  case parseCalendarBackend (Just "postgres") of
+    Right CalendarBackendPostgres -> assertBool "Expected postgres calendar backend" True
+    _ -> assertFailure "Expected postgres calendar backend to be accepted"
+
+calendarBackendRejectsInvalid :: IO ()
+calendarBackendRejectsInvalid =
+  case parseCalendarBackend (Just "sqlite") of
+    Left "Configuration calendarBackend must be one of: filesystem, postgres" ->
+      assertBool "Expected invalid calendar backend rejection" True
+    _ -> assertFailure "Expected invalid calendar backend value to be rejected"
+
+calendarBackendWiringComposesFilesystem :: IO ()
+calendarBackendWiringComposesFilesystem = withBackendSandbox "calendar-backend-fs-wiring" $ do
+  result <- makeCalendarRepository CalendarBackendFilesystem Nothing
+  case result of
+    Left err -> assertFailure ("Expected filesystem calendar backend wiring success, got " ++ err)
+    Right repo -> do
+      created <- runExceptT $ repoCreateCalendarItem repo "calendar-backend-fs-user" sampleAgendaContent
+      case created of
+        Left err -> assertFailure ("Expected calendar create through wired filesystem repository, got " ++ show err)
+        Right _ -> do
+          listed <- runExceptT $ repoListCalendarItemsForUser repo "calendar-backend-fs-user"
+          case listed of
+            Left err -> assertFailure ("Expected calendar list through wired filesystem repository, got " ++ show err)
+            Right [_] -> assertBool "Expected one listed calendar item from filesystem repository wiring" True
+            Right items -> assertFailure ("Expected exactly one listed calendar item, got " ++ show (length items))
+
+calendarBackendPostgresRequiresDatabaseConfig :: IO ()
+calendarBackendPostgresRequiresDatabaseConfig = do
+  result <- makeCalendarRepository CalendarBackendPostgres Nothing
+  case result of
+    Left "Configuration database is required when calendarBackend=postgres" ->
+      assertBool "Expected missing database config rejection for postgres calendar backend" True
+    Left err -> assertFailure ("Unexpected postgres calendar missing-db error: " ++ err)
+    Right _ -> assertFailure "Expected postgres calendar backend without database config to fail"
+
+calendarBackendPostgresFailsFastBeforeAdapterImplementation :: IO ()
+calendarBackendPostgresFailsFastBeforeAdapterImplementation = do
+  let dbCfg = DatabaseConfig
+        { databaseHost = "127.0.0.1"
+        , databasePort = 5432
+        , databaseName = "foucl"
+        , databaseUser = "foucl"
+        , databasePassword = "foucl"
+        }
+  result <- makeCalendarRepository CalendarBackendPostgres (Just dbCfg)
+  case result of
+    Left "Postgres calendar backend wiring not implemented yet; deliver story 029 first" ->
+      assertBool "Expected postgres calendar wiring to fail fast before adapter implementation" True
+    Left err -> assertFailure ("Unexpected postgres calendar wiring error: " ++ err)
+    Right _ -> assertFailure "Expected postgres calendar backend to fail fast before adapter implementation"
+
+tripSharingBackendDefaultsToFilesystem :: IO ()
+tripSharingBackendDefaultsToFilesystem =
+  case parseTripSharingBackend Nothing of
+    Right TripSharingBackendFilesystem -> assertBool "Expected filesystem default" True
+    _ -> assertFailure "Expected omitted trip-sharing backend to default to filesystem"
+
+tripSharingBackendAcceptsFilesystem :: IO ()
+tripSharingBackendAcceptsFilesystem =
+  case parseTripSharingBackend (Just "filesystem") of
+    Right TripSharingBackendFilesystem -> assertBool "Expected filesystem trip-sharing backend" True
+    _ -> assertFailure "Expected filesystem trip-sharing backend to be accepted"
+
+tripSharingBackendAcceptsPostgres :: IO ()
+tripSharingBackendAcceptsPostgres =
+  case parseTripSharingBackend (Just "postgres") of
+    Right TripSharingBackendPostgres -> assertBool "Expected postgres trip-sharing backend" True
+    _ -> assertFailure "Expected postgres trip-sharing backend to be accepted"
+
+tripSharingBackendRejectsInvalid :: IO ()
+tripSharingBackendRejectsInvalid =
+  case parseTripSharingBackend (Just "sqlite") of
+    Left "Configuration tripSharingBackend must be one of: filesystem, postgres" ->
+      assertBool "Expected invalid trip-sharing backend rejection" True
+    _ -> assertFailure "Expected invalid trip-sharing backend value to be rejected"
+
+tripSharingBackendWiringComposesFilesystem :: IO ()
+tripSharingBackendWiringComposesFilesystem = withBackendSandbox "trip-sharing-backend-fs-wiring" $ do
+  result <- makeTripSharingRepository TripSharingBackendFilesystem Nothing
+  case result of
+    Left err -> assertFailure ("Expected filesystem trip-sharing backend wiring success, got " ++ err)
+    Right repo -> do
+      addResult <- runExceptT $ repoAddSharedUser repo "trip-sharing-backend-fs-owner" "trip-sharing-backend-fs-friend"
+      case addResult of
+        Left err -> assertFailure ("Expected share add through wired filesystem repository, got " ++ show err)
+        Right () -> do
+          listed <- runExceptT $ repoListSharedUsers repo "trip-sharing-backend-fs-owner"
+          case listed of
+            Left err -> assertFailure ("Expected share list through wired filesystem repository, got " ++ show err)
+            Right ["trip-sharing-backend-fs-friend"] -> assertBool "Expected one shared user from filesystem repository wiring" True
+            Right users -> assertFailure ("Expected one shared user, got " ++ show users)
+
+tripSharingBackendPostgresRequiresDatabaseConfig :: IO ()
+tripSharingBackendPostgresRequiresDatabaseConfig = do
+  result <- makeTripSharingRepository TripSharingBackendPostgres Nothing
+  case result of
+    Left "Configuration database is required when tripSharingBackend=postgres" ->
+      assertBool "Expected missing database config rejection for postgres trip-sharing backend" True
+    Left err -> assertFailure ("Unexpected postgres trip-sharing missing-db error: " ++ err)
+    Right _ -> assertFailure "Expected postgres trip-sharing backend without database config to fail"
+
+tripSharingBackendPostgresFailsFastBeforeAdapterImplementation :: IO ()
+tripSharingBackendPostgresFailsFastBeforeAdapterImplementation = do
+  let dbCfg = DatabaseConfig
+        { databaseHost = "127.0.0.1"
+        , databasePort = 5432
+        , databaseName = "foucl"
+        , databaseUser = "foucl"
+        , databasePassword = "foucl"
+        }
+  result <- makeTripSharingRepository TripSharingBackendPostgres (Just dbCfg)
+  case result of
+    Left "Postgres trip-sharing backend wiring not implemented yet; deliver story 029 first" ->
+      assertBool "Expected postgres trip-sharing wiring to fail fast before adapter implementation" True
+    Left err -> assertFailure ("Unexpected postgres trip-sharing wiring error: " ++ err)
+    Right _ -> assertFailure "Expected postgres trip-sharing backend to fail fast before adapter implementation"
+
 testSessionConfig :: SessionConfig
 testSessionConfig =
   defaultSessionConfig
@@ -1126,6 +1291,18 @@ withSessionBackendSandbox label action = do
   let baseDir = cwd ++ "/dist-newstyle/sandbox/session-backend-tests/" ++ label ++ "-" ++ show (nonce :: Integer)
   createDirectoryIfMissing True baseDir
   action baseDir `finally` do
+    exists <- doesDirectoryExist baseDir
+    when exists $ removeDirectoryRecursive baseDir
+
+withBackendSandbox :: String -> IO () -> IO ()
+withBackendSandbox label action = do
+  cwd <- getCurrentDirectory
+  nonce <- round . (* 1000000) <$> getPOSIXTime
+  let baseDir = cwd ++ "/dist-newstyle/sandbox/domain-backend-tests/" ++ label ++ "-" ++ show (nonce :: Integer)
+  createDirectoryIfMissing True baseDir
+  setCurrentDirectory baseDir
+  action `finally` do
+    setCurrentDirectory cwd
     exists <- doesDirectoryExist baseDir
     when exists $ removeDirectoryRecursive baseDir
 

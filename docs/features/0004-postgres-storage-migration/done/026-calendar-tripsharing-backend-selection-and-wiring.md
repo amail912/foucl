@@ -33,3 +33,13 @@ Out of scope:
 3. `postgres` mode fails startup when DB config is missing.
 4. Exactly one backend implementation is composed per domain in a runtime.
 5. Startup logs include selected backend per domain.
+
+## Implementation Decisions
+
+- Backend selectors were added as top-level config keys: `calendarBackend` and `tripSharingBackend`.
+- Omitted backend values default to `filesystem`, matching existing auth/session behavior.
+- Runtime wiring now composes calendar and trip-sharing repositories explicitly through backend-specific constructors, with startup logs and fail-fast startup errors on wiring failures.
+- `postgres` mode for calendar/trip-sharing is intentionally non-fallback in this story:
+  - it requires top-level `database` config,
+  - it fails fast with explicit "not implemented yet" wiring errors until story 029 delivers adapters.
+- Unit coverage was added for parser behavior and wiring behavior (filesystem success, missing DB rejection, and postgres pre-adapter fail-fast semantics).

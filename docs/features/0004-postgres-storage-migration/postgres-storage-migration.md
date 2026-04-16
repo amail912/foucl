@@ -51,10 +51,10 @@ Move persistence to Postgres incrementally, with per-domain cutover control, and
 - [023 Auth Startup Import](done/023-auth-startup-import.md)
 - [024 Session Startup Import](done/024-session-startup-import.md)
 - [025 Calendar And Trip Sharing Repository Contracts](done/025-calendar-tripsharing-repository-contracts.md)
+- [026 Calendar And Trip Sharing Backend Selection And Wiring](done/026-calendar-tripsharing-backend-selection-and-wiring.md)
 
 ### Ready
 
-- [026 Calendar And Trip Sharing Backend Selection And Wiring](ready/026-calendar-tripsharing-backend-selection-and-wiring.md)
 - [027 Calendar And Trip Sharing Filesystem Adapter Parity](ready/027-calendar-tripsharing-filesystem-adapter-parity.md)
 - [028 Calendar And Trip Sharing Postgres Schema And Migrations](ready/028-calendar-tripsharing-postgres-schema-and-migrations.md)
 - [029 Calendar And Trip Sharing Postgres Adapter Implementation](ready/029-calendar-tripsharing-postgres-adapter-implementation.md)

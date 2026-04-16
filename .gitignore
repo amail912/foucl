@@ -7,3 +7,4 @@ dist-newstyle/
 *.swo
 .codex
 server.log
+.foucl/

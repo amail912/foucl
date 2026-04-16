@@ -65,7 +65,7 @@ import qualified Data.ByteString.Lazy as BL
 import System.FilePath ((</>))
 
 runUnitTests :: IO ()
-runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, agendaStorageTests, tripSharingStorageTests, calendarRepositoryTests, tripSharingRepositoryTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionBackendConfigTests, calendarBackendConfigTests, tripSharingBackendConfigTests, postgresMigrationTests, sessionTests, sessionFilesystemAdapterTests, sessionPostgresRepositoryTests]
+runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, agendaStorageTests, tripSharingStorageTests, calendarRepositoryTests, tripSharingRepositoryTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionBackendConfigTests, calendarBackendConfigTests, tripSharingBackendConfigTests, postgresMigrationTests, sessionTests, sessionFilesystemAdapterTests, sessionPostgresRepositoryTests, calendarPostgresRepositoryTests, tripSharingPostgresRepositoryTests]
 
 runTestTTAndExit tests = do
   c <- runTestTT tests
@@ -680,6 +680,12 @@ calendarActualDurationMinutes item =
     Agenda.ServerCalendarItem {Agenda.content = Agenda.CalendarItemContent {Agenda.actualDurationMinutes}} -> actualDurationMinutes
     _ -> Nothing
 
+calendarTitle :: Agenda.CalendarItem -> String
+calendarTitle item =
+  case item of
+    Agenda.ServerCalendarItem {Agenda.content = Agenda.CalendarItemContent {Agenda.title}} -> title
+    _ -> ""
+
 withEmptyCalendarDir :: (CalendarStorageConfig -> IO ()) -> IO ()
 withEmptyCalendarDir action = do
     exists <- doesDirectoryExist calendarDir
@@ -1149,7 +1155,7 @@ calendarBackendConfigTests = test
   , "Calendar backend rejects invalid values" ~: calendarBackendRejectsInvalid
   , "Calendar backend wiring composes filesystem repository" ~: calendarBackendWiringComposesFilesystem
   , "Calendar backend postgres mode requires database config" ~: calendarBackendPostgresRequiresDatabaseConfig
-  , "Calendar backend postgres mode fails fast before adapter implementation" ~: calendarBackendPostgresFailsFastBeforeAdapterImplementation
+  , "Calendar backend postgres mode fails fast on storage validation failure" ~: calendarBackendPostgresFailsFastOnStorageValidationFailure
   ]
 
 tripSharingBackendConfigTests = test
@@ -1159,7 +1165,7 @@ tripSharingBackendConfigTests = test
   , "Trip-sharing backend rejects invalid values" ~: tripSharingBackendRejectsInvalid
   , "Trip-sharing backend wiring composes filesystem repository" ~: tripSharingBackendWiringComposesFilesystem
   , "Trip-sharing backend postgres mode requires database config" ~: tripSharingBackendPostgresRequiresDatabaseConfig
-  , "Trip-sharing backend postgres mode fails fast before adapter implementation" ~: tripSharingBackendPostgresFailsFastBeforeAdapterImplementation
+  , "Trip-sharing backend postgres mode fails fast on storage validation failure" ~: tripSharingBackendPostgresFailsFastOnStorageValidationFailure
   ]
 
 authBackendDefaultsToFilesystem :: IO ()
@@ -1299,21 +1305,21 @@ calendarBackendPostgresRequiresDatabaseConfig = do
     Left err -> assertFailure ("Unexpected postgres calendar missing-db error: " ++ err)
     Right _ -> assertFailure "Expected postgres calendar backend without database config to fail"
 
-calendarBackendPostgresFailsFastBeforeAdapterImplementation :: IO ()
-calendarBackendPostgresFailsFastBeforeAdapterImplementation = do
+calendarBackendPostgresFailsFastOnStorageValidationFailure :: IO ()
+calendarBackendPostgresFailsFastOnStorageValidationFailure = do
   let dbCfg = DatabaseConfig
         { databaseHost = "127.0.0.1"
-        , databasePort = 5432
+        , databasePort = 1
         , databaseName = "foucl"
         , databaseUser = "foucl"
         , databasePassword = "foucl"
         }
   result <- makeCalendarRepository CalendarBackendPostgres (Just dbCfg)
   case result of
-    Left "Postgres calendar backend wiring not implemented yet; deliver story 029 first" ->
-      assertBool "Expected postgres calendar wiring to fail fast before adapter implementation" True
+    Left err | "Postgres calendar storage validation failed:" `isPrefixOf` err ->
+      assertBool "Expected postgres calendar storage validation failure" True
     Left err -> assertFailure ("Unexpected postgres calendar wiring error: " ++ err)
-    Right _ -> assertFailure "Expected postgres calendar backend to fail fast before adapter implementation"
+    Right _ -> assertFailure "Expected postgres calendar backend to fail fast when storage validation fails"
 
 tripSharingBackendDefaultsToFilesystem :: IO ()
 tripSharingBackendDefaultsToFilesystem =
@@ -1365,21 +1371,21 @@ tripSharingBackendPostgresRequiresDatabaseConfig = do
     Left err -> assertFailure ("Unexpected postgres trip-sharing missing-db error: " ++ err)
     Right _ -> assertFailure "Expected postgres trip-sharing backend without database config to fail"
 
-tripSharingBackendPostgresFailsFastBeforeAdapterImplementation :: IO ()
-tripSharingBackendPostgresFailsFastBeforeAdapterImplementation = do
+tripSharingBackendPostgresFailsFastOnStorageValidationFailure :: IO ()
+tripSharingBackendPostgresFailsFastOnStorageValidationFailure = do
   let dbCfg = DatabaseConfig
         { databaseHost = "127.0.0.1"
-        , databasePort = 5432
+        , databasePort = 1
         , databaseName = "foucl"
         , databaseUser = "foucl"
         , databasePassword = "foucl"
         }
   result <- makeTripSharingRepository TripSharingBackendPostgres (Just dbCfg)
   case result of
-    Left "Postgres trip-sharing backend wiring not implemented yet; deliver story 029 first" ->
-      assertBool "Expected postgres trip-sharing wiring to fail fast before adapter implementation" True
+    Left err | "Postgres trip-sharing storage validation failed:" `isPrefixOf` err ->
+      assertBool "Expected postgres trip-sharing storage validation failure" True
     Left err -> assertFailure ("Unexpected postgres trip-sharing wiring error: " ++ err)
-    Right _ -> assertFailure "Expected postgres trip-sharing backend to fail fast before adapter implementation"
+    Right _ -> assertFailure "Expected postgres trip-sharing backend to fail fast when storage validation fails"
 
 testSessionConfig :: SessionConfig
 testSessionConfig =
@@ -1899,6 +1905,17 @@ sessionPostgresRepositoryTests = test
   , "Session Postgres adapter delete-all binding should stay deterministic and idempotent" ~: pgRepoDeleteAllBindingsIsIdempotent
   ]
 
+calendarPostgresRepositoryTests = test
+  [ "Calendar Postgres adapter should round-trip create/load/list/update/delete lifecycle" ~: pgCalendarRepoRoundTripLifecycle
+  , "Calendar Postgres adapter should keep trip duration update unchanged" ~: pgCalendarRepoTripDurationUpdateIsNoop
+  , "Calendar Postgres adapter should return NotFound for missing item operations" ~: pgCalendarRepoMissingOperationsReturnNotFound
+  ]
+
+tripSharingPostgresRepositoryTests = test
+  [ "Trip-sharing Postgres adapter should keep add/list/delete deterministic and idempotent" ~: pgTripSharingRepoRoundTripDeterministic
+  , "Trip-sharing Postgres adapter should keep subscriptions independent from shares" ~: pgTripSharingRepoSubscriptionsIndependent
+  ]
+
 signedTokenRejectsTampering :: IO ()
 signedTokenRejectsTampering = do
     let token = signSessionId "secret" "sid-1"
@@ -2306,6 +2323,157 @@ pgRepoDeleteAllBindingsIsIdempotent =
           case third of
             Left err -> assertFailure ("Expected third delete-all to succeed, got " ++ show err)
             Right () -> pure ()
+
+pgCalendarRepoRoundTripLifecycle :: IO ()
+pgCalendarRepoRoundTripLifecycle =
+  withOptionalPostgresContext "Skipping Calendar Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runCalendarMigrationsAtPath "." schemaConn MigrateUp
+      case upResult of
+        Left err -> assertFailure ("Expected calendar migration up success, got " ++ err)
+        Right () -> do
+          let repo = postgresCalendarRepository schemaConn
+              userId = "pg-calendar-user"
+          created <- runExceptT $ repoCreateCalendarItem repo userId sampleAgendaContent
+          case created of
+            Left err -> assertFailure ("Expected calendar create success, got " ++ show err)
+            Right Agenda.ServerCalendarItem {Agenda.itemId = createdId} -> do
+              loaded <- runExceptT $ repoLoadCalendarItemById repo userId createdId
+              case loaded of
+                Left err -> assertFailure ("Expected calendar load success, got " ++ show err)
+                Right loadedItem ->
+                  assertEqual "Expected loaded calendar item id to match created id" createdId (Agenda.itemId loadedItem)
+
+              listed <- runExceptT $ repoListCalendarItemsForUser repo userId
+              case listed of
+                Left err -> assertFailure ("Expected calendar list success, got " ++ show err)
+                Right [onlyItem] ->
+                  assertEqual "Expected listed calendar item id to match created id" createdId (Agenda.itemId onlyItem)
+                Right items -> assertFailure ("Expected one listed calendar item, got " ++ show (length items))
+
+              let updatedContent = sampleAgendaContent { Agenda.title = "Postgres updated title" }
+              updated <- runExceptT $ repoUpdateCalendarItem repo userId createdId updatedContent
+              case updated of
+                Left err -> assertFailure ("Expected calendar update success, got " ++ show err)
+                Right updatedItem -> do
+                  assertEqual "Expected updated item id to remain stable" createdId (Agenda.itemId updatedItem)
+                  assertEqual "Expected updated title to be persisted" "Postgres updated title" (calendarTitle updatedItem)
+
+              validated <- runExceptT $ repoUpdateCalendarItemDuration repo userId createdId 50
+              case validated of
+                Left err -> assertFailure ("Expected calendar duration update success, got " ++ show err)
+                Right validatedItem ->
+                  assertEqual "Expected duration update to persist actualDurationMinutes" (Just 50) (calendarActualDurationMinutes validatedItem)
+
+              deleted <- runExceptT $ repoDeleteCalendarItemById repo userId createdId
+              case deleted of
+                Left err -> assertFailure ("Expected calendar delete success, got " ++ show err)
+                Right () -> pure ()
+
+              loadAfterDelete <- runExceptT $ repoLoadCalendarItemById repo userId createdId
+              case loadAfterDelete of
+                Left NotFound -> assertBool "Expected deleted calendar item load to return NotFound" True
+                Left err -> assertFailure ("Expected NotFound after delete, got " ++ show err)
+                Right _ -> assertFailure "Expected deleted calendar item load to fail"
+            Right Agenda.NewCalendarItem {} -> assertFailure "Expected postgres calendar create to return a server item"
+
+pgCalendarRepoTripDurationUpdateIsNoop :: IO ()
+pgCalendarRepoTripDurationUpdateIsNoop =
+  withOptionalPostgresContext "Skipping Calendar Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runCalendarMigrationsAtPath "." schemaConn MigrateUp
+      case upResult of
+        Left err -> assertFailure ("Expected calendar migration up success, got " ++ err)
+        Right () -> do
+          let repo = postgresCalendarRepository schemaConn
+              userId = "pg-calendar-trip-user"
+          created <- runExceptT $ repoCreateCalendarItem repo userId sampleTripContent
+          case created of
+            Left err -> assertFailure ("Expected trip create success, got " ++ show err)
+            Right Agenda.ServerCalendarItem {Agenda.itemId = createdId} -> do
+              updated <- runExceptT $ repoUpdateCalendarItemDuration repo userId createdId 77
+              case updated of
+                Left err -> assertFailure ("Expected trip duration update call success, got " ++ show err)
+                Right Agenda.ServerCalendarItem {Agenda.content = Agenda.TripCalendarItemContent tripContent} ->
+                  assertEqual "Expected trip content unchanged by duration update path" (Agenda.tripWindowStart sampleTripInner) (Agenda.tripWindowStart tripContent)
+                Right _ -> assertFailure "Expected trip item to remain a trip after duration update"
+            Right Agenda.NewCalendarItem {} -> assertFailure "Expected postgres trip create to return a server item"
+  where
+    sampleTripInner =
+      case sampleTripContent of
+        Agenda.TripCalendarItemContent trip -> trip
+        _ -> Agenda.TripItemContent "" "" "" ""
+
+pgCalendarRepoMissingOperationsReturnNotFound :: IO ()
+pgCalendarRepoMissingOperationsReturnNotFound =
+  withOptionalPostgresContext "Skipping Calendar Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runCalendarMigrationsAtPath "." schemaConn MigrateUp
+      case upResult of
+        Left err -> assertFailure ("Expected calendar migration up success, got " ++ err)
+        Right () -> do
+          let repo = postgresCalendarRepository schemaConn
+              userId = "pg-calendar-missing-user"
+              missingId = "missing-id"
+          loadResult <- runExceptT $ repoLoadCalendarItemById repo userId missingId
+          updateResult <- runExceptT $ repoUpdateCalendarItem repo userId missingId sampleAgendaContent
+          durationResult <- runExceptT $ repoUpdateCalendarItemDuration repo userId missingId 15
+          deleteResult <- runExceptT $ repoDeleteCalendarItemById repo userId missingId
+          assertEqual "Expected missing load to return NotFound" (Left NotFound) loadResult
+          assertEqual "Expected missing update to return NotFound" (Left NotFound) updateResult
+          assertEqual "Expected missing duration update to return NotFound" (Left NotFound) durationResult
+          assertEqual "Expected missing delete to return NotFound" (Left NotFound) deleteResult
+
+pgTripSharingRepoRoundTripDeterministic :: IO ()
+pgTripSharingRepoRoundTripDeterministic =
+  withOptionalPostgresContext "Skipping Trip-sharing Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runTripSharingMigrationsAtPath "." schemaConn MigrateUp
+      case upResult of
+        Left err -> assertFailure ("Expected trip-sharing migration up success, got " ++ err)
+        Right () -> do
+          let repo = postgresTripSharingRepository schemaConn
+          addA <- runExceptT $ repoAddSharedUser repo "alice" "charlie"
+          addB <- runExceptT $ repoAddSharedUser repo "alice" "bob"
+          addDuplicate <- runExceptT $ repoAddSharedUser repo "alice" "bob"
+          case (addA, addB, addDuplicate) of
+            (Right (), Right (), Right ()) -> do
+              listed <- runExceptT $ repoListSharedUsers repo "alice"
+              case listed of
+                Left err -> assertFailure ("Expected share list success, got " ++ show err)
+                Right users -> assertEqual "Expected deterministic ordered share list" ["bob", "charlie"] users
+            _ -> assertFailure "Expected trip-sharing share additions to succeed and stay idempotent"
+
+          delExisting <- runExceptT $ repoDeleteSharedUser repo "alice" "bob"
+          delMissing <- runExceptT $ repoDeleteSharedUser repo "alice" "missing-user"
+          case (delExisting, delMissing) of
+            (Right (), Right ()) -> pure ()
+            _ -> assertFailure "Expected share delete operations to stay idempotent"
+
+pgTripSharingRepoSubscriptionsIndependent :: IO ()
+pgTripSharingRepoSubscriptionsIndependent =
+  withOptionalPostgresContext "Skipping Trip-sharing Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runTripSharingMigrationsAtPath "." schemaConn MigrateUp
+      case upResult of
+        Left err -> assertFailure ("Expected trip-sharing migration up success, got " ++ err)
+        Right () -> do
+          let repo = postgresTripSharingRepository schemaConn
+          _ <- runExceptT $ repoAddSharedUser repo "alice" "bob"
+          _ <- runExceptT $ repoAddSubscribedUser repo "alice" "dave"
+          _ <- runExceptT $ repoAddSubscribedUser repo "alice" "carol"
+          subscriptions <- runExceptT $ repoListSubscribedUsers repo "alice"
+          shares <- runExceptT $ repoListSharedUsers repo "alice"
+          case (subscriptions, shares) of
+            (Right subscriptionUsers, Right shareUsers) -> do
+              assertEqual "Expected deterministic ordered subscriptions list" ["carol", "dave"] subscriptionUsers
+              assertEqual "Expected subscriptions to remain independent from shares" ["bob"] shareUsers
+            _ -> assertFailure "Expected both shares and subscriptions to load"
+
+          deleteSubscription <- runExceptT $ repoDeleteSubscribedUser repo "alice" "missing-user"
+          case deleteSubscription of
+            Right () -> assertBool "Expected missing subscription delete to remain idempotent" True
+            Left err -> assertFailure ("Expected idempotent missing subscription delete, got " ++ show err)
 
 withIsolatedPostgresSchemaConn :: PostgresTestContext -> (String -> IO ()) -> IO ()
 withIsolatedPostgresSchemaConn ctx action = do

@@ -47,8 +47,8 @@ import Happstack.Server.Internal.Cookie (Cookie(..), SameSite(..))
 import Happstack.Server.Internal.MessageWrap (bodyInput, BodyPolicy)
 import Model (NoteContent, ChecklistContent, Content, Identifiable(..))
 import qualified AgendaModel as Agenda
-import CalendarRepository (CalendarRepository(..), defaultCalendarRepository)
-import TripSharingRepository (TripSharingRepository(..), defaultTripSharingRepository)
+import CalendarRepository (CalendarRepository(..), defaultCalendarRepository, postgresCalendarRepository, verifyPostgresCalendarStorage)
+import TripSharingRepository (TripSharingRepository(..), defaultTripSharingRepository, postgresTripSharingRepository, verifyPostgresTripSharingStorage)
 import CrudStorage (createItem, getAllItems, deleteItem, modifyItem)
 import Crud
 import NoteCrud (NoteServiceConfig(..), defaultNoteServiceConfig)
@@ -913,14 +913,24 @@ makeCalendarRepository CalendarBackendFilesystem _ = pure (Right defaultCalendar
 makeCalendarRepository CalendarBackendPostgres mDatabaseCfg =
   case mDatabaseCfg of
     Nothing -> pure (Left "Configuration database is required when calendarBackend=postgres")
-    Just _ -> pure (Left "Postgres calendar backend wiring not implemented yet; deliver story 029 first")
+    Just dbCfg -> do
+      let connectionString = renderPostgresConnectionString dbCfg
+      validationResult <- verifyPostgresCalendarStorage connectionString
+      case validationResult of
+        Left err -> pure (Left ("Postgres calendar storage validation failed: " ++ err))
+        Right () -> pure (Right (postgresCalendarRepository connectionString))
 
 makeTripSharingRepository :: TripSharingBackend -> Maybe DatabaseConfig -> IO (Either String TripSharingRepository)
 makeTripSharingRepository TripSharingBackendFilesystem _ = pure (Right defaultTripSharingRepository)
 makeTripSharingRepository TripSharingBackendPostgres mDatabaseCfg =
   case mDatabaseCfg of
     Nothing -> pure (Left "Configuration database is required when tripSharingBackend=postgres")
-    Just _ -> pure (Left "Postgres trip-sharing backend wiring not implemented yet; deliver story 029 first")
+    Just dbCfg -> do
+      let connectionString = renderPostgresConnectionString dbCfg
+      validationResult <- verifyPostgresTripSharingStorage connectionString
+      case validationResult of
+        Left err -> pure (Left ("Postgres trip-sharing storage validation failed: " ++ err))
+        Right () -> pure (Right (postgresTripSharingRepository connectionString))
 
 makeSessionStore :: SessionBackend -> Maybe DatabaseConfig -> FilePath -> SessionConfig -> IO (Either String SessionStore)
 makeSessionStore SessionBackendFilesystem _ cd sessionCfg =

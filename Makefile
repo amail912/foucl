@@ -1,4 +1,4 @@
-.PHONY: help lint build test ci start-sandbox restart-sandbox stop-sandbox integration-test integration-test-postgres integration-test-auth-postgres _prepare-sandbox _wait-server _prepare-postgres-test-db _write-postgres-config _write-auth-startup-import-fixtures _start-postgres-test-db _stop-postgres-test-db
+.PHONY: help lint build test ci start-sandbox restart-sandbox stop-sandbox integration-test integration-test-postgres integration-test-auth-postgres _prepare-sandbox _wait-server _prepare-postgres-test-db _write-postgres-config _write-auth-startup-import-fixtures _write-session-startup-import-fixtures _start-postgres-test-db _stop-postgres-test-db
 
 SHELL := /bin/bash
 
@@ -58,8 +58,11 @@ _prepare-postgres-test-db:
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/auth/0001_auth_schema.down.sql"; \
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/auth/0001_auth_schema.up.sql"; \
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/session/0001_session_schema.up.sql"; \
-	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -c "TRUNCATE TABLE auth_users"; \
+	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -c "TRUNCATE TABLE auth_users, session_handles, session_user_bindings, session_states"; \
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -c "INSERT INTO auth_users (username, password_hash, role, approved) VALUES ('startup-conflict-user', 'postgres-conflict-hash', 'admin'::auth_user_role, true), ('startup-postgres-only-user', 'postgres-only-hash', 'member'::auth_user_role, false)";
+	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -c "INSERT INTO session_states (state_id, user_id, created_at, expires_at, idle_expires_at, revoked_at) VALUES ('11111111-1111-1111-1111-111111111111'::uuid, 'startup-pg-conflict-user', '2025-01-01T00:00:00Z'::timestamptz, '2030-01-01T00:00:00Z'::timestamptz, '2030-01-01T01:00:00Z'::timestamptz, NULL), ('22222222-2222-2222-2222-222222222222'::uuid, 'startup-pg-only-user', '2025-01-01T00:00:00Z'::timestamptz, '2030-01-01T00:00:00Z'::timestamptz, '2030-01-01T01:00:00Z'::timestamptz, NULL)"; \
+	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -c "INSERT INTO session_handles (session_id, state_id, issued_at, revoked_at) VALUES ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'::uuid, '11111111-1111-1111-1111-111111111111'::uuid, '2025-01-01T00:00:00Z'::timestamptz, NULL), ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'::uuid, '22222222-2222-2222-2222-222222222222'::uuid, '2025-01-01T00:00:00Z'::timestamptz, NULL)"; \
+	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -c "INSERT INTO session_user_bindings (user_id, state_id) VALUES ('startup-binding-conflict-user', '11111111-1111-1111-1111-111111111111'::uuid), ('startup-pg-only-user', '22222222-2222-2222-2222-222222222222'::uuid)";
 
 _start-postgres-test-db:
 	@set -euo pipefail; \
@@ -110,6 +113,50 @@ _write-auth-startup-import-fixtures:
 	'  "role": "member",' \
 	'  "approvalStatus": "pending"' \
 	'}' > "$(SANDBOX_DIR)/data/users/startup-conflict-user/profile.json"
+
+_write-session-startup-import-fixtures:
+	@set -euo pipefail; \
+	mkdir -p "$(SANDBOX_DIR)/data/sessions/states" "$(SANDBOX_DIR)/data/sessions/handles" "$(SANDBOX_DIR)/data/sessions/users"; \
+	printf '%s\n' \
+	'{' \
+	'  "stateId": "33333333-3333-3333-3333-333333333333",' \
+	'  "stateUserId": "startup-fs-only-session-user",' \
+	'  "stateCreatedAt": "2025-01-02T00:00:00Z",' \
+	'  "stateExpiresAt": "2030-01-02T00:00:00Z",' \
+	'  "stateIdleExpiresAt": "2030-01-02T01:00:00Z",' \
+	'  "stateRevokedAt": null' \
+	'}' > "$(SANDBOX_DIR)/data/sessions/states/33333333-3333-3333-3333-333333333333.json"; \
+	printf '%s\n' \
+	'{' \
+	'  "stateId": "11111111-1111-1111-1111-111111111111",' \
+	'  "stateUserId": "startup-fs-conflicting-user",' \
+	'  "stateCreatedAt": "2025-01-02T00:00:00Z",' \
+	'  "stateExpiresAt": "2030-01-02T00:00:00Z",' \
+	'  "stateIdleExpiresAt": "2030-01-02T01:00:00Z",' \
+	'  "stateRevokedAt": null' \
+	'}' > "$(SANDBOX_DIR)/data/sessions/states/11111111-1111-1111-1111-111111111111.json"; \
+	printf '%s\n' \
+	'{' \
+	'  "handleSessionId": "cccccccc-cccc-cccc-cccc-cccccccccccc",' \
+	'  "handleStateId": "33333333-3333-3333-3333-333333333333",' \
+	'  "handleIssuedAt": "2025-01-02T00:00:00Z",' \
+	'  "handleRevokedAt": null' \
+	'}' > "$(SANDBOX_DIR)/data/sessions/handles/cccccccc-cccc-cccc-cccc-cccccccccccc.json"; \
+	printf '%s\n' \
+	'{' \
+	'  "handleSessionId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",' \
+	'  "handleStateId": "33333333-3333-3333-3333-333333333333",' \
+	'  "handleIssuedAt": "2025-01-02T00:00:00Z",' \
+	'  "handleRevokedAt": null' \
+	'}' > "$(SANDBOX_DIR)/data/sessions/handles/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.json"; \
+	printf '%s\n' \
+	'{' \
+	'  "boundStateId": "33333333-3333-3333-3333-333333333333"' \
+	'}' > "$(SANDBOX_DIR)/data/sessions/users/startup-fs-only-session-user.json"; \
+	printf '%s\n' \
+	'{' \
+	'  "boundStateId": "33333333-3333-3333-3333-333333333333"' \
+	'}' > "$(SANDBOX_DIR)/data/sessions/users/startup-binding-conflict-user.json"
 
 _wait-server:
 	@set -euo pipefail; \
@@ -166,6 +213,7 @@ integration-test-postgres:
 	$(MAKE) --no-print-directory _prepare-postgres-test-db; \
 	$(MAKE) --no-print-directory _write-postgres-config; \
 	$(MAKE) --no-print-directory _write-auth-startup-import-fixtures; \
+	$(MAKE) --no-print-directory _write-session-startup-import-fixtures; \
 	trap '$(DAEMON_SCRIPT) stop --pidfile "$(SANDBOX_PIDFILE)" >/dev/null 2>&1 || true; $(MAKE) --no-print-directory _stop-postgres-test-db >/dev/null 2>&1 || true' EXIT INT TERM; \
 	export FOUCL_SESSION_COOKIE_SECURE="$${FOUCL_SESSION_COOKIE_SECURE:-false}"; \
 	( \

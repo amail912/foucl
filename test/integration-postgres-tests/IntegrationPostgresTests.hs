@@ -57,6 +57,65 @@ runIntegrationPostgresTests = do
         conflictHash <- fetchAuthUserPasswordHash "startup-conflict-user"
         assertEqual "Expected conflicting startup user to remain Postgres-authored after restart" "postgres-conflict-hash" conflictHash
 
+    describe "Session startup import" $ do
+      it "imports filesystem-only session records and preserves postgres-conflicting records" $ do
+        fsOnlyStateUser <- fetchSessionStateUserId "33333333-3333-3333-3333-333333333333"
+        assertEqual "Expected filesystem-only session state to be imported into Postgres" "startup-fs-only-session-user" fsOnlyStateUser
+
+        fsOnlyHandleState <- fetchSessionHandleStateId "cccccccc-cccc-cccc-cccc-cccccccccccc"
+        assertEqual "Expected filesystem-only session handle to be imported into Postgres" "33333333-3333-3333-3333-333333333333" fsOnlyHandleState
+
+        fsOnlyBindingState <- fetchSessionBindingStateId "startup-fs-only-session-user"
+        assertEqual "Expected filesystem-only user binding to be imported into Postgres" "33333333-3333-3333-3333-333333333333" fsOnlyBindingState
+
+        conflictStateUser <- fetchSessionStateUserId "11111111-1111-1111-1111-111111111111"
+        assertEqual "Expected conflicting startup session state to keep Postgres value" "startup-pg-conflict-user" conflictStateUser
+
+        conflictHandleState <- fetchSessionHandleStateId "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        assertEqual "Expected conflicting startup session handle to keep Postgres value" "11111111-1111-1111-1111-111111111111" conflictHandleState
+
+        conflictBindingState <- fetchSessionBindingStateId "startup-binding-conflict-user"
+        assertEqual "Expected conflicting startup session user binding to keep Postgres value" "11111111-1111-1111-1111-111111111111" conflictBindingState
+
+      it "emits startup overlap/conflict warnings in server log" $ do
+        logContent <- readStartupLog
+        assertBool
+          "Expected overlap warning log entry for session startup import"
+          ("[startup][session-import][warning] overlap detected" `isInfixOf` logContent)
+        assertBool
+          "Expected conflict warning log entry for session state conflict"
+          ("[startup][session-import][warning] skipping conflicting state_id=11111111-1111-1111-1111-111111111111 policy=postgres-wins" `isInfixOf` logContent)
+        assertBool
+          "Expected conflict warning log entry for session handle conflict"
+          ("[startup][session-import][warning] skipping conflicting session_id=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa policy=postgres-wins" `isInfixOf` logContent)
+        assertBool
+          "Expected conflict warning log entry for session binding conflict"
+          ("[startup][session-import][warning] skipping conflicting user_id=startup-binding-conflict-user policy=postgres-wins" `isInfixOf` logContent)
+
+      it "remains idempotent across sandbox restart" $ do
+        stateCountBefore <- fetchSessionStatesCount
+        handleCountBefore <- fetchSessionHandlesCount
+        bindingCountBefore <- fetchSessionBindingsCount
+
+        restartPostgresSandboxServer
+
+        stateCountAfter <- fetchSessionStatesCount
+        handleCountAfter <- fetchSessionHandlesCount
+        bindingCountAfter <- fetchSessionBindingsCount
+
+        assertEqual "Expected startup state import to remain idempotent after restart" stateCountBefore stateCountAfter
+        assertEqual "Expected startup handle import to remain idempotent after restart" handleCountBefore handleCountAfter
+        assertEqual "Expected startup binding import to remain idempotent after restart" bindingCountBefore bindingCountAfter
+
+        fsOnlyStateCount <- fetchSessionStateCountById "33333333-3333-3333-3333-333333333333"
+        assertEqual "Expected exactly one imported filesystem-only startup state" 1 fsOnlyStateCount
+
+        fsOnlyHandleCount <- fetchSessionHandleCountById "cccccccc-cccc-cccc-cccc-cccccccccccc"
+        assertEqual "Expected exactly one imported filesystem-only startup handle" 1 fsOnlyHandleCount
+
+        fsOnlyBindingCount <- fetchSessionBindingCountByUserId "startup-fs-only-session-user"
+        assertEqual "Expected exactly one imported filesystem-only startup binding" 1 fsOnlyBindingCount
+
     around_ withFreshPostgresFixtures $ do
       describe "Auth parity" $ do
         it "keeps signup success/conflict semantics" $ do
@@ -453,6 +512,99 @@ fetchAuthUserCountByUsername username = do
     Right raw ->
       case readMaybe (trimTrailingNewline raw) of
         Nothing -> assertFailure ("Unable to parse auth user count for '" ++ username ++ "' from value: " ++ raw) >> pure 0
+        Just value -> pure value
+
+fetchSessionStateUserId :: String -> IO String
+fetchSessionStateUserId stateId = do
+  scalarResult <- runPsqlScalar ("SELECT user_id FROM session_states WHERE state_id = " ++ quoteSql stateId ++ "::uuid")
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query session state user for '" ++ stateId ++ "': " ++ err) >> pure ""
+    Right raw ->
+      let value = trimTrailingNewline raw
+       in if null value
+            then assertFailure ("Expected non-empty session state user for '" ++ stateId ++ "'") >> pure ""
+            else pure value
+
+fetchSessionHandleStateId :: String -> IO String
+fetchSessionHandleStateId sessionId = do
+  scalarResult <- runPsqlScalar ("SELECT state_id::text FROM session_handles WHERE session_id = " ++ quoteSql sessionId ++ "::uuid")
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query session handle state for '" ++ sessionId ++ "': " ++ err) >> pure ""
+    Right raw ->
+      let value = trimTrailingNewline raw
+       in if null value
+            then assertFailure ("Expected non-empty session handle state for '" ++ sessionId ++ "'") >> pure ""
+            else pure value
+
+fetchSessionBindingStateId :: String -> IO String
+fetchSessionBindingStateId userId = do
+  scalarResult <- runPsqlScalar ("SELECT state_id::text FROM session_user_bindings WHERE user_id = " ++ quoteSql userId)
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query session binding state for '" ++ userId ++ "': " ++ err) >> pure ""
+    Right raw ->
+      let value = trimTrailingNewline raw
+       in if null value
+            then assertFailure ("Expected non-empty session binding state for '" ++ userId ++ "'") >> pure ""
+            else pure value
+
+fetchSessionStatesCount :: IO Int
+fetchSessionStatesCount = do
+  scalarResult <- runPsqlScalar "SELECT COUNT(*) FROM session_states"
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query session state count: " ++ err) >> pure 0
+    Right raw ->
+      case readMaybe (trimTrailingNewline raw) of
+        Nothing -> assertFailure ("Unable to parse session state count from value: " ++ raw) >> pure 0
+        Just value -> pure value
+
+fetchSessionHandlesCount :: IO Int
+fetchSessionHandlesCount = do
+  scalarResult <- runPsqlScalar "SELECT COUNT(*) FROM session_handles"
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query session handle count: " ++ err) >> pure 0
+    Right raw ->
+      case readMaybe (trimTrailingNewline raw) of
+        Nothing -> assertFailure ("Unable to parse session handle count from value: " ++ raw) >> pure 0
+        Just value -> pure value
+
+fetchSessionBindingsCount :: IO Int
+fetchSessionBindingsCount = do
+  scalarResult <- runPsqlScalar "SELECT COUNT(*) FROM session_user_bindings"
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query session binding count: " ++ err) >> pure 0
+    Right raw ->
+      case readMaybe (trimTrailingNewline raw) of
+        Nothing -> assertFailure ("Unable to parse session binding count from value: " ++ raw) >> pure 0
+        Just value -> pure value
+
+fetchSessionStateCountById :: String -> IO Int
+fetchSessionStateCountById stateId = do
+  scalarResult <- runPsqlScalar ("SELECT COUNT(*) FROM session_states WHERE state_id = " ++ quoteSql stateId ++ "::uuid")
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query session state count for '" ++ stateId ++ "': " ++ err) >> pure 0
+    Right raw ->
+      case readMaybe (trimTrailingNewline raw) of
+        Nothing -> assertFailure ("Unable to parse session state count for '" ++ stateId ++ "' from value: " ++ raw) >> pure 0
+        Just value -> pure value
+
+fetchSessionHandleCountById :: String -> IO Int
+fetchSessionHandleCountById sessionId = do
+  scalarResult <- runPsqlScalar ("SELECT COUNT(*) FROM session_handles WHERE session_id = " ++ quoteSql sessionId ++ "::uuid")
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query session handle count for '" ++ sessionId ++ "': " ++ err) >> pure 0
+    Right raw ->
+      case readMaybe (trimTrailingNewline raw) of
+        Nothing -> assertFailure ("Unable to parse session handle count for '" ++ sessionId ++ "' from value: " ++ raw) >> pure 0
+        Just value -> pure value
+
+fetchSessionBindingCountByUserId :: String -> IO Int
+fetchSessionBindingCountByUserId userId = do
+  scalarResult <- runPsqlScalar ("SELECT COUNT(*) FROM session_user_bindings WHERE user_id = " ++ quoteSql userId)
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query session binding count for '" ++ userId ++ "': " ++ err) >> pure 0
+    Right raw ->
+      case readMaybe (trimTrailingNewline raw) of
+        Nothing -> assertFailure ("Unable to parse session binding count for '" ++ userId ++ "' from value: " ++ raw) >> pure 0
         Just value -> pure value
 
 readStartupLog :: IO String

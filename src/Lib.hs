@@ -32,6 +32,9 @@ import Data.List (isPrefixOf, sortOn)
 import Data.Char (toLower)
 import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
 import qualified Data.Set as Set
+import qualified Data.ByteString.Char8 as BS8
+import qualified Data.ByteString.Lazy as BL
+import qualified Control.Exception as Ex
 import Happstack.Server (FilterMonad, Response, ServerPartT, RqBody, takeRequestBody, unBody, rqBody, decodeBody, askRq, defaultBodyPolicy, nullDir, path, serveFileFrom, guessContentTypeM, mimeTypes, uriRest, nullConf, simpleHTTP, toResponse, method, ok, internalServerError, notFound, dir, Method(GET, POST, DELETE, PUT), Conf(..), addCookie, mkCookie, CookieLife(Session, Expired), getHeaderM, unauthorized, requestEntityTooLarge, look, setResponseCode)
 import qualified Happstack.Server as HServer
 import Happstack.Server.Internal.Cookie (Cookie(..), SameSite(..))
@@ -53,8 +56,8 @@ import CrudStorage (createItem, getAllItems, deleteItem, modifyItem)
 import Crud
 import NoteCrud (NoteServiceConfig(..), defaultNoteServiceConfig)
 import ChecklistCrud (ChecklistServiceConfig(..), defaultChecklistServiceConfig)
-import System.Directory (doesFileExist, getCurrentDirectory, canonicalizePath, getTemporaryDirectory)
-import System.FilePath ((</>), pathSeparator)
+import System.Directory (doesFileExist, doesDirectoryExist, listDirectory, getCurrentDirectory, canonicalizePath, getTemporaryDirectory)
+import System.FilePath ((</>), pathSeparator, takeBaseName, takeExtension)
 import System.IO (hFlush, stdout)
 import System.Environment (lookupEnv)
 import System.Exit (exitFailure)
@@ -67,8 +70,9 @@ import Data.ByteString.Lazy.Char8 (writeFile)
 import Filesystem.Path.CurrentOS    (commonPrefix, encodeString, decodeString, collapse, append)
 import Auth (AuthRequest(..), AuthRequestError(..), AuthError(..), AuthenticatedProfile(..), AuthRepository, defaultAuthRepository, createUserWithBootstrapAdmin, loadAuthenticatedProfile, signinUser, userExists, isApprovedAdmin, listPendingUsers, listApprovedUsers, approveUser, deletePendingUser, deleteApprovedUser)
 import qualified AuthRepository as AuthRepository
-import Session (SessionConfig(..), SessionPrincipal(..), SessionStore(..), defaultSessionConfig, mkFileSessionStore, mkPostgresSessionRepository, mkSessionStore, signSessionId, verifyPostgresSessionStorage, verifyAndExtractSessionId)
+import Session (SessionConfig(..), SessionPrincipal(..), SessionStore(..), SessionState(..), SessionHandle(..), UserStateBinding(..), SessionRepository(..), defaultSessionConfig, mkFileSessionStore, mkPostgresSessionRepository, mkSessionStore, signSessionId, verifyPostgresSessionStorage, verifyAndExtractSessionId)
 import Repository (RepositoryError(..))
+import Database.PostgreSQL.Simple (Connection, connectPostgreSQL, close, query_)
 
 type AppM a = ExceptT String (ServerPartT IO) a
 
@@ -510,14 +514,20 @@ runApp = do
                   Left err -> do
                     putStrLn $ "[startup-error] " ++ err
                     exitFailure
-                  Right () ->
-                    simpleHTTP nullConf { port = 8081 } $ do
-                        log "Incoming request" >> log "=========================END REQUEST====================\n"
-                        msum [ homePage
-                             , apiController authRepo signupRateLimitState tmpDir appConfig sessionStore
-                             , serveStaticResource
-                             , mzero
-                             ]
+                  Right () -> do
+                    sessionImportResult <- runSessionStartupImportIfNeeded selectedSessionBackend (databaseConfig appConfig) cd
+                    case sessionImportResult of
+                      Left err -> do
+                        putStrLn $ "[startup-error] " ++ err
+                        exitFailure
+                      Right () ->
+                        simpleHTTP nullConf { port = 8081 } $ do
+                            log "Incoming request" >> log "=========================END REQUEST====================\n"
+                            msum [ homePage
+                                 , apiController authRepo signupRateLimitState tmpDir appConfig sessionStore
+                                 , serveStaticResource
+                                 , mzero
+                                 ]
 
 makeAuthRepository :: AuthBackend -> Maybe DatabaseConfig -> IO (Either String AuthRepository)
 makeAuthRepository AuthBackendFilesystem _ = pure (Right defaultAuthRepository)
@@ -582,6 +592,245 @@ importSingleAuthUser postgresRepo pgUsernames (Right (importedCount, skippedCoun
         Left err -> pure (Left ("Auth startup import failed while writing username=" ++ username ++ ": " ++ show err))
   where
     username = AuthRepository.uname fsUser
+
+runSessionStartupImportIfNeeded :: SessionBackend -> Maybe DatabaseConfig -> FilePath -> IO (Either String ())
+runSessionStartupImportIfNeeded SessionBackendFilesystem _ _ = pure (Right ())
+runSessionStartupImportIfNeeded SessionBackendPostgres Nothing _ =
+  pure (Left "Configuration database is required when session.sessionBackend=postgres")
+runSessionStartupImportIfNeeded SessionBackendPostgres (Just dbCfg) cd = do
+  let connectionString = renderPostgresConnectionString dbCfg
+      sessionBaseDir = cd </> "data" </> "sessions"
+      postgresRepo = mkPostgresSessionRepository connectionString
+  filesystemSourceResult <- loadFilesystemSessionImportSource sessionBaseDir
+  case filesystemSourceResult of
+    Left err -> pure (Left err)
+    Right (fsStates, fsHandles, fsBindings) -> do
+      postgresSnapshotResult <- loadPostgresSessionImportSnapshot connectionString
+      case postgresSnapshotResult of
+        Left err -> pure (Left err)
+        Right (pgStates, pgHandles, pgBindings) -> do
+          let orderedFsStates = sortOn stateId fsStates
+              orderedFsHandles = sortOn handleSessionId fsHandles
+              orderedFsBindings = sortOn fst fsBindings
+              pgStateIds = Set.fromList (map stateId pgStates)
+              pgSessionIds = Set.fromList (map handleSessionId pgHandles)
+              pgBindingUserIds = Set.fromList (map fst pgBindings)
+              filesystemCount = length orderedFsStates + length orderedFsHandles + length orderedFsBindings
+              postgresCount = length pgStates + length pgHandles + length pgBindings
+          when (filesystemCount > 0 && postgresCount > 0) $
+            putStrLn
+              ( "[startup][session-import][warning] overlap detected:"
+                  ++ " filesystem_states="
+                  ++ show (length orderedFsStates)
+                  ++ " filesystem_handles="
+                  ++ show (length orderedFsHandles)
+                  ++ " filesystem_bindings="
+                  ++ show (length orderedFsBindings)
+                  ++ " postgres_states="
+                  ++ show (length pgStates)
+                  ++ " postgres_handles="
+                  ++ show (length pgHandles)
+                  ++ " postgres_bindings="
+                  ++ show (length pgBindings)
+                  ++ " conflict_policy=postgres-wins"
+              )
+          statesImportResult <- foldM (importSingleSessionState postgresRepo) (Right (0 :: Int, 0 :: Int, pgStateIds)) orderedFsStates
+          case statesImportResult of
+            Left err -> pure (Left err)
+            Right (statesImported, statesSkipped, _) -> do
+              handlesImportResult <- foldM (importSingleSessionHandle postgresRepo) (Right (0 :: Int, 0 :: Int, pgSessionIds)) orderedFsHandles
+              case handlesImportResult of
+                Left err -> pure (Left err)
+                Right (handlesImported, handlesSkipped, _) -> do
+                  bindingsImportResult <- foldM (importSingleSessionUserBinding postgresRepo) (Right (0 :: Int, 0 :: Int, pgBindingUserIds)) orderedFsBindings
+                  case bindingsImportResult of
+                    Left err -> pure (Left err)
+                    Right (bindingsImported, bindingsSkipped, _) -> do
+                      putStrLn
+                        ( "[startup][session-import] completed"
+                            ++ " filesystem_states="
+                            ++ show (length orderedFsStates)
+                            ++ " filesystem_handles="
+                            ++ show (length orderedFsHandles)
+                            ++ " filesystem_bindings="
+                            ++ show (length orderedFsBindings)
+                            ++ " postgres_states="
+                            ++ show (length pgStates)
+                            ++ " postgres_handles="
+                            ++ show (length pgHandles)
+                            ++ " postgres_bindings="
+                            ++ show (length pgBindings)
+                            ++ " imported_states="
+                            ++ show statesImported
+                            ++ " imported_handles="
+                            ++ show handlesImported
+                            ++ " imported_bindings="
+                            ++ show bindingsImported
+                            ++ " skipped_state_conflicts="
+                            ++ show statesSkipped
+                            ++ " skipped_handle_conflicts="
+                            ++ show handlesSkipped
+                            ++ " skipped_binding_conflicts="
+                            ++ show bindingsSkipped
+                        )
+                      pure (Right ())
+
+importSingleSessionState
+  :: SessionRepository
+  -> Either String (Int, Int, Set.Set String)
+  -> SessionState
+  -> IO (Either String (Int, Int, Set.Set String))
+importSingleSessionState _ (Left err) _ = pure (Left err)
+importSingleSessionState postgresRepo (Right (importedCount, skippedCount, knownStateIds)) sessionState =
+  if Set.member stateKey knownStateIds
+    then do
+      putStrLn ("[startup][session-import][warning] skipping conflicting state_id=" ++ stateKey ++ " policy=postgres-wins")
+      pure (Right (importedCount, skippedCount + 1, knownStateIds))
+    else do
+      createResult <- runExceptT (repoCreateSessionState postgresRepo sessionState)
+      case createResult of
+        Right () ->
+          pure (Right (importedCount + 1, skippedCount, Set.insert stateKey knownStateIds))
+        Left AlreadyExists -> do
+          putStrLn ("[startup][session-import][warning] skipping conflicting state_id=" ++ stateKey ++ " policy=postgres-wins")
+          pure (Right (importedCount, skippedCount + 1, Set.insert stateKey knownStateIds))
+        Left err ->
+          pure (Left ("Session startup import failed while writing state_id=" ++ stateKey ++ ": " ++ show err))
+  where
+    stateKey = stateId sessionState
+
+importSingleSessionHandle
+  :: SessionRepository
+  -> Either String (Int, Int, Set.Set String)
+  -> SessionHandle
+  -> IO (Either String (Int, Int, Set.Set String))
+importSingleSessionHandle _ (Left err) _ = pure (Left err)
+importSingleSessionHandle postgresRepo (Right (importedCount, skippedCount, knownSessionIds)) sessionHandle =
+  if Set.member sessionKey knownSessionIds
+    then do
+      putStrLn ("[startup][session-import][warning] skipping conflicting session_id=" ++ sessionKey ++ " policy=postgres-wins")
+      pure (Right (importedCount, skippedCount + 1, knownSessionIds))
+    else do
+      createResult <- runExceptT (repoCreateSessionHandle postgresRepo sessionHandle)
+      case createResult of
+        Right () ->
+          pure (Right (importedCount + 1, skippedCount, Set.insert sessionKey knownSessionIds))
+        Left AlreadyExists -> do
+          putStrLn ("[startup][session-import][warning] skipping conflicting session_id=" ++ sessionKey ++ " policy=postgres-wins")
+          pure (Right (importedCount, skippedCount + 1, Set.insert sessionKey knownSessionIds))
+        Left err ->
+          pure (Left ("Session startup import failed while writing session_id=" ++ sessionKey ++ ": " ++ show err))
+  where
+    sessionKey = handleSessionId sessionHandle
+
+importSingleSessionUserBinding
+  :: SessionRepository
+  -> Either String (Int, Int, Set.Set String)
+  -> (String, UserStateBinding)
+  -> IO (Either String (Int, Int, Set.Set String))
+importSingleSessionUserBinding _ (Left err) _ = pure (Left err)
+importSingleSessionUserBinding postgresRepo (Right (importedCount, skippedCount, knownUserIds)) (userId, binding) =
+  if Set.member userId knownUserIds
+    then do
+      putStrLn ("[startup][session-import][warning] skipping conflicting user_id=" ++ userId ++ " policy=postgres-wins")
+      pure (Right (importedCount, skippedCount + 1, knownUserIds))
+    else do
+      createResult <- runExceptT (repoCreateUserStateBinding postgresRepo userId binding)
+      case createResult of
+        Right () ->
+          pure (Right (importedCount + 1, skippedCount, Set.insert userId knownUserIds))
+        Left AlreadyExists -> do
+          putStrLn ("[startup][session-import][warning] skipping conflicting user_id=" ++ userId ++ " policy=postgres-wins")
+          pure (Right (importedCount, skippedCount + 1, Set.insert userId knownUserIds))
+        Left err ->
+          pure (Left ("Session startup import failed while writing user_id=" ++ userId ++ ": " ++ show err))
+
+loadFilesystemSessionImportSource :: FilePath -> IO (Either String ([SessionState], [SessionHandle], [(String, UserStateBinding)]))
+loadFilesystemSessionImportSource baseDir = do
+  baseExists <- doesDirectoryExist baseDir
+  if not baseExists
+    then do
+      putStrLn "[startup][session-import] source sessions directory is missing; treating filesystem session source as empty"
+      pure (Right ([], [], []))
+    else do
+      statesResult <- decodeJsonDirectory (baseDir </> "states")
+      case statesResult of
+        Left err -> pure (Left ("Session startup import failed while reading filesystem states: " ++ err))
+        Right states -> do
+          handlesResult <- decodeJsonDirectory (baseDir </> "handles")
+          case handlesResult of
+            Left err -> pure (Left ("Session startup import failed while reading filesystem handles: " ++ err))
+            Right handles -> do
+              bindingsResult <- decodeSessionBindingsDirectory (baseDir </> "users")
+              case bindingsResult of
+                Left err -> pure (Left ("Session startup import failed while reading filesystem user bindings: " ++ err))
+                Right bindings -> pure (Right (states, handles, bindings))
+
+loadPostgresSessionImportSnapshot :: String -> IO (Either String ([SessionState], [SessionHandle], [(String, UserStateBinding)]))
+loadPostgresSessionImportSnapshot connectionString = do
+  connResult <- Ex.try (connectPostgreSQL (BS8.pack connectionString)) :: IO (Either Ex.SomeException Connection)
+  case connResult of
+    Left err -> pure (Left ("Session startup import failed while connecting to Postgres: " ++ show err))
+    Right conn -> do
+      statesResult <- Ex.try (query_ conn "SELECT state_id::text, user_id, created_at, expires_at, idle_expires_at, revoked_at FROM session_states" :: IO [(String, String, UTCTime, UTCTime, UTCTime, Maybe UTCTime)])
+      handlesResult <- Ex.try (query_ conn "SELECT session_id::text, state_id::text, issued_at, revoked_at FROM session_handles" :: IO [(String, String, UTCTime, Maybe UTCTime)])
+      bindingsResult <- Ex.try (query_ conn "SELECT user_id, state_id::text FROM session_user_bindings" :: IO [(String, String)])
+      _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
+      case statesResult of
+        Left err -> pure (Left ("Session startup import failed while reading Postgres states: " ++ show (err :: Ex.SomeException)))
+        Right stateRows ->
+          case handlesResult of
+            Left err -> pure (Left ("Session startup import failed while reading Postgres handles: " ++ show (err :: Ex.SomeException)))
+            Right handleRows ->
+              case bindingsResult of
+                Left err -> pure (Left ("Session startup import failed while reading Postgres user bindings: " ++ show (err :: Ex.SomeException)))
+                Right bindingRows ->
+                  pure
+                    ( Right
+                        ( map (\(sid, uid, createdAt, expiresAt, idleExpiresAt, revokedAt) -> SessionState sid uid createdAt expiresAt idleExpiresAt revokedAt) stateRows
+                        , map (\(sessionId, stId, issuedAt, revokedAt) -> SessionHandle sessionId stId issuedAt revokedAt) handleRows
+                        , map (\(userId, stId) -> (userId, UserStateBinding stId)) bindingRows
+                        )
+                    )
+
+decodeJsonDirectory :: FromJSON a => FilePath -> IO (Either String [a])
+decodeJsonDirectory dirPath = do
+  exists <- doesDirectoryExist dirPath
+  if not exists
+    then pure (Right [])
+    else do
+      files <- listDirectory dirPath
+      foldM loadFile (Right []) (sortOn id files)
+  where
+    loadFile (Left err) _ = pure (Left err)
+    loadFile (Right acc) fileName
+      | takeExtension fileName /= ".json" = pure (Right acc)
+      | otherwise = do
+          let fullPath = dirPath </> fileName
+          content <- BL.readFile fullPath
+          case decode content of
+            Nothing -> pure (Left ("invalid JSON in " ++ fullPath))
+            Just parsed -> pure (Right (parsed : acc))
+
+decodeSessionBindingsDirectory :: FilePath -> IO (Either String [(String, UserStateBinding)])
+decodeSessionBindingsDirectory dirPath = do
+  exists <- doesDirectoryExist dirPath
+  if not exists
+    then pure (Right [])
+    else do
+      files <- listDirectory dirPath
+      foldM loadFile (Right []) (sortOn id files)
+  where
+    loadFile (Left err) _ = pure (Left err)
+    loadFile (Right acc) fileName
+      | takeExtension fileName /= ".json" = pure (Right acc)
+      | otherwise = do
+          let fullPath = dirPath </> fileName
+              userId = takeBaseName fileName
+          content <- BL.readFile fullPath
+          case decode content of
+            Nothing -> pure (Left ("invalid JSON in " ++ fullPath))
+            Just parsed -> pure (Right ((userId, parsed) : acc))
 
 renderAuthBackend :: AuthBackend -> String
 renderAuthBackend AuthBackendFilesystem = "filesystem"

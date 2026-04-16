@@ -70,3 +70,11 @@ Out of scope:
   - import order respects schema dependencies (`states -> handles -> user bindings`),
   - repeated startup runs preserve stable end state,
   - session import path is gated by `sessionBackend` value.
+
+## Implementation Decisions
+
+- Startup execution point is after auth startup import and before HTTP serving begins.
+- Filesystem source records are loaded from `data/sessions/{states,handles,users}` and imported in deterministic key order (`state_id`, `session_id`, `user_id`).
+- Missing filesystem session source directory is treated as an empty source; malformed JSON files fail startup import.
+- Conflict policy is `postgres-wins`: conflicting filesystem rows are skipped and logged with entity/key context.
+- Postgres mode startup import remains fail-fast on Postgres read/write failures; no fallback migration mode is introduced.

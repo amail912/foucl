@@ -16,7 +16,7 @@ Implement Postgres-backed session repository behavior against the `SessionReposi
 
 ## Operational Contract
 
-- Repository operations implemented: create/delete handle, create/load/update/delete state, create/delete user-state binding, delete all user-state bindings for a user.
+- Repository operations implemented: create/load/update/delete handle, create/load/update/delete state, create/load/delete user-state binding, delete all user-state bindings for a user.
 - Adapter must rely on 022 schema guarantees for keys, constraints, and lookup/index support required by session flows.
 - Adapter must preserve session semantics required by business layer for state validity handling, idle refresh/touch support, and revoke flows.
 - Adapter must not introduce backend-specific error classes.

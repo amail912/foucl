@@ -8,7 +8,7 @@ Implement a filesystem-backed session repository adapter that satisfies the `Ses
 
 - Implement filesystem adapter for all session repository operations defined by 017.
 - Emit only shared generic repository errors from the common `Repository` module.
-- Preserve current session persistence semantics for resolve/create, idle refresh, revoke single session, and revoke-all behavior.
+- Preserve current session persistence semantics for resolve/create, idle refresh, revoke single session, and revoke-all behavior through the stable `SessionStore` API.
 - Keep filesystem mode behavior stable after contract extraction.
 
 ## Operational Contract

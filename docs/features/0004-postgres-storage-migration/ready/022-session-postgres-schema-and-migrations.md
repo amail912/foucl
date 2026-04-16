@@ -15,6 +15,7 @@ Define and deliver Postgres schema and migration artifacts required for session 
 - Define deterministic up and down migrations for creating and evolving session schema.
 - Ensure migration artifacts are executable in target environments.
 - Ensure startup schema sanity checks can validate required session tables/constraints before serving requests in postgres mode.
+- Ensure lookup support exists for repository load operations on handle/state/binding identifiers.
 
 ## Schema Contract
 

@@ -21,6 +21,8 @@ Example for auth:
 - `db/migrations/auth/0001_auth_schema.up.sql`
 - `db/migrations/auth/0001_auth_schema.down.sql`
 
+Session migrations follow the same structure under `db/migrations/session/` and are expected to satisfy the repository contract operations defined by story 017 (handle/state/binding load/create/update/delete semantics).
+
 ## Execution Model
 
 - Runner module: `PostgresMigrations`.

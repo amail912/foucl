@@ -138,5 +138,7 @@ test-suite foucl-integration-auth-postgres-tests
     , utf8-string
     , case-insensitive
     , process
+    , password
+    , text
     , time
   default-language: Haskell2010

@@ -8,6 +8,7 @@ Define a decision-complete internal session persistence contract so session busi
 
 - Define a `SessionRepository` interface for session handles, session states, and user-state bindings.
 - Refactor session business functions/store construction to depend on `SessionRepository`.
+- Keep the `SessionStore` call-site API stable while introducing repository-based composition internally.
 - Keep cookie signing and token verification behavior in existing session/auth logic layers.
 - Keep route/controller behavior unchanged.
 
@@ -16,21 +17,31 @@ Define a decision-complete internal session persistence contract so session busi
 The repository contract must cover these operations:
 
 1. Create persisted session handle.
-2. Delete persisted session handle.
-3. Create persisted session state.
-4. Load persisted session state by token.
-5. Update persisted session state by token.
-6. Delete persisted session state by token.
-7. Create persisted user-state binding.
-8. Delete persisted user-state binding by token.
-9. Delete all persisted user-state bindings for a user.
+2. Load persisted session handle by session id.
+3. Update persisted session handle by session id.
+4. Delete persisted session handle by session id.
+5. Create persisted session state.
+6. Load persisted session state by state id.
+7. Update persisted session state by state id.
+8. Delete persisted session state by state id.
+9. Create persisted user-state binding by user id.
+10. Load persisted user-state binding by user id.
+11. Delete persisted user-state binding by user id.
+12. Delete all persisted user-state bindings for a user.
 
 Contract-level semantics:
 
-- State load for unknown token returns `NotFound`.
-- State update/delete for unknown token returns `NotFound`.
+- Handle/state/binding load for unknown id returns `NotFound`.
+- Handle/state/binding update/delete for unknown id returns `NotFound`.
 - User-state delete operations are deterministic and idempotent at the business boundary.
 - No filesystem paths, directories, or backend-specific data layout details may appear in the interface.
+
+## Design Decisions
+
+- `SessionStore` remains the public business interface used by `Lib` and controllers in this story.
+- `SessionRepository` is an internal persistence boundary used by `SessionStore` implementation.
+- Session id and state id remain separate persisted identifiers; revoke-all is driven by state revocation semantics.
+- This story intentionally does not include runtime backend selection (deferred to 018).
 
 ## Error Mapping Contract
 
@@ -80,8 +91,8 @@ Out of scope:
 - Build/compile check proving session business code no longer imports filesystem persistence primitives directly.
 - Unit tests for repository-error-to-session-error mapping behavior.
 - Contract tests for operation semantics:
-  - missing state token handling,
-  - state update/delete missing-token handling,
+  - missing handle/state/binding id handling,
+  - handle/state update/delete missing-id handling,
   - revoke-all deterministic behavior.
 
 ## Dependencies

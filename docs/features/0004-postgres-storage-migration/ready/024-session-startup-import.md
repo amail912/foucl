@@ -36,6 +36,7 @@ Add startup filesystem-to-Postgres bootstrap import for the session domain when 
 ## Dependencies And Boundaries
 
 - Depends on:
+  - 017 Session Repository Contract
   - 018 Session Backend Selection And Wiring
   - 022 Session Postgres Schema And Migrations
   - 020 Session Postgres Adapter Implementation

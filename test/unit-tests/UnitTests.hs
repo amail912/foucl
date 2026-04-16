@@ -15,7 +15,7 @@ import Data.Either (isRight)
 import Data.List ((\\), sortOn, isInfixOf)
 import Control.Monad (when)
 import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
-import Control.Monad.Trans.Except (runExceptT)
+import Control.Monad.Trans.Except (ExceptT(..), runExceptT, throwE)
 import Control.Exception (finally)
 import Control.Concurrent (threadDelay)
 import System.Exit (ExitCode(..), exitSuccess, exitFailure)
@@ -35,6 +35,7 @@ import Lib (AuthBackend(..), parseAuthBackend)
 import PostgresMigrations (MigrationDirection(..), runAuthMigrationsAtPath, psqlAvailable)
 import Data.Text (Text, pack)
 import Data.Password.Argon2 (hashPassword, mkPassword)
+import Data.Time.Clock (addUTCTime, getCurrentTime)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import qualified Data.ByteString.Lazy.Char8 as BL8
 import qualified Data.ByteString.Lazy as BL
@@ -1129,6 +1130,8 @@ sessionTests = test [ "Signed token should reject tampering" ~: signedTokenRejec
                     , "Sliding renewal should extend idle session" ~: slidingRenewalExtendsIdleSession
                     , "Revoking all sessions from one session should revoke sibling sessions" ~: revokeAllSessionsFromSession
                     , "Corrupted session handle should be rejected gracefully" ~: corruptedSessionHandleIsRejected
+                    , "Resolve should treat repository read failures as unresolved session" ~: resolveReadFailureIsUnresolved
+                    , "Revoke-all should stay successful when binding delete returns NotFound" ~: revokeAllIgnoresMissingBindingDelete
                     ]
 
 signedTokenRejectsTampering :: IO ()
@@ -1215,3 +1218,60 @@ withSessionStoreAndDir label absoluteTtl idleTtl action = do
     cleanupSessionDir baseDir
     store <- mkFileSessionStore baseDir sessionConfig
     action baseDir store `finally` cleanupSessionDir baseDir
+
+resolveReadFailureIsUnresolved :: IO ()
+resolveReadFailureIsUnresolved = do
+    let store = mkSessionStore failingRepo defaultSessionConfig
+        failingRepo = SessionRepository
+          { repoCreateSessionHandle = const (pure ())
+          , repoLoadSessionHandleBySessionId = const (throwE ReadFailure)
+          , repoUpdateSessionHandle = const (pure ())
+          , repoDeleteSessionHandleBySessionId = const (pure ())
+          , repoCreateSessionState = const (pure ())
+          , repoLoadSessionStateByStateId = const (throwE ReadFailure)
+          , repoUpdateSessionState = const (pure ())
+          , repoDeleteSessionStateByStateId = const (pure ())
+          , repoCreateUserStateBinding = \_ _ -> pure ()
+          , repoLoadUserStateBindingByUserId = const (throwE ReadFailure)
+          , repoDeleteUserStateBindingByUserId = const (pure ())
+          , repoDeleteAllUserStateBindingsForUser = const (pure ())
+          }
+    resolved <- resolveSession store "sid-read-failure"
+    case resolved of
+      Nothing -> assertBool "Resolve should treat read failure as unresolved session" True
+      Just _ -> assertFailure "Expected unresolved session when repository read fails"
+
+revokeAllIgnoresMissingBindingDelete :: IO ()
+revokeAllIgnoresMissingBindingDelete = do
+    now <- getCurrentTime
+    let handle = SessionHandle
+          { handleSessionId = "sid-revoke-all"
+          , handleStateId = "state-revoke-all"
+          , handleIssuedAt = now
+          , handleRevokedAt = Nothing
+          }
+        st = SessionState
+          { stateId = "state-revoke-all"
+          , stateUserId = "user-revoke-all"
+          , stateCreatedAt = now
+          , stateExpiresAt = addUTCTime 30 now
+          , stateIdleExpiresAt = addUTCTime 30 now
+          , stateRevokedAt = Nothing
+          }
+        store = mkSessionStore repo defaultSessionConfig
+        repo = SessionRepository
+          { repoCreateSessionHandle = const (pure ())
+          , repoLoadSessionHandleBySessionId = const (pure handle)
+          , repoUpdateSessionHandle = const (pure ())
+          , repoDeleteSessionHandleBySessionId = const (pure ())
+          , repoCreateSessionState = const (pure ())
+          , repoLoadSessionStateByStateId = const (pure st)
+          , repoUpdateSessionState = const (pure ())
+          , repoDeleteSessionStateByStateId = const (pure ())
+          , repoCreateUserStateBinding = \_ _ -> pure ()
+          , repoLoadUserStateBindingByUserId = const (throwE NotFound)
+          , repoDeleteUserStateBindingByUserId = const (pure ())
+          , repoDeleteAllUserStateBindingsForUser = const (throwE NotFound)
+          }
+    revoked <- revokeAllForSession store "sid-revoke-all"
+    assertBool "Revoke-all should remain successful when binding delete reports NotFound" revoked

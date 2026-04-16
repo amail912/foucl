@@ -7,7 +7,7 @@ Validate that session behavior remains contract-compatible when `sessionBackend=
 ## Scope
 
 - Execute session-focused parity verification against real Postgres-backed repository behavior.
-- Verify client-visible session behavior remains aligned with existing expectations at session/auth business/controller boundaries.
+- Verify client-visible session behavior remains aligned with existing expectations at session/auth business/controller boundaries through the stable `SessionStore` surface.
 - Verify state lifecycle semantics remain compatible for resolve, idle refresh, and revoke flows.
 - Verify status/message semantics remain unchanged for covered scenarios.
 
@@ -34,7 +34,6 @@ Validate that session behavior remains contract-compatible when `sessionBackend=
 
 Out of scope:
 
-- Real Postgres integration execution.
 - Session Postgres schema definition and migration execution.
 - Session Postgres adapter implementation details.
 - Startup import behavior.

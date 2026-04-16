@@ -9,6 +9,8 @@ import qualified Data.ByteString.Char8 as BS
 import Data.CaseInsensitive (original)
 import Data.Char (toLower)
 import Data.Foldable (toList)
+import Data.Password.Argon2 (hashPassword, mkPassword, unPasswordHash)
+import Data.Text (pack, unpack)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Network.HTTP.Simple
 import System.Exit (ExitCode(..))
@@ -19,7 +21,7 @@ import Test.HUnit (assertBool, assertEqual, assertFailure)
 runAuthPostgresIntegrationTests :: IO ()
 runAuthPostgresIntegrationTests = do
   assertPostgresReachable
-  hspec $ around_ withFreshAuthSchema $ do
+  hspec $ around_ withFreshAuthFixtures $ do
     describe "Auth Postgres parity integration" $ do
       it "keeps signup success/conflict semantics" $ do
         suffix <- uniqueSuffix
@@ -31,8 +33,17 @@ runAuthPostgresIntegrationTests = do
         assertStatusCode "Duplicate signup should return bad request" 400 signupDup
         assertMessageResponse "Unable to create user" signupDup
 
+      it "keeps signup rate-limiting semantics for non-bootstrap users" $ do
+        suffix <- uniqueSuffix
+        responses <- mapM
+          (\i -> performSignupRaw ("pg-rate-limit-" ++ suffix ++ "-" ++ show i) testPassword)
+          [1..6]
+        let statusCodes = map getResponseStatusCode responses
+        assertBool "Expected at least one allowed signup before rate-limit saturation" (any (== 200) statusCodes)
+        assertBool "Expected signup rate-limiter to block after saturation" (any (== 400) statusCodes)
+
       it "keeps signin success, invalid credentials, and pending approval semantics" $ do
-        adminSignin <- bootstrapAndSigninAdmin
+        adminSignin <- signinAsAdmin
         assertStatusCode "Bootstrap admin signin should succeed" 200 adminSignin
         assertSigninProfileResponse "admin" ["admin"] True adminSignin
 
@@ -42,15 +53,13 @@ runAuthPostgresIntegrationTests = do
 
         suffix <- uniqueSuffix
         let pendingUsername = "pg-pending-" ++ suffix
-        pendingSignup <- performSignup pendingUsername testPassword
-        assertStatusCode "Pending signup should succeed" 200 pendingSignup
+        seedPendingUser pendingUsername
 
         pendingSignin <- performSigninJSON pendingUsername testPassword
         assertStatusCode "Pending account should return 403" 403 pendingSignin
         assertMessageResponse "Account pending approval" pendingSignin
 
       it "keeps auth profile success semantics" $ do
-        _ <- bootstrapAndSigninAdmin
         adminCookie <- signinOnly "admin" testPassword
 
         profileResp <- getAuthProfile adminCookie
@@ -58,13 +67,11 @@ runAuthPostgresIntegrationTests = do
         assertSigninProfileResponse "admin" ["admin"] True profileResp
 
       it "keeps admin pending moderation semantics" $ do
-        _ <- bootstrapAndSigninAdmin
         adminCookie <- signinOnly "admin" testPassword
 
         suffix <- uniqueSuffix
         let pendingUsername = "pg-approvable-" ++ suffix
-        pendingSignup <- performSignup pendingUsername testPassword
-        assertStatusCode "Pending signup should succeed" 200 pendingSignup
+        seedPendingUser pendingUsername
 
         pendingUsers <- getPendingSignups adminCookie
         assertBool "Pending user should be listed" (pendingSignupValue pendingUsername `elem` pendingUsers)
@@ -80,16 +87,11 @@ runAuthPostgresIntegrationTests = do
         assertMessageResponse "Not found" approveMissing
 
       it "keeps approved-user listing/delete/conflict semantics" $ do
-        _ <- bootstrapAndSigninAdmin
         adminCookie <- signinOnly "admin" testPassword
 
         suffix <- uniqueSuffix
         let memberUsername = "pg-approved-" ++ suffix
-        pendingSignup <- performSignup memberUsername testPassword
-        assertStatusCode "Member signup should succeed" 200 pendingSignup
-
-        approveResp <- approvePendingSignupResponse adminCookie memberUsername
-        assertStatusCode "Approve should succeed" 200 approveResp
+        seedApprovedUser memberUsername ["member"]
 
         approvedUsers <- getApprovedUsers adminCookie
         assertBool "Bootstrap admin should be listed" (adminUserValue "admin" ["admin"] True `elem` approvedUsers)
@@ -111,7 +113,6 @@ runAuthPostgresIntegrationTests = do
         assertMessageResponse "Cannot delete bootstrap admin" deleteBootstrap
 
       it "keeps technical failure profile semantics" $ do
-        _ <- bootstrapAndSigninAdmin
         adminCookie <- signinOnly "admin" testPassword
 
         _ <- runPsqlFile authDownMigration
@@ -119,9 +120,10 @@ runAuthPostgresIntegrationTests = do
         assertStatusCode "Profile should return technical error when storage fails" 500 profileResp
         assertMessageResponse "Unable to process authentication" profileResp
 
-withFreshAuthSchema :: IO () -> IO ()
-withFreshAuthSchema action = do
+withFreshAuthFixtures :: IO () -> IO ()
+withFreshAuthFixtures action = do
   resetAuthSchema
+  seedApprovedUser "admin" ["admin"]
   action
 
 assertPostgresReachable :: IO ()
@@ -148,16 +150,22 @@ resetAuthSchema = do
     Left err -> assertFailure ("Auth table cleanup failed: " ++ err)
     Right () -> pure ()
 
-bootstrapAndSigninAdmin :: IO (Response Value)
-bootstrapAndSigninAdmin = do
-  signupResp <- performSignup "admin" testPassword
-  assertStatusCode "Bootstrap admin signup should succeed" 200 signupResp
+signinAsAdmin :: IO (Response Value)
+signinAsAdmin =
   performSigninJSON "admin" testPassword
 
 performSignup :: String -> String -> IO (Response Value)
 performSignup username password = do
   req <- parseRequest "POST http://localhost:8081/api/signup"
   httpJSON
+    $ setRequestMethod "POST"
+    $ setRequestHeader "Content-Type" ["application/json"]
+    $ setRequestBodyJSON (authPayload username password) req
+
+performSignupRaw :: String -> String -> IO (Response ByteString)
+performSignupRaw username password = do
+  req <- parseRequest "POST http://localhost:8081/api/signup"
+  httpBS
     $ setRequestMethod "POST"
     $ setRequestHeader "Content-Type" ["application/json"]
     $ setRequestBodyJSON (authPayload username password) req
@@ -246,6 +254,37 @@ runPsqlFile filePath = do
     case exitCode of
       ExitSuccess -> Right ()
       ExitFailure _ -> Left err
+
+seedApprovedUser :: String -> [String] -> IO ()
+seedApprovedUser username roles = do
+  pHash <- hashPassword $ mkPassword (pack testPassword)
+  let role = if "admin" `elem` roles then "admin" else "member"
+      sql = "INSERT INTO auth_users (username, password_hash, role, approved) VALUES ("
+            ++ quoteSql username ++ ", "
+            ++ quoteSql (unpack (unPasswordHash pHash)) ++ ", "
+            ++ quoteSql role ++ ", true)"
+  result <- runPsqlCommand sql
+  case result of
+    Left err -> assertFailure ("Unable to seed approved user '" ++ username ++ "': " ++ err)
+    Right () -> pure ()
+
+seedPendingUser :: String -> IO ()
+seedPendingUser username = do
+  pHash <- hashPassword $ mkPassword (pack testPassword)
+  let sql = "INSERT INTO auth_users (username, password_hash, role, approved) VALUES ("
+            ++ quoteSql username ++ ", "
+            ++ quoteSql (unpack (unPasswordHash pHash)) ++ ", "
+            ++ quoteSql "member" ++ ", false)"
+  result <- runPsqlCommand sql
+  case result of
+    Left err -> assertFailure ("Unable to seed pending user '" ++ username ++ "': " ++ err)
+    Right () -> pure ()
+
+quoteSql :: String -> String
+quoteSql raw = "'" ++ concatMap escape raw ++ "'"
+  where
+    escape '\'' = "''"
+    escape c = [c]
 
 assertStatusCode :: String -> Int -> Response a -> IO ()
 assertStatusCode message expected response =

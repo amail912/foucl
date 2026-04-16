@@ -591,10 +591,7 @@ signupController authRepo signupRateLimitState tmpDir bootstrapAdmin = dir "sign
 
           doCreateUser :: AuthRequest -> ServerPartT IO Response --AppM Response
           doCreateUser signupRequest = do
-            let isBootstrapSignup = username signupRequest == bootstrapAdmin
-            allowed <- if isBootstrapSignup
-              then pure True
-              else liftIO $ allowSignupRequest signupRateLimitState
+            allowed <- liftIO $ allowSignupRequest signupRateLimitState
             if not allowed
               then tooManyRequests "Too many signup attempts. Please retry later."
               else do

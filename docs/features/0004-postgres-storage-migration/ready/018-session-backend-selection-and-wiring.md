@@ -9,7 +9,7 @@ Introduce runtime backend selection for the session domain and wire startup comp
 - Add session domain backend flag `sessionBackend` with supported values `filesystem` or `postgres`.
 - Define default behavior: when `sessionBackend` is omitted, use `filesystem`.
 - Validate backend flag at startup; unsupported values fail startup configuration.
-- Wire startup composition so session logic receives exactly one implementation selected from `sessionBackend`.
+- Wire startup composition so session logic receives exactly one `SessionRepository` implementation selected from `sessionBackend`.
 - Emit startup log for selected session backend.
 - Consume top-level split `database` config (`host`, `port`, `name`, `user`, `password`) for postgres session mode.
 
@@ -24,7 +24,7 @@ Introduce runtime backend selection for the session domain and wire startup comp
 
 - Backend selection is resolved before serving requests.
 - Invalid backend value fails startup configuration and prevents serving traffic.
-- Route/controller layers consume composed session service dependencies and remain persistence-agnostic.
+- Route/controller layers keep using the stable `SessionStore` API and remain persistence-agnostic.
 - Session runtime behavior remains stable across backends from client point of view.
 
 ## Dependencies And Boundaries

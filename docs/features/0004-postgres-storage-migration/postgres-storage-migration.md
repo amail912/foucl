@@ -25,6 +25,7 @@ Move persistence to Postgres incrementally, with per-domain cutover control, and
 ## Delivery Notes
 
 - Backend activation is controlled per domain through configuration.
+- Session business/controller call sites stay on `SessionStore`; repository extraction (017) is internal to session composition.
 - Postgres connection is configured through a top-level split `database` object (`host`, `port`, `name`, `user`, `password`).
 - Import routines must be idempotent and safe to run at each startup.
 - Migration system documentation: [Postgres Migration System](migration-system.md).
@@ -41,10 +42,10 @@ Move persistence to Postgres incrementally, with per-domain cutover control, and
 - [014 Auth Postgres Schema And Migrations](done/014-auth-postgres-schema-and-migrations.md)
 - [015 Auth Postgres Adapter Implementation](done/015-auth-postgres-adapter-implementation.md)
 - [016 Auth Postgres Parity Verification](done/016-auth-postgres-parity-verification.md)
+- [017 Session Repository Contract](done/017-session-repository-contract.md)
 
 ### Ready
 
-- [017 Session Repository Contract](ready/017-session-repository-contract.md)
 - [018 Session Backend Selection And Wiring](ready/018-session-backend-selection-and-wiring.md)
 - [019 Session Filesystem Adapter Parity](ready/019-session-filesystem-adapter-parity.md)
 - [020 Session Postgres Adapter Implementation](ready/020-session-postgres-adapter-implementation.md)

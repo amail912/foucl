@@ -53,9 +53,16 @@ Move persistence to Postgres incrementally, with per-domain cutover control, and
 
 ### Ready
 
+- [025 Calendar And Trip Sharing Repository Contracts](ready/025-calendar-tripsharing-repository-contracts.md)
+- [026 Calendar And Trip Sharing Backend Selection And Wiring](ready/026-calendar-tripsharing-backend-selection-and-wiring.md)
+- [027 Calendar And Trip Sharing Filesystem Adapter Parity](ready/027-calendar-tripsharing-filesystem-adapter-parity.md)
+- [028 Calendar And Trip Sharing Postgres Schema And Migrations](ready/028-calendar-tripsharing-postgres-schema-and-migrations.md)
+- [029 Calendar And Trip Sharing Postgres Adapter Implementation](ready/029-calendar-tripsharing-postgres-adapter-implementation.md)
+- [030 Calendar And Trip Sharing Postgres Parity Verification](ready/030-calendar-tripsharing-postgres-parity-verification.md)
+- [031 Calendar And Trip Sharing Startup Import](ready/031-calendar-tripsharing-startup-import.md)
+
 ### To Refine
 
-- [002 Calendar And Trip Sharing Postgres Cutover](to-refine/002-calendar-tripsharing-postgres-cutover.md)
 - [003 Notes And Checklists Postgres Cutover](to-refine/003-notes-checklists-postgres-cutover.md)
 - [004 Domain Switching And Bootstrap Import](to-refine/004-domain-switching-and-bootstrap-import.md)
 - [005 Remove Filesystem Backend Per Migrated Domain](to-refine/005-remove-fs-backend-per-domain.md)
@@ -68,3 +75,4 @@ Move persistence to Postgres incrementally, with per-domain cutover control, and
 - [008 Session Repository And Wiring](canceled/008-session-repository-and-wiring.md) - Canceled because it mixed session contract, backend wiring, and filesystem parity expectations; replaced by 017, 018, and 019.
 - [009 Session Postgres Implementation And Parity](canceled/009-session-postgres-implementation-and-parity.md) - Canceled because it mixed Postgres adapter implementation and parity verification; replaced by 022, 020, and 021.
 - [010 Auth Session Startup Import](canceled/010-auth-session-startup-import.md) - Canceled because it mixed auth and session startup import execution/verification; replaced by 023 and 024.
+- [002 Calendar And Trip Sharing Postgres Cutover](canceled/002-calendar-tripsharing-postgres-cutover.md) - Canceled because it mixed contracts, wiring, schema, adapters, parity, and startup import into one oversized story; replaced by 025, 026, 027, 028, 029, 030, and 031.

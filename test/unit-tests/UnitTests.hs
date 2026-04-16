@@ -31,7 +31,7 @@ import Auth
 import AuthRepository (AuthRepository(..), PersistedUser(..))
 import Repository (RepositoryError(..))
 import Session
-import Lib (AuthBackend(..), parseAuthBackend)
+import Lib (AuthBackend(..), parseAuthBackend, SessionBackend(..), parseSessionBackend, makeSessionStore, DatabaseConfig(..))
 import PostgresMigrations (MigrationDirection(..), runAuthMigrationsAtPath, psqlAvailable)
 import Data.Text (Text, pack)
 import Data.Password.Argon2 (hashPassword, mkPassword)
@@ -41,7 +41,7 @@ import qualified Data.ByteString.Lazy.Char8 as BL8
 import qualified Data.ByteString.Lazy as BL
 
 runUnitTests :: IO ()
-runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, agendaStorageTests, tripSharingStorageTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, postgresMigrationTests, sessionTests]
+runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, agendaStorageTests, tripSharingStorageTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionBackendConfigTests, postgresMigrationTests, sessionTests]
 
 runTestTTAndExit tests = do
   c <- runTestTT tests
@@ -937,6 +937,16 @@ authBackendConfigTests = test [ "Auth backend defaults to filesystem when omitte
                               , "Auth backend rejects invalid values" ~: authBackendRejectsInvalid
                               ]
 
+sessionBackendConfigTests = test
+  [ "Session backend defaults to filesystem when omitted" ~: sessionBackendDefaultsToFilesystem
+  , "Session backend accepts filesystem" ~: sessionBackendAcceptsFilesystem
+  , "Session backend accepts postgres" ~: sessionBackendAcceptsPostgres
+  , "Session backend rejects invalid values" ~: sessionBackendRejectsInvalid
+  , "Session backend wiring composes filesystem store" ~: sessionBackendWiringComposesFilesystem
+  , "Session backend postgres mode requires database config" ~: sessionBackendPostgresRequiresDatabaseConfig
+  , "Session backend postgres mode fails fast before adapter implementation" ~: sessionBackendPostgresFailsFastWithoutAdapter
+  ]
+
 authBackendDefaultsToFilesystem :: IO ()
 authBackendDefaultsToFilesystem =
   case parseAuthBackend Nothing of
@@ -961,6 +971,84 @@ authBackendRejectsInvalid =
     Left "Configuration auth.authBackend must be one of: filesystem, postgres" ->
       assertBool "Expected invalid auth backend rejection" True
     _ -> assertFailure "Expected invalid auth backend value to be rejected"
+
+sessionBackendDefaultsToFilesystem :: IO ()
+sessionBackendDefaultsToFilesystem =
+  case parseSessionBackend Nothing of
+    Right SessionBackendFilesystem -> assertBool "Expected filesystem default" True
+    _ -> assertFailure "Expected omitted session backend to default to filesystem"
+
+sessionBackendAcceptsFilesystem :: IO ()
+sessionBackendAcceptsFilesystem =
+  case parseSessionBackend (Just "filesystem") of
+    Right SessionBackendFilesystem -> assertBool "Expected filesystem session backend" True
+    _ -> assertFailure "Expected filesystem session backend to be accepted"
+
+sessionBackendAcceptsPostgres :: IO ()
+sessionBackendAcceptsPostgres =
+  case parseSessionBackend (Just "postgres") of
+    Right SessionBackendPostgres -> assertBool "Expected postgres session backend" True
+    _ -> assertFailure "Expected postgres session backend to be accepted"
+
+sessionBackendRejectsInvalid :: IO ()
+sessionBackendRejectsInvalid =
+  case parseSessionBackend (Just "sqlite") of
+    Left "Configuration session.sessionBackend must be one of: filesystem, postgres" ->
+      assertBool "Expected invalid session backend rejection" True
+    _ -> assertFailure "Expected invalid session backend value to be rejected"
+
+sessionBackendWiringComposesFilesystem :: IO ()
+sessionBackendWiringComposesFilesystem = withSessionBackendSandbox "filesystem-wiring" $ \sandboxDir -> do
+  result <- makeSessionStore SessionBackendFilesystem Nothing sandboxDir testSessionConfig
+  case result of
+    Left err -> assertFailure ("Expected filesystem session backend wiring success, got " ++ err)
+    Right store -> do
+      sid <- createSessionForUser store "session-backend-fs-user"
+      resolved <- resolveSession store sid
+      case resolved of
+        Just _ -> assertBool "Expected session to resolve with filesystem backend wiring" True
+        Nothing -> assertFailure "Expected created session to resolve with filesystem backend wiring"
+
+sessionBackendPostgresRequiresDatabaseConfig :: IO ()
+sessionBackendPostgresRequiresDatabaseConfig = do
+  result <- makeSessionStore SessionBackendPostgres Nothing "." testSessionConfig
+  case result of
+    Left "Configuration database is required when session.sessionBackend=postgres" ->
+      assertBool "Expected missing database config rejection for postgres session backend" True
+    Left err -> assertFailure ("Unexpected postgres missing-db error: " ++ err)
+    Right _ -> assertFailure "Expected postgres session backend without database config to fail"
+
+sessionBackendPostgresFailsFastWithoutAdapter :: IO ()
+sessionBackendPostgresFailsFastWithoutAdapter = do
+  let dbCfg = DatabaseConfig
+        { databaseHost = "127.0.0.1"
+        , databasePort = 5432
+        , databaseName = "foucl"
+        , databaseUser = "foucl"
+        , databasePassword = "foucl"
+        }
+  result <- makeSessionStore SessionBackendPostgres (Just dbCfg) "." testSessionConfig
+  case result of
+    Left "Postgres session backend wiring is not available yet; implement story 020" ->
+      assertBool "Expected explicit postgres session fail-fast before adapter implementation" True
+    Left err -> assertFailure ("Unexpected postgres session wiring error: " ++ err)
+    Right _ -> assertFailure "Expected postgres session backend to fail fast before story 020"
+
+testSessionConfig :: SessionConfig
+testSessionConfig =
+  defaultSessionConfig
+    { sessionSecret = "unit-test-session-backend-secret"
+    }
+
+withSessionBackendSandbox :: String -> (FilePath -> IO ()) -> IO ()
+withSessionBackendSandbox label action = do
+  cwd <- getCurrentDirectory
+  nonce <- round . (* 1000000) <$> getPOSIXTime
+  let baseDir = cwd ++ "/dist-newstyle/sandbox/session-backend-tests/" ++ label ++ "-" ++ show (nonce :: Integer)
+  createDirectoryIfMissing True baseDir
+  action baseDir `finally` do
+    exists <- doesDirectoryExist baseDir
+    when exists $ removeDirectoryRecursive baseDir
 
 postgresMigrationTests = test
   [ "Postgres auth migrations: up creates schema contract" ~: migrationUpCreatesAuthSchema

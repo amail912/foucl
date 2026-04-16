@@ -16,9 +16,9 @@ Introduce runtime backend selection for the session domain and wire startup comp
 ## Runtime Selection Contract
 
 - `sessionBackend=filesystem` selects only filesystem session composition.
-- `sessionBackend=postgres` selects only Postgres session composition.
+- `sessionBackend=postgres` selects only the Postgres session composition path (no fallback), and fails fast until the Postgres adapter is delivered.
 - Mixed session backend composition in one runtime is not allowed.
-- In postgres mode, startup must fail fast if database config is missing or DB connect/schema checks fail.
+- In postgres mode, startup must fail fast if database config is missing.
 
 ## Startup And Composition Contract
 
@@ -48,7 +48,7 @@ Out of scope:
 2. Missing `sessionBackend` defaults to `filesystem`.
 3. Invalid `sessionBackend` value fails startup before serving requests.
 4. Filesystem mode composes session with filesystem implementation only.
-5. Postgres mode composes session with Postgres implementation only.
+5. Postgres mode does not fallback to filesystem and fails fast before serving traffic until Postgres adapter wiring is available.
 6. Startup logs include selected session backend.
 7. No HTTP route, payload, status code, cookie behavior, or message drift is introduced.
 
@@ -61,7 +61,8 @@ Out of scope:
   - invalid value rejected with startup config error.
 - Wiring selection tests:
   - filesystem mode composes session filesystem path only,
-  - postgres mode composes session Postgres path only,
+  - postgres mode rejects missing database config,
+  - postgres mode fails fast with explicit non-fallback wiring error before adapter implementation,
   - no mixed composition path.
 - Regression expectation reference:
   - session API behavior remains unchanged while wiring strategy changes.

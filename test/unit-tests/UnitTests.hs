@@ -1,5 +1,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE NamedFieldPuns #-}
 
 module UnitTests (runUnitTests) where
 
@@ -109,6 +110,10 @@ tripSharingStorageTests = test [ "Getting shares from empty storage should give 
 
 calendarRepositoryTests = test
   [ "Calendar repository lists items deterministically by itemId" ~: calendarRepositoryListsDeterministically
+  , "Calendar repository loads an existing item by id" ~: calendarRepositoryLoadById
+  , "Calendar repository maps missing load to NotFound" ~: calendarRepositoryLoadMissingMapsNotFound
+  , "Calendar repository updates duration for existing items" ~: calendarRepositoryUpdateDuration
+  , "Calendar repository maps missing duration update to NotFound" ~: calendarRepositoryUpdateDurationMissingMapsNotFound
   , "Calendar repository maps missing update to NotFound" ~: calendarRepositoryUpdateMissingMapsNotFound
   , "Calendar repository maps missing delete to NotFound" ~: calendarRepositoryDeleteMissingMapsNotFound
   ]
@@ -117,6 +122,9 @@ tripSharingRepositoryTests = test
   [ "Trip-sharing repository lists shares deterministically" ~: tripSharingRepositoryListsDeterministically
   , "Trip-sharing repository keeps missing share delete idempotent" ~: tripSharingRepositoryDeleteMissingIsIdempotent
   , "Trip-sharing repository maps malformed share file to ReadFailure" ~: tripSharingRepositoryMalformedShareFileMapsReadFailure
+  , "Trip-sharing repository lists subscriptions deterministically" ~: tripSharingRepositorySubscriptionsListDeterministically
+  , "Trip-sharing repository keeps missing subscription delete idempotent" ~: tripSharingRepositorySubscriptionDeleteMissingIsIdempotent
+  , "Trip-sharing repository maps malformed subscription file to ReadFailure" ~: tripSharingRepositoryMalformedSubscriptionFileMapsReadFailure
   ]
 
 createTest :: ContentGen crudConfig a => crudConfig -> IO ()
@@ -514,6 +522,56 @@ calendarRepositoryDeleteMissingMapsNotFound = withEmptyCalendarDir $ \config -> 
       Left NotFound -> assertBool "Expected NotFound for missing calendar delete" True
       other -> assertFailure ("Expected NotFound for missing calendar delete, got " ++ show other)
 
+calendarRepositoryLoadById :: IO ()
+calendarRepositoryLoadById = withEmptyCalendarDir $ \config -> do
+    let repo = filesystemCalendarRepository config
+        userId = "alice"
+    created <- runExceptT $ repoCreateCalendarItem repo userId sampleAgendaContent
+    case created of
+      Left err -> assertFailure ("Expected calendar create success, got " ++ show err)
+      Right item ->
+        case item of
+          Agenda.ServerCalendarItem {Agenda.itemId = createdId} -> do
+            loaded <- runExceptT $ repoLoadCalendarItemById repo userId createdId
+            case loaded of
+              Left err -> assertFailure ("Expected calendar load by id success, got " ++ show err)
+              Right loadedItem ->
+                assertEqual "Expected loaded calendar item id to match created item id" createdId (Agenda.itemId loadedItem)
+          Agenda.NewCalendarItem {} -> assertFailure "Expected created calendar item to be stored with server id"
+
+calendarRepositoryLoadMissingMapsNotFound :: IO ()
+calendarRepositoryLoadMissingMapsNotFound = withEmptyCalendarDir $ \config -> do
+    let repo = filesystemCalendarRepository config
+    result <- runExceptT $ repoLoadCalendarItemById repo "alice" "missing-id"
+    case result of
+      Left NotFound -> assertBool "Expected NotFound for missing calendar load" True
+      other -> assertFailure ("Expected NotFound for missing calendar load, got " ++ show other)
+
+calendarRepositoryUpdateDuration :: IO ()
+calendarRepositoryUpdateDuration = withEmptyCalendarDir $ \config -> do
+    let repo = filesystemCalendarRepository config
+        userId = "alice"
+    created <- runExceptT $ repoCreateCalendarItem repo userId sampleAgendaContent
+    case created of
+      Left err -> assertFailure ("Expected calendar create success, got " ++ show err)
+      Right item ->
+        case item of
+          Agenda.ServerCalendarItem {Agenda.itemId = createdId} -> do
+            updated <- runExceptT $ repoUpdateCalendarItemDuration repo userId createdId 42
+            case updated of
+              Left err -> assertFailure ("Expected calendar duration update success, got " ++ show err)
+              Right updatedItem ->
+                assertEqual "Expected calendar duration update to set actualDurationMinutes" (Just 42) (calendarActualDurationMinutes updatedItem)
+          Agenda.NewCalendarItem {} -> assertFailure "Expected created calendar item to be stored with server id"
+
+calendarRepositoryUpdateDurationMissingMapsNotFound :: IO ()
+calendarRepositoryUpdateDurationMissingMapsNotFound = withEmptyCalendarDir $ \config -> do
+    let repo = filesystemCalendarRepository config
+    result <- runExceptT $ repoUpdateCalendarItemDuration repo "alice" "missing-id" 42
+    case result of
+      Left NotFound -> assertBool "Expected NotFound for missing calendar duration update" True
+      other -> assertFailure ("Expected NotFound for missing calendar duration update, got " ++ show other)
+
 tripSharingRepositoryListsDeterministically :: IO ()
 tripSharingRepositoryListsDeterministically = withEmptyTripSharingDirs $ \shareConfig subscriptionConfig -> do
     let repo = filesystemTripSharingRepository shareConfig subscriptionConfig
@@ -546,6 +604,38 @@ tripSharingRepositoryMalformedShareFileMapsReadFailure = withEmptyTripSharingDir
       Left ReadFailure -> assertBool "Expected malformed share file to map to ReadFailure" True
       other -> assertFailure ("Expected ReadFailure for malformed share file, got " ++ show other)
 
+tripSharingRepositorySubscriptionsListDeterministically :: IO ()
+tripSharingRepositorySubscriptionsListDeterministically = withEmptyTripSharingDirs $ \shareConfig subscriptionConfig -> do
+    let repo = filesystemTripSharingRepository shareConfig subscriptionConfig
+    addFirst <- runExceptT $ repoAddSubscribedUser repo "alice" "charlie"
+    addSecond <- runExceptT $ repoAddSubscribedUser repo "alice" "bob"
+    case (addFirst, addSecond) of
+      (Right (), Right ()) -> do
+        listed <- runExceptT $ repoListSubscribedUsers repo "alice"
+        case listed of
+          Left err -> assertFailure ("Expected deterministic subscription list, got " ++ show err)
+          Right usernames -> assertEqual "Expected deterministic sorted subscription list" ["bob", "charlie"] usernames
+      _ -> assertFailure "Expected subscription additions to succeed"
+
+tripSharingRepositorySubscriptionDeleteMissingIsIdempotent :: IO ()
+tripSharingRepositorySubscriptionDeleteMissingIsIdempotent = withEmptyTripSharingDirs $ \shareConfig subscriptionConfig -> do
+    let repo = filesystemTripSharingRepository shareConfig subscriptionConfig
+    result <- runExceptT $ repoDeleteSubscribedUser repo "alice" "missing-user"
+    case result of
+      Right () -> assertBool "Expected missing subscription delete to remain idempotent" True
+      other -> assertFailure ("Expected successful missing subscription delete, got " ++ show other)
+
+tripSharingRepositoryMalformedSubscriptionFileMapsReadFailure :: IO ()
+tripSharingRepositoryMalformedSubscriptionFileMapsReadFailure = withEmptyTripSharingDirs $ \shareConfig subscriptionConfig -> do
+    let repo = filesystemTripSharingRepository shareConfig subscriptionConfig
+        malformedPath = tripSubscriptionRootPath subscriptionConfig </> "alice.json"
+    createDirectoryIfMissing True (tripSubscriptionRootPath subscriptionConfig)
+    BL8.writeFile malformedPath (BL8.pack "not-json")
+    result <- runExceptT $ repoListSubscribedUsers repo "alice"
+    case result of
+      Left ReadFailure -> assertBool "Expected malformed subscription file to map to ReadFailure" True
+      other -> assertFailure ("Expected ReadFailure for malformed subscription file, got " ++ show other)
+
 sampleAgendaContent :: Agenda.CalendarItemContent
 sampleAgendaContent = Agenda.CalendarItemContent
   { Agenda.itemType = Intention
@@ -576,6 +666,12 @@ calendarItemSortKey item =
   case item of
     Agenda.ServerCalendarItem {} -> Agenda.itemId item
     Agenda.NewCalendarItem {} -> "new"
+
+calendarActualDurationMinutes :: Agenda.CalendarItem -> Maybe Int
+calendarActualDurationMinutes item =
+  case item of
+    Agenda.ServerCalendarItem {Agenda.content = Agenda.CalendarItemContent {Agenda.actualDurationMinutes}} -> actualDurationMinutes
+    _ -> Nothing
 
 withEmptyCalendarDir :: (CalendarStorageConfig -> IO ()) -> IO ()
 withEmptyCalendarDir action = do

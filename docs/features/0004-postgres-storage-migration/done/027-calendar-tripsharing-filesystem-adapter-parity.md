@@ -31,3 +31,12 @@ Out of scope:
 2. Existing user-visible behavior remains contract-compatible.
 3. Deterministic ordering and idempotent relation semantics are preserved.
 4. Adapter error outputs are restricted to shared repository errors.
+
+## Implementation Decisions
+
+- The filesystem adapters introduced during story 025 were retained as the implementation baseline for 027.
+- 027 completion focused on parity hardening through direct repository-level tests for previously under-covered contract operations:
+  - calendar load-by-id and duration-update paths,
+  - trip-sharing subscription list/add/delete paths,
+  - malformed subscription file read-failure mapping.
+- No runtime wiring or API contract behavior was changed; this story validates and locks filesystem parity semantics while Postgres adapter stories remain pending.

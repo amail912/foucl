@@ -41,17 +41,8 @@ import Happstack.Server.Internal.Cookie (Cookie(..), SameSite(..))
 import Happstack.Server.Internal.MessageWrap (bodyInput, BodyPolicy)
 import Model (NoteContent, ChecklistContent, Content, Identifiable(..))
 import qualified AgendaModel as Agenda
-import AgendaStorage (createCalendarItem, defaultCalendarStorageConfig, deleteCalendarItem, getCalendarItems, updateCalendarItem, updateCalendarItemDuration, CalendarStorageError(..))
-import TripSharingStorage
-  ( addSharedUser
-  , addSubscribedUser
-  , defaultTripShareStorageConfig
-  , defaultTripSubscriptionStorageConfig
-  , deleteSharedUser
-  , deleteSubscribedUser
-  , getSharedUsers
-  , getSubscribedUsers
-  )
+import CalendarRepository (CalendarRepository(..), defaultCalendarRepository)
+import TripSharingRepository (TripSharingRepository(..), defaultTripSharingRepository)
 import CrudStorage (createItem, getAllItems, deleteItem, modifyItem)
 import Crud
 import NoteCrud (NoteServiceConfig(..), defaultNoteServiceConfig)
@@ -221,12 +212,15 @@ data TripWriteValidation
 tripPlaceNames :: [String]
 tripPlaceNames = map tripPlaceName tripPlacesCatalog
 
-validateTripWrite :: String -> Maybe String -> Agenda.CalendarItemContent -> IO TripWriteValidation
-validateTripWrite principalUserId mCurrentItemId content =
+validateTripWrite :: CalendarRepository -> String -> Maybe String -> Agenda.CalendarItemContent -> IO TripWriteValidation
+validateTripWrite calendarRepo principalUserId mCurrentItemId content =
   case content of
     Agenda.TripCalendarItemContent tripContent -> do
-      existingItems <- getCalendarItems defaultCalendarStorageConfig principalUserId
-      pure (validateTripContent tripPlaceNames existingItems mCurrentItemId tripContent)
+      existingItemsResult <- runExceptT (repoListCalendarItemsForUser calendarRepo principalUserId)
+      pure $
+        case existingItemsResult of
+          Left _ -> TripWriteTechnicalFailure
+          Right existingItems -> validateTripContent tripPlaceNames existingItems mCurrentItemId tripContent
     _ -> pure TripWriteValid
 
 validateTripContent :: [String] -> [Agenda.CalendarItem] -> Maybe String -> Agenda.TripItemContent -> TripWriteValidation
@@ -310,9 +304,9 @@ parsePeriodTripBounds (Just rawStart) (Just rawEnd) =
       | end <= start -> Left "end must be strictly after start"
       | otherwise -> Right (start, end)
 
-resolveVisiblePeriodTripUsers :: String -> IO (Either () [String])
-resolveVisiblePeriodTripUsers principalUserId = do
-  subscribedUsersResult <- getSubscribedUsers defaultTripSubscriptionStorageConfig principalUserId
+resolveVisiblePeriodTripUsers :: TripSharingRepository -> String -> IO (Either () [String])
+resolveVisiblePeriodTripUsers tripSharingRepo principalUserId = do
+  subscribedUsersResult <- runExceptT (repoListSubscribedUsers tripSharingRepo principalUserId)
   case subscribedUsersResult of
     Left _ -> pure (Left ())
     Right subscribedUsers -> do
@@ -322,22 +316,26 @@ resolveVisiblePeriodTripUsers principalUserId = do
         Right visibleUsers -> Right [username | (username, True) <- visibleUsers]
   where
     isVisibleToPrincipal username = do
-      sharedUsersResult <- getSharedUsers defaultTripShareStorageConfig username
+      sharedUsersResult <- runExceptT (repoListSharedUsers tripSharingRepo username)
       pure $ case sharedUsersResult of
         Left _ -> Left ()
         Right sharedUsers -> Right (username, principalUserId `elem` sharedUsers)
 
-loadPeriodTripsForUsers :: [String] -> LocalTime -> LocalTime -> IO (Either () [PeriodTripsUser])
-loadPeriodTripsForUsers usernames periodStart periodEnd = do
+loadPeriodTripsForUsers :: CalendarRepository -> [String] -> LocalTime -> LocalTime -> IO (Either () [PeriodTripsUser])
+loadPeriodTripsForUsers calendarRepo usernames periodStart periodEnd = do
   groups <- mapM buildUserGroup usernames
   pure $ fmap catMaybes (sequence groups)
   where
     buildUserGroup username = do
-      items <- getCalendarItems defaultCalendarStorageConfig username
-      pure $ case selectPeriodTrips periodStart periodEnd items of
-        Left () -> Left ()
-        Right [] -> Right Nothing
-        Right trips -> Right (Just (PeriodTripsUser username trips))
+      itemsResult <- runExceptT (repoListCalendarItemsForUser calendarRepo username)
+      pure $
+        case itemsResult of
+          Left _ -> Left ()
+          Right items ->
+            case selectPeriodTrips periodStart periodEnd items of
+              Left () -> Left ()
+              Right [] -> Right Nothing
+              Right trips -> Right (Just (PeriodTripsUser username trips))
 
 selectPeriodTrips :: LocalTime -> LocalTime -> [Agenda.CalendarItem] -> Either () [Agenda.CalendarItem]
 selectPeriodTrips periodStart periodEnd items = do
@@ -520,11 +518,13 @@ runApp = do
                       Left err -> do
                         putStrLn $ "[startup-error] " ++ err
                         exitFailure
-                      Right () ->
+                      Right () -> do
+                        let calendarRepo = defaultCalendarRepository
+                            tripSharingRepo = defaultTripSharingRepository
                         simpleHTTP nullConf { port = 8081 } $ do
                             log "Incoming request" >> log "=========================END REQUEST====================\n"
                             msum [ homePage
-                                 , apiController authRepo signupRateLimitState tmpDir appConfig sessionStore
+                                 , apiController authRepo calendarRepo tripSharingRepo signupRateLimitState tmpDir appConfig sessionStore
                                  , serveStaticResource
                                  , mzero
                                  ]
@@ -894,8 +894,8 @@ pgQuote raw = "'" ++ concatMap escape raw ++ "'"
     escape '\\' = "\\\\"
     escape c = [c]
 
-apiController :: AuthRepository -> MVar [UTCTime] -> FilePath -> AppConfig -> SessionStore -> ServerPartT IO Response
-apiController authRepo signupRateLimitState tmpDir appConfig sessionStore =
+apiController :: AuthRepository -> CalendarRepository -> TripSharingRepository -> MVar [UTCTime] -> FilePath -> AppConfig -> SessionStore -> ServerPartT IO Response
+apiController authRepo calendarRepo tripSharingRepo signupRateLimitState tmpDir appConfig sessionStore =
   let sessionCfg = sessionConfig appConfig
       bootstrapAdmin = bootstrapAdminUsername appConfig
   in dir "api" $ msum [ signupController authRepo signupRateLimitState tmpDir bootstrapAdmin
@@ -905,8 +905,8 @@ apiController authRepo signupRateLimitState tmpDir appConfig sessionStore =
                       , requireAuth sessionCfg sessionStore noteController
                       , requireAuth sessionCfg sessionStore checklistController
                       , requireAuth sessionCfg sessionStore tripPlacesController
-                      , requireAuth sessionCfg sessionStore (tripSharingController authRepo)
-                      , requireAuth sessionCfg sessionStore agendaController
+                      , requireAuth sessionCfg sessionStore (tripSharingController authRepo tripSharingRepo calendarRepo)
+                      , requireAuth sessionCfg sessionStore (agendaController calendarRepo)
                       , requireAuth sessionCfg sessionStore (adminController authRepo bootstrapAdmin)
                       ]
 
@@ -1201,8 +1201,8 @@ adminController authRepo bootstrapAdminUsername appContext@AppContext { sessionP
                      (const $ ok emptyResponse)
                      result
 
-tripSharingController :: AuthRepository -> AppContext -> ServerPartT IO Response
-tripSharingController authRepo AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
+tripSharingController :: AuthRepository -> TripSharingRepository -> CalendarRepository -> AppContext -> ServerPartT IO Response
+tripSharingController authRepo tripSharingRepo calendarRepo AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
   dir "v1" $ dir "trip-sharing" $ msum [ dir "shares" $ msum [ sharesList
                                                              , sharesAdd
                                                              , sharesDelete
@@ -1222,11 +1222,11 @@ tripSharingController authRepo AppContext { sessionPrincipal = SessionPrincipal 
       case parsePeriodTripBounds mStart mEnd of
         Left message -> badRequest message
         Right (periodStart, periodEnd) -> do
-          visibleUsersResult <- liftIO $ resolveVisiblePeriodTripUsers principalUserId
+          visibleUsersResult <- liftIO $ resolveVisiblePeriodTripUsers tripSharingRepo principalUserId
           case visibleUsersResult of
             Left () -> internalServerError emptyResponse
             Right visibleUsers -> do
-              groupsResult <- liftIO $ loadPeriodTripsForUsers visibleUsers periodStart periodEnd
+              groupsResult <- liftIO $ loadPeriodTripsForUsers calendarRepo visibleUsers periodStart periodEnd
               case groupsResult of
                 Left () -> internalServerError emptyResponse
                 Right groups -> ok (jsonResponse groups)
@@ -1234,7 +1234,7 @@ tripSharingController authRepo AppContext { sessionPrincipal = SessionPrincipal 
     sharesList = do
       nullDir
       method GET
-      result <- liftIO $ getSharedUsers defaultTripShareStorageConfig principalUserId
+      result <- liftIO $ runExceptT (repoListSharedUsers tripSharingRepo principalUserId)
       case result of
         Left _ -> internalServerError emptyResponse
         Right usernames -> ok (jsonResponse (map TripSharingUser usernames))
@@ -1257,7 +1257,7 @@ tripSharingController authRepo AppContext { sessionPrincipal = SessionPrincipal 
                   if not exists
                     then badRequest "username must reference an existing user"
                     else do
-                      result <- liftIO $ addSharedUser defaultTripShareStorageConfig principalUserId username
+                      result <- liftIO $ runExceptT (repoAddSharedUser tripSharingRepo principalUserId username)
                       case result of
                         Left _ -> internalServerError emptyResponse
                         Right () -> ok emptyResponse
@@ -1266,7 +1266,7 @@ tripSharingController authRepo AppContext { sessionPrincipal = SessionPrincipal 
       method DELETE
       path $ \username -> do
         nullDir
-        result <- liftIO $ deleteSharedUser defaultTripShareStorageConfig principalUserId username
+        result <- liftIO $ runExceptT (repoDeleteSharedUser tripSharingRepo principalUserId username)
         case result of
           Left _ -> internalServerError emptyResponse
           Right () -> ok emptyResponse
@@ -1274,7 +1274,7 @@ tripSharingController authRepo AppContext { sessionPrincipal = SessionPrincipal 
     subscriptionsList = do
       nullDir
       method GET
-      result <- liftIO $ getSubscribedUsers defaultTripSubscriptionStorageConfig principalUserId
+      result <- liftIO $ runExceptT (repoListSubscribedUsers tripSharingRepo principalUserId)
       case result of
         Left _ -> internalServerError emptyResponse
         Right usernames -> ok (jsonResponse (map TripSharingUser usernames))
@@ -1297,7 +1297,7 @@ tripSharingController authRepo AppContext { sessionPrincipal = SessionPrincipal 
                   if not exists
                     then badRequest "username must reference an existing user"
                     else do
-                      result <- liftIO $ addSubscribedUser defaultTripSubscriptionStorageConfig principalUserId username
+                      result <- liftIO $ runExceptT (repoAddSubscribedUser tripSharingRepo principalUserId username)
                       case result of
                         Left _ -> internalServerError emptyResponse
                         Right () -> ok emptyResponse
@@ -1306,13 +1306,13 @@ tripSharingController authRepo AppContext { sessionPrincipal = SessionPrincipal 
       method DELETE
       path $ \username -> do
         nullDir
-        result <- liftIO $ deleteSubscribedUser defaultTripSubscriptionStorageConfig principalUserId username
+        result <- liftIO $ runExceptT (repoDeleteSubscribedUser tripSharingRepo principalUserId username)
         case result of
           Left _ -> internalServerError emptyResponse
           Right () -> ok emptyResponse
 
-agendaController :: AppContext -> ServerPartT IO Response
-agendaController AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
+agendaController :: CalendarRepository -> AppContext -> ServerPartT IO Response
+agendaController calendarRepo AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
   dir "v1" $ dir "calendar-items" $ msum [ agendaList
                                          , agendaCreate
                                          , agendaDelete
@@ -1321,8 +1321,10 @@ agendaController AppContext { sessionPrincipal = SessionPrincipal { principalUse
     agendaList = do
       nullDir
       method GET
-      items <- liftIO $ getCalendarItems defaultCalendarStorageConfig principalUserId
-      ok (jsonResponse items)
+      result <- liftIO $ runExceptT (repoListCalendarItemsForUser calendarRepo principalUserId)
+      case result of
+        Left _ -> internalServerError emptyResponse
+        Right items -> ok (jsonResponse items)
 
     agendaCreate = do
       nullDir
@@ -1336,21 +1338,23 @@ agendaController AppContext { sessionPrincipal = SessionPrincipal { principalUse
         handleBody rqBody =
           case decode' (unBody rqBody) :: Maybe Agenda.CalendarItem of
             Just (Agenda.NewCalendarItem {Agenda.content}) -> do
-              validation <- liftIO $ validateTripWrite principalUserId Nothing content
+              validation <- liftIO $ validateTripWrite calendarRepo principalUserId Nothing content
               case validation of
                 TripWriteValid -> do
-                  created <- liftIO $ createCalendarItem defaultCalendarStorageConfig principalUserId content
-                  ok (jsonResponse created)
+                  result <- liftIO $ runExceptT (repoCreateCalendarItem calendarRepo principalUserId content)
+                  case result of
+                    Left _ -> internalServerError emptyResponse
+                    Right created -> ok (jsonResponse created)
                 TripWriteBadRequest message -> badRequest message
                 TripWriteNotFound -> notFound emptyResponse
                 TripWriteTechnicalFailure -> internalServerError emptyResponse
             Just (Agenda.ServerCalendarItem {Agenda.content, Agenda.itemId}) -> do
-              validation <- liftIO $ validateTripWrite principalUserId (Just itemId) content
+              validation <- liftIO $ validateTripWrite calendarRepo principalUserId (Just itemId) content
               case validation of
                 TripWriteValid -> do
-                  result <- liftIO $ updateCalendarItem defaultCalendarStorageConfig principalUserId itemId content
+                  result <- liftIO $ runExceptT (repoUpdateCalendarItem calendarRepo principalUserId itemId content)
                   case result of
-                    Left CalendarItemNotFound -> notFound emptyResponse
+                    Left NotFound -> notFound emptyResponse
                     Left _ -> internalServerError emptyResponse
                     Right updated -> ok (jsonResponse updated)
                 TripWriteBadRequest message -> badRequest message
@@ -1360,9 +1364,9 @@ agendaController AppContext { sessionPrincipal = SessionPrincipal { principalUse
               case decode' (unBody rqBody) :: Maybe Agenda.ValidateRequest of
                 Nothing -> badRequest "Unable to decode the body as a CalendarItem or ValidateRequest"
                 Just (Agenda.ValidateRequest itemId minutes) -> do
-                  result <- liftIO $ updateCalendarItemDuration defaultCalendarStorageConfig principalUserId itemId minutes
+                  result <- liftIO $ runExceptT (repoUpdateCalendarItemDuration calendarRepo principalUserId itemId minutes)
                   case result of
-                    Left CalendarItemNotFound -> notFound emptyResponse
+                    Left NotFound -> notFound emptyResponse
                     Left _ -> internalServerError emptyResponse
                     Right _ -> ok emptyResponse
 
@@ -1370,9 +1374,9 @@ agendaController AppContext { sessionPrincipal = SessionPrincipal { principalUse
       method DELETE
       path $ \itemId -> do
         nullDir
-        result <- liftIO $ deleteCalendarItem defaultCalendarStorageConfig principalUserId itemId
+        result <- liftIO $ runExceptT (repoDeleteCalendarItemById calendarRepo principalUserId itemId)
         case result of
-          Left CalendarItemNotFound -> notFound emptyResponse
+          Left NotFound -> notFound emptyResponse
           Left _ -> internalServerError emptyResponse
           Right () -> ok emptyResponse
 

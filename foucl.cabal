@@ -26,6 +26,8 @@ library
       , AgendaModel
       , AgendaStorage
       , TripSharingStorage
+      , CalendarRepository
+      , TripSharingRepository
       , Auth
       , AuthRepository
       , PostgresMigrations
@@ -87,6 +89,7 @@ test-suite foucl-unit-tests
     , foucl
     , HUnit ==1.6.0.0
     , directory
+    , filepath
     , transformers
     , text
     , time

@@ -39,3 +39,13 @@ Out of scope:
 2. Contract-required list ordering and visibility semantics are explicit.
 3. Shared repository error model is used and backend-specific errors are not exposed.
 4. Existing business/controller call sites can depend on contracts without HTTP behavior drift.
+
+## Implementation Decisions
+
+- New modules `CalendarRepository` and `TripSharingRepository` define persistence-agnostic repository records for both domains.
+- Filesystem-backed default repository implementations were added in these new modules by adapting existing filesystem storage modules.
+- `Lib` calendar/trip-sharing call sites were migrated to repository usage, removing direct filesystem storage imports from controller/business call paths.
+- Repository methods emit shared `RepositoryError` values (`NotFound`, `ReadFailure`, `WriteFailure`) and do not leak storage-specific error types.
+- Deterministic list behavior is explicit at repository level:
+  - calendar items are listed in stable `itemId` order,
+  - trip-sharing user lists remain stable/sorted.

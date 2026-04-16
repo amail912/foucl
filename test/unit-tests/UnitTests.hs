@@ -12,7 +12,7 @@ import Model (Identifiable(..), NoteContent(..), ChecklistContent(..), Checklist
 import System.Directory (removeDirectoryRecursive, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, getCurrentDirectory, getPermissions, setPermissions, setCurrentDirectory, Permissions(..))
 import Data.Maybe (fromJust)
 import Data.Either (isRight)
-import Data.List ((\\), sortOn, isInfixOf, isPrefixOf)
+import Data.List ((\\), sort, sortOn, isInfixOf, isPrefixOf)
 import Control.Monad (when)
 import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import Control.Monad.Trans.Except (ExceptT(..), runExceptT, throwE)
@@ -27,6 +27,8 @@ import AgendaModel (ItemStatus(..), ItemType(..))
 import qualified AgendaModel as Agenda (CalendarItem(..), CalendarItemContent(..), TripItemContent(..))
 import AgendaStorage
 import TripSharingStorage
+import CalendarRepository
+import TripSharingRepository
 import Auth
 import AuthRepository (AuthRepository(..), PersistedUser(..))
 import Repository (RepositoryError(..))
@@ -39,9 +41,10 @@ import Data.Time.Clock (addUTCTime, getCurrentTime)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import qualified Data.ByteString.Lazy.Char8 as BL8
 import qualified Data.ByteString.Lazy as BL
+import System.FilePath ((</>))
 
 runUnitTests :: IO ()
-runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, agendaStorageTests, tripSharingStorageTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionBackendConfigTests, postgresMigrationTests, sessionTests, sessionFilesystemAdapterTests, sessionPostgresRepositoryTests]
+runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, agendaStorageTests, tripSharingStorageTests, calendarRepositoryTests, tripSharingRepositoryTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionBackendConfigTests, postgresMigrationTests, sessionTests, sessionFilesystemAdapterTests, sessionPostgresRepositoryTests]
 
 runTestTTAndExit tests = do
   c <- runTestTT tests
@@ -90,6 +93,18 @@ tripSharingStorageTests = test [ "Getting shares from empty storage should give 
                                , "Subscription storage should be isolated per owner" ~: subscriptionOwnerIsolation
                                , "Subscription storage should stay independent from share storage" ~: subscriptionShareIndependence
                                ]
+
+calendarRepositoryTests = test
+  [ "Calendar repository lists items deterministically by itemId" ~: calendarRepositoryListsDeterministically
+  , "Calendar repository maps missing update to NotFound" ~: calendarRepositoryUpdateMissingMapsNotFound
+  , "Calendar repository maps missing delete to NotFound" ~: calendarRepositoryDeleteMissingMapsNotFound
+  ]
+
+tripSharingRepositoryTests = test
+  [ "Trip-sharing repository lists shares deterministically" ~: tripSharingRepositoryListsDeterministically
+  , "Trip-sharing repository keeps missing share delete idempotent" ~: tripSharingRepositoryDeleteMissingIsIdempotent
+  , "Trip-sharing repository maps malformed share file to ReadFailure" ~: tripSharingRepositoryMalformedShareFileMapsReadFailure
+  ]
 
 createTest :: ContentGen crudConfig a => crudConfig -> IO ()
 createTest config = do
@@ -453,6 +468,70 @@ subscriptionShareIndependence = withEmptyTripSharingDirs $ \shareConfig subscrip
             assertEqual "Expected subscription storage to remain independent" ["carol"] subscribed
           _ -> assertFailure "Expected both trip-sharing lists to load"
       _ -> assertFailure "Expected trip-sharing relation additions to succeed"
+
+calendarRepositoryListsDeterministically :: IO ()
+calendarRepositoryListsDeterministically = withEmptyCalendarDir $ \config -> do
+    let repo = filesystemCalendarRepository config
+        userId = "alice"
+    first <- runExceptT $ repoCreateCalendarItem repo userId sampleAgendaContent
+    second <- runExceptT $ repoCreateCalendarItem repo userId sampleTripContent
+    case (first, second) of
+      (Right _, Right _) -> do
+        listed <- runExceptT $ repoListCalendarItemsForUser repo userId
+        case listed of
+          Left err -> assertFailure ("Expected calendar repository list success, got " ++ show err)
+          Right items -> do
+            let keys = map calendarItemSortKey items
+            assertEqual "Expected calendar repository list to be deterministic by itemId" (sort keys) keys
+      _ -> assertFailure "Expected calendar repository create operations to succeed"
+
+calendarRepositoryUpdateMissingMapsNotFound :: IO ()
+calendarRepositoryUpdateMissingMapsNotFound = withEmptyCalendarDir $ \config -> do
+    let repo = filesystemCalendarRepository config
+    result <- runExceptT $ repoUpdateCalendarItem repo "alice" "missing-id" sampleAgendaContent
+    case result of
+      Left NotFound -> assertBool "Expected NotFound for missing calendar update" True
+      other -> assertFailure ("Expected NotFound for missing calendar update, got " ++ show other)
+
+calendarRepositoryDeleteMissingMapsNotFound :: IO ()
+calendarRepositoryDeleteMissingMapsNotFound = withEmptyCalendarDir $ \config -> do
+    let repo = filesystemCalendarRepository config
+    result <- runExceptT $ repoDeleteCalendarItemById repo "alice" "missing-id"
+    case result of
+      Left NotFound -> assertBool "Expected NotFound for missing calendar delete" True
+      other -> assertFailure ("Expected NotFound for missing calendar delete, got " ++ show other)
+
+tripSharingRepositoryListsDeterministically :: IO ()
+tripSharingRepositoryListsDeterministically = withEmptyTripSharingDirs $ \shareConfig subscriptionConfig -> do
+    let repo = filesystemTripSharingRepository shareConfig subscriptionConfig
+    addFirst <- runExceptT $ repoAddSharedUser repo "alice" "charlie"
+    addSecond <- runExceptT $ repoAddSharedUser repo "alice" "bob"
+    case (addFirst, addSecond) of
+      (Right (), Right ()) -> do
+        listed <- runExceptT $ repoListSharedUsers repo "alice"
+        case listed of
+          Left err -> assertFailure ("Expected deterministic share list, got " ++ show err)
+          Right usernames -> assertEqual "Expected deterministic sorted share list" ["bob", "charlie"] usernames
+      _ -> assertFailure "Expected share additions to succeed"
+
+tripSharingRepositoryDeleteMissingIsIdempotent :: IO ()
+tripSharingRepositoryDeleteMissingIsIdempotent = withEmptyTripSharingDirs $ \shareConfig subscriptionConfig -> do
+    let repo = filesystemTripSharingRepository shareConfig subscriptionConfig
+    result <- runExceptT $ repoDeleteSharedUser repo "alice" "missing-user"
+    case result of
+      Right () -> assertBool "Expected missing share delete to remain idempotent" True
+      other -> assertFailure ("Expected successful missing share delete, got " ++ show other)
+
+tripSharingRepositoryMalformedShareFileMapsReadFailure :: IO ()
+tripSharingRepositoryMalformedShareFileMapsReadFailure = withEmptyTripSharingDirs $ \shareConfig subscriptionConfig -> do
+    let repo = filesystemTripSharingRepository shareConfig subscriptionConfig
+        malformedPath = tripShareRootPath shareConfig </> "alice.json"
+    createDirectoryIfMissing True (tripShareRootPath shareConfig)
+    BL8.writeFile malformedPath (BL8.pack "not-json")
+    result <- runExceptT $ repoListSharedUsers repo "alice"
+    case result of
+      Left ReadFailure -> assertBool "Expected malformed share file to map to ReadFailure" True
+      other -> assertFailure ("Expected ReadFailure for malformed share file, got " ++ show other)
 
 sampleAgendaContent :: Agenda.CalendarItemContent
 sampleAgendaContent = Agenda.CalendarItemContent

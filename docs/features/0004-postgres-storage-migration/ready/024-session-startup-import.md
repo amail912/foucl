@@ -32,6 +32,9 @@ Add startup filesystem-to-Postgres bootstrap import for the session domain when 
   - then `session_user_bindings`.
 - Conflict decisions are deterministic (`postgres-wins` for duplicate key collisions).
 - Import path must not modify HTTP-visible session/cookie behavior.
+- Logging should mirror auth startup import conventions from 023:
+  - emit one domain overlap warning when both filesystem and Postgres contain session data,
+  - emit conflict warning entries including domain/key context for skipped filesystem conflicts.
 
 ## Dependencies And Boundaries
 

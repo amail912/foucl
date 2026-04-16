@@ -14,6 +14,7 @@ import Data.Password.Argon2 (hashPassword, mkPassword, unPasswordHash)
 import Data.Text (pack, unpack)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Network.HTTP.Simple
+import System.Directory (doesFileExist)
 import System.Exit (ExitCode(..))
 import System.Process (readProcessWithExitCode)
 import Test.Hspec
@@ -23,8 +24,40 @@ import Text.Read (readMaybe)
 runIntegrationPostgresTests :: IO ()
 runIntegrationPostgresTests = do
   assertPostgresReachable
-  hspec $ around_ withFreshPostgresFixtures $ do
-    describe "Postgres parity integration" $ do
+  hspec $ do
+    describe "Auth startup import" $ do
+      it "imports filesystem-only users and preserves postgres-conflicting users" $ do
+        fsOnlyExists <- authUserExists "startup-fs-only-user"
+        assertBool "Expected filesystem-only startup user to be imported into Postgres" fsOnlyExists
+
+        conflictHash <- fetchAuthUserPasswordHash "startup-conflict-user"
+        assertEqual "Expected conflicting startup user to keep Postgres value" "postgres-conflict-hash" conflictHash
+
+        postgresOnlyExists <- authUserExists "startup-postgres-only-user"
+        assertBool "Expected existing Postgres-only startup user to be preserved" postgresOnlyExists
+
+      it "emits startup overlap/conflict warnings in server log" $ do
+        logContent <- readStartupLog
+        assertBool
+          "Expected overlap warning log entry for auth startup import"
+          ("[startup][auth-import][warning] overlap detected" `isInfixOf` logContent)
+        assertBool
+          "Expected conflict warning log entry for startup-conflict-user"
+          ("[startup][auth-import][warning] skipping conflicting username=startup-conflict-user policy=postgres-wins" `isInfixOf` logContent)
+
+      it "remains idempotent across sandbox restart" $ do
+        countBefore <- fetchAuthUserCount
+        restartPostgresSandboxServer
+        countAfter <- fetchAuthUserCount
+        assertEqual "Expected startup import to remain idempotent after restart" countBefore countAfter
+
+        fsOnlyCount <- fetchAuthUserCountByUsername "startup-fs-only-user"
+        assertEqual "Expected exactly one imported filesystem-only startup user" 1 fsOnlyCount
+
+        conflictHash <- fetchAuthUserPasswordHash "startup-conflict-user"
+        assertEqual "Expected conflicting startup user to remain Postgres-authored after restart" "postgres-conflict-hash" conflictHash
+
+    around_ withFreshPostgresFixtures $ do
       describe "Auth parity" $ do
         it "keeps signup success/conflict semantics" $ do
           suffix <- uniqueSuffix
@@ -379,6 +412,83 @@ runPsqlScalar sqlCommand = do
     case exitCode of
       ExitSuccess -> Right out
       ExitFailure _ -> Left err
+
+authUserExists :: String -> IO Bool
+authUserExists username = do
+  scalarResult <- runPsqlScalar ("SELECT EXISTS(SELECT 1 FROM auth_users WHERE username = " ++ quoteSql username ++ ")")
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query auth user existence for '" ++ username ++ "': " ++ err) >> pure False
+    Right raw ->
+      case trimTrailingNewline raw of
+        "t" -> pure True
+        "f" -> pure False
+        value -> assertFailure ("Unexpected EXISTS value for '" ++ username ++ "': " ++ value) >> pure False
+
+fetchAuthUserPasswordHash :: String -> IO String
+fetchAuthUserPasswordHash username = do
+  scalarResult <- runPsqlScalar ("SELECT password_hash FROM auth_users WHERE username = " ++ quoteSql username)
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query password hash for '" ++ username ++ "': " ++ err) >> pure ""
+    Right raw ->
+      let value = trimTrailingNewline raw
+       in if null value
+            then assertFailure ("Expected non-empty password hash for '" ++ username ++ "'") >> pure ""
+            else pure value
+
+fetchAuthUserCount :: IO Int
+fetchAuthUserCount = do
+  scalarResult <- runPsqlScalar "SELECT COUNT(*) FROM auth_users"
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query auth user count: " ++ err) >> pure 0
+    Right raw ->
+      case readMaybe (trimTrailingNewline raw) of
+        Nothing -> assertFailure ("Unable to parse auth user count from value: " ++ raw) >> pure 0
+        Just value -> pure value
+
+fetchAuthUserCountByUsername :: String -> IO Int
+fetchAuthUserCountByUsername username = do
+  scalarResult <- runPsqlScalar ("SELECT COUNT(*) FROM auth_users WHERE username = " ++ quoteSql username)
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query auth user count for '" ++ username ++ "': " ++ err) >> pure 0
+    Right raw ->
+      case readMaybe (trimTrailingNewline raw) of
+        Nothing -> assertFailure ("Unable to parse auth user count for '" ++ username ++ "' from value: " ++ raw) >> pure 0
+        Just value -> pure value
+
+readStartupLog :: IO String
+readStartupLog = do
+  let logPath = "dist-newstyle/sandbox/foucl/.foucl/.foucl.log"
+  exists <- doesFileExist logPath
+  if not exists
+    then assertFailure ("Expected startup log file at " ++ logPath) >> pure ""
+    else readFile logPath
+
+restartPostgresSandboxServer :: IO ()
+restartPostgresSandboxServer = do
+  let cmd =
+        "FOUCL_SESSION_SECRET=dev-only-session-secret "
+          ++ "FOUCL_CONFIG_FILE=dist-newstyle/sandbox/foucl/config/app-config.auth-postgres.json "
+          ++ "FOUCL_SESSION_COOKIE_SECURE=false "
+          ++ "scripts/daemon/foucld restart "
+          ++ "--bin dist-newstyle/sandbox/foucl/foucl "
+          ++ "--pidfile dist-newstyle/sandbox/foucl/.foucl/foucl.pid"
+  (exitCode, _out, err) <- readProcessWithExitCode "/bin/bash" ["-lc", cmd] ""
+  case exitCode of
+    ExitSuccess -> waitForServerReady
+    ExitFailure _ -> assertFailure ("Failed to restart sandbox server for startup import idempotency check: " ++ err)
+
+waitForServerReady :: IO ()
+waitForServerReady = do
+  let cmd =
+        "for i in $(seq 1 40); do "
+          ++ "if curl --silent --show-error --output /dev/null --max-time 1 http://127.0.0.1:8081/; then exit 0; fi; "
+          ++ "sleep 0.25; "
+          ++ "done; "
+          ++ "exit 1"
+  (exitCode, _out, err) <- readProcessWithExitCode "/bin/bash" ["-lc", cmd] ""
+  case exitCode of
+    ExitSuccess -> pure ()
+    ExitFailure _ -> assertFailure ("Sandbox server did not become ready after restart: " ++ err)
 
 runPsqlFile :: FilePath -> IO (Either String ())
 runPsqlFile filePath = do

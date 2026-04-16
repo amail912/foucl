@@ -31,6 +31,7 @@ import Data.ByteString.Char8 (unpack)
 import Data.List (isPrefixOf, sortOn)
 import Data.Char (toLower)
 import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
+import qualified Data.Set as Set
 import Happstack.Server (FilterMonad, Response, ServerPartT, RqBody, takeRequestBody, unBody, rqBody, decodeBody, askRq, defaultBodyPolicy, nullDir, path, serveFileFrom, guessContentTypeM, mimeTypes, uriRest, nullConf, simpleHTTP, toResponse, method, ok, internalServerError, notFound, dir, Method(GET, POST, DELETE, PUT), Conf(..), addCookie, mkCookie, CookieLife(Session, Expired), getHeaderM, unauthorized, requestEntityTooLarge, look, setResponseCode)
 import qualified Happstack.Server as HServer
 import Happstack.Server.Internal.Cookie (Cookie(..), SameSite(..))
@@ -67,6 +68,7 @@ import Filesystem.Path.CurrentOS    (commonPrefix, encodeString, decodeString, c
 import Auth (AuthRequest(..), AuthRequestError(..), AuthError(..), AuthenticatedProfile(..), AuthRepository, defaultAuthRepository, createUserWithBootstrapAdmin, loadAuthenticatedProfile, signinUser, userExists, isApprovedAdmin, listPendingUsers, listApprovedUsers, approveUser, deletePendingUser, deleteApprovedUser)
 import qualified AuthRepository as AuthRepository
 import Session (SessionConfig(..), SessionPrincipal(..), SessionStore(..), defaultSessionConfig, mkFileSessionStore, mkPostgresSessionRepository, mkSessionStore, signSessionId, verifyPostgresSessionStorage, verifyAndExtractSessionId)
+import Repository (RepositoryError(..))
 
 type AppM a = ExceptT String (ServerPartT IO) a
 
@@ -503,13 +505,19 @@ runApp = do
                 exitFailure
               Right authRepo -> do
                 putStrLn ("[startup] auth backend wiring ready: " ++ renderAuthBackend selectedAuthBackend)
-                simpleHTTP nullConf { port = 8081 } $ do
-                    log "Incoming request" >> log "=========================END REQUEST====================\n"
-                    msum [ homePage
-                         , apiController authRepo signupRateLimitState tmpDir appConfig sessionStore
-                         , serveStaticResource
-                         , mzero
-                         ]
+                authImportResult <- runAuthStartupImportIfNeeded selectedAuthBackend (databaseConfig appConfig)
+                case authImportResult of
+                  Left err -> do
+                    putStrLn $ "[startup-error] " ++ err
+                    exitFailure
+                  Right () ->
+                    simpleHTTP nullConf { port = 8081 } $ do
+                        log "Incoming request" >> log "=========================END REQUEST====================\n"
+                        msum [ homePage
+                             , apiController authRepo signupRateLimitState tmpDir appConfig sessionStore
+                             , serveStaticResource
+                             , mzero
+                             ]
 
 makeAuthRepository :: AuthBackend -> Maybe DatabaseConfig -> IO (Either String AuthRepository)
 makeAuthRepository AuthBackendFilesystem _ = pure (Right defaultAuthRepository)
@@ -522,6 +530,58 @@ makeAuthRepository AuthBackendPostgres mDatabaseCfg =
       case validationResult of
         Left err -> pure (Left ("Postgres auth storage validation failed: " ++ err))
         Right () -> pure (Right (AuthRepository.postgresAuthRepository connectionString))
+
+runAuthStartupImportIfNeeded :: AuthBackend -> Maybe DatabaseConfig -> IO (Either String ())
+runAuthStartupImportIfNeeded AuthBackendFilesystem _ = pure (Right ())
+runAuthStartupImportIfNeeded AuthBackendPostgres Nothing =
+  pure (Left "Configuration database is required when auth.authBackend=postgres")
+runAuthStartupImportIfNeeded AuthBackendPostgres (Just dbCfg) = do
+  let connectionString = renderPostgresConnectionString dbCfg
+      filesystemRepo = defaultAuthRepository
+      postgresRepo = AuthRepository.postgresAuthRepository connectionString
+  filesystemUsersResult <- runExceptT (AuthRepository.repoListUsers filesystemRepo)
+  filesystemUsers <-
+    case filesystemUsersResult of
+      Right users -> pure (Right users)
+      Left StorageFailure -> do
+        putStrLn "[startup][auth-import] source users directory is missing; treating filesystem auth source as empty"
+        pure (Right [])
+      Left err -> pure (Left ("Auth startup import failed while reading filesystem users: " ++ show err))
+  case filesystemUsers of
+    Left err -> pure (Left err)
+    Right fsUsers -> do
+      postgresUsersResult <- runExceptT (AuthRepository.repoListUsers postgresRepo)
+      case postgresUsersResult of
+        Left err -> pure (Left ("Auth startup import failed while reading Postgres users: " ++ show err))
+        Right pgUsers -> do
+          let orderedFsUsers = sortOn AuthRepository.uname fsUsers
+              pgUsernames = Set.fromList (map AuthRepository.uname pgUsers)
+          when (not (null orderedFsUsers) && not (null pgUsers)) $
+            putStrLn ("[startup][auth-import][warning] overlap detected: filesystem_count=" ++ show (length orderedFsUsers) ++ " postgres_count=" ++ show (length pgUsers) ++ " conflict_policy=postgres-wins")
+          importResult <- foldM (importSingleAuthUser postgresRepo pgUsernames) (Right (0 :: Int, 0 :: Int)) orderedFsUsers
+          case importResult of
+            Left err -> pure (Left err)
+            Right (importedCount, skippedCount) -> do
+              putStrLn ("[startup][auth-import] completed filesystem_count=" ++ show (length orderedFsUsers) ++ " postgres_count=" ++ show (length pgUsers) ++ " imported=" ++ show importedCount ++ " skipped_conflicts=" ++ show skippedCount)
+              pure (Right ())
+
+importSingleAuthUser :: AuthRepository -> Set.Set String -> Either String (Int, Int) -> AuthRepository.PersistedUser -> IO (Either String (Int, Int))
+importSingleAuthUser _ _ (Left err) _ = pure (Left err)
+importSingleAuthUser postgresRepo pgUsernames (Right (importedCount, skippedCount)) fsUser =
+  if Set.member username pgUsernames
+    then do
+      putStrLn ("[startup][auth-import][warning] skipping conflicting username=" ++ username ++ " policy=postgres-wins")
+      pure (Right (importedCount, skippedCount + 1))
+    else do
+      createResult <- runExceptT (AuthRepository.repoCreateUser postgresRepo fsUser)
+      case createResult of
+        Right () -> pure (Right (importedCount + 1, skippedCount))
+        Left AlreadyExists -> do
+          putStrLn ("[startup][auth-import][warning] skipping conflicting username=" ++ username ++ " policy=postgres-wins")
+          pure (Right (importedCount, skippedCount + 1))
+        Left err -> pure (Left ("Auth startup import failed while writing username=" ++ username ++ ": " ++ show err))
+  where
+    username = AuthRepository.uname fsUser
 
 renderAuthBackend :: AuthBackend -> String
 renderAuthBackend AuthBackendFilesystem = "filesystem"

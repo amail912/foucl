@@ -59,3 +59,11 @@ Out of scope:
   - overlapping filesystem+Postgres auth data emits warning; conflicting usernames keep Postgres values,
   - repeated startup runs preserve stable end state,
   - auth import path is gated by `authBackend` value.
+
+## Implementation Decisions
+
+- Startup execution point is after auth/session backend wiring validation succeeds and before HTTP serving starts.
+- Filesystem auth source records are imported in deterministic `username` order.
+- Conflict policy is `postgres-wins`: conflicting usernames are skipped from filesystem import and logged with domain/key context.
+- Startup overlap emits a domain-level warning when both filesystem and Postgres already contain auth data.
+- In `authBackend=postgres` mode, Postgres read/write failures during startup import fail startup; missing filesystem users directory is treated as an empty source.

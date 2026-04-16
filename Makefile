@@ -1,4 +1,4 @@
-.PHONY: help lint build test ci start-sandbox restart-sandbox stop-sandbox integration-test integration-test-postgres integration-test-auth-postgres _prepare-sandbox _wait-server _prepare-postgres-test-db _write-postgres-config _start-postgres-test-db _stop-postgres-test-db
+.PHONY: help lint build test ci start-sandbox restart-sandbox stop-sandbox integration-test integration-test-postgres integration-test-auth-postgres _prepare-sandbox _wait-server _prepare-postgres-test-db _write-postgres-config _write-auth-startup-import-fixtures _start-postgres-test-db _stop-postgres-test-db
 
 SHELL := /bin/bash
 
@@ -58,7 +58,8 @@ _prepare-postgres-test-db:
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/auth/0001_auth_schema.down.sql"; \
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/auth/0001_auth_schema.up.sql"; \
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/session/0001_session_schema.up.sql"; \
-	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -c "TRUNCATE TABLE auth_users";
+	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -c "TRUNCATE TABLE auth_users"; \
+	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -c "INSERT INTO auth_users (username, password_hash, role, approved) VALUES ('startup-conflict-user', 'postgres-conflict-hash', 'admin'::auth_user_role, true), ('startup-postgres-only-user', 'postgres-only-hash', 'member'::auth_user_role, false)";
 
 _start-postgres-test-db:
 	@set -euo pipefail; \
@@ -91,6 +92,24 @@ _write-postgres-config:
 	'    "password": "foucl"' \
 	'  }' \
 	'}' > "$(SANDBOX_AUTH_PG_CONFIG)"
+
+_write-auth-startup-import-fixtures:
+	@set -euo pipefail; \
+	mkdir -p "$(SANDBOX_DIR)/data/users/startup-fs-only-user" "$(SANDBOX_DIR)/data/users/startup-conflict-user"; \
+	printf '%s\n' \
+	'{' \
+	'  "uname": "startup-fs-only-user",' \
+	'  "passwordHash": "fs-only-hash",' \
+	'  "role": "member",' \
+	'  "approvalStatus": "pending"' \
+	'}' > "$(SANDBOX_DIR)/data/users/startup-fs-only-user/profile.json"; \
+	printf '%s\n' \
+	'{' \
+	'  "uname": "startup-conflict-user",' \
+	'  "passwordHash": "fs-conflict-hash",' \
+	'  "role": "member",' \
+	'  "approvalStatus": "pending"' \
+	'}' > "$(SANDBOX_DIR)/data/users/startup-conflict-user/profile.json"
 
 _wait-server:
 	@set -euo pipefail; \
@@ -146,6 +165,7 @@ integration-test-postgres:
 	$(MAKE) --no-print-directory _start-postgres-test-db; \
 	$(MAKE) --no-print-directory _prepare-postgres-test-db; \
 	$(MAKE) --no-print-directory _write-postgres-config; \
+	$(MAKE) --no-print-directory _write-auth-startup-import-fixtures; \
 	trap '$(DAEMON_SCRIPT) stop --pidfile "$(SANDBOX_PIDFILE)" >/dev/null 2>&1 || true; $(MAKE) --no-print-directory _stop-postgres-test-db >/dev/null 2>&1 || true' EXIT INT TERM; \
 	export FOUCL_SESSION_COOKIE_SECURE="$${FOUCL_SESSION_COOKIE_SECURE:-false}"; \
 	( \

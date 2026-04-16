@@ -21,6 +21,12 @@ Implement Postgres-backed session repository behavior against the `SessionReposi
 - Adapter must preserve session semantics required by business layer for state validity handling, idle refresh/touch support, and revoke flows.
 - Adapter must not introduce backend-specific error classes.
 
+## Implementation Decisions
+
+- Runtime session domain identifiers remain `String` in business logic; repository SQL casts identifiers to/from Postgres `uuid` (`?::uuid`, `state_id::text`, `session_id::text`).
+- `sessionBackend=postgres` startup performs explicit storage validation and fails fast before serving traffic when connection/schema checks fail.
+- `repoDeleteAllUserStateBindingsForUser` remains deterministic/idempotent and succeeds even when no row exists.
+
 ## Error Mapping Contract
 
 - Duplicate record conflict -> `AlreadyExists`

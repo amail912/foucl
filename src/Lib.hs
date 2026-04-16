@@ -66,7 +66,7 @@ import Data.ByteString.Lazy.Char8 (writeFile)
 import Filesystem.Path.CurrentOS    (commonPrefix, encodeString, decodeString, collapse, append)
 import Auth (AuthRequest(..), AuthRequestError(..), AuthError(..), AuthenticatedProfile(..), AuthRepository, defaultAuthRepository, createUserWithBootstrapAdmin, loadAuthenticatedProfile, signinUser, userExists, isApprovedAdmin, listPendingUsers, listApprovedUsers, approveUser, deletePendingUser, deleteApprovedUser)
 import qualified AuthRepository as AuthRepository
-import Session (SessionConfig(..), SessionPrincipal(..), SessionStore(..), defaultSessionConfig, mkFileSessionStore, signSessionId, verifyAndExtractSessionId)
+import Session (SessionConfig(..), SessionPrincipal(..), SessionStore(..), defaultSessionConfig, mkFileSessionStore, mkPostgresSessionRepository, mkSessionStore, signSessionId, verifyPostgresSessionStorage, verifyAndExtractSessionId)
 
 type AppM a = ExceptT String (ServerPartT IO) a
 
@@ -534,10 +534,15 @@ renderSessionBackend SessionBackendPostgres = "postgres"
 makeSessionStore :: SessionBackend -> Maybe DatabaseConfig -> FilePath -> SessionConfig -> IO (Either String SessionStore)
 makeSessionStore SessionBackendFilesystem _ cd sessionCfg =
   Right <$> mkFileSessionStore (cd </> "data" </> "sessions") sessionCfg
-makeSessionStore SessionBackendPostgres mDatabaseCfg _ _ =
+makeSessionStore SessionBackendPostgres mDatabaseCfg _ sessionCfg =
   case mDatabaseCfg of
     Nothing -> pure (Left "Configuration database is required when session.sessionBackend=postgres")
-    Just _ -> pure (Left "Postgres session backend wiring is not available yet; implement story 020")
+    Just dbCfg -> do
+      let connectionString = renderPostgresConnectionString dbCfg
+      validationResult <- verifyPostgresSessionStorage connectionString
+      case validationResult of
+        Left err -> pure (Left ("Postgres session storage validation failed: " ++ err))
+        Right () -> pure (Right (mkSessionStore (mkPostgresSessionRepository connectionString) sessionCfg))
 
 validateDatabaseConfig :: DatabaseConfigFile -> Either String DatabaseConfig
 validateDatabaseConfig DatabaseConfigFile {databaseHostFile, databasePortFile, databaseNameFile, databaseUserFile, databasePasswordFile}

@@ -12,7 +12,7 @@ import Model (Identifiable(..), NoteContent(..), ChecklistContent(..), Checklist
 import System.Directory (removeDirectoryRecursive, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, getCurrentDirectory, getPermissions, setPermissions, setCurrentDirectory, Permissions(..))
 import Data.Maybe (fromJust)
 import Data.Either (isRight)
-import Data.List ((\\), sortOn, isInfixOf)
+import Data.List ((\\), sortOn, isInfixOf, isPrefixOf)
 import Control.Monad (when)
 import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import Control.Monad.Trans.Except (ExceptT(..), runExceptT, throwE)
@@ -41,7 +41,7 @@ import qualified Data.ByteString.Lazy.Char8 as BL8
 import qualified Data.ByteString.Lazy as BL
 
 runUnitTests :: IO ()
-runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, agendaStorageTests, tripSharingStorageTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionBackendConfigTests, postgresMigrationTests, sessionTests, sessionFilesystemAdapterTests]
+runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, agendaStorageTests, tripSharingStorageTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionBackendConfigTests, postgresMigrationTests, sessionTests, sessionFilesystemAdapterTests, sessionPostgresRepositoryTests]
 
 runTestTTAndExit tests = do
   c <- runTestTT tests
@@ -944,7 +944,7 @@ sessionBackendConfigTests = test
   , "Session backend rejects invalid values" ~: sessionBackendRejectsInvalid
   , "Session backend wiring composes filesystem store" ~: sessionBackendWiringComposesFilesystem
   , "Session backend postgres mode requires database config" ~: sessionBackendPostgresRequiresDatabaseConfig
-  , "Session backend postgres mode fails fast before adapter implementation" ~: sessionBackendPostgresFailsFastWithoutAdapter
+  , "Session backend postgres mode fails fast on storage validation failure" ~: sessionBackendPostgresFailsFastOnStorageValidationFailure
   ]
 
 authBackendDefaultsToFilesystem :: IO ()
@@ -1018,21 +1018,21 @@ sessionBackendPostgresRequiresDatabaseConfig = do
     Left err -> assertFailure ("Unexpected postgres missing-db error: " ++ err)
     Right _ -> assertFailure "Expected postgres session backend without database config to fail"
 
-sessionBackendPostgresFailsFastWithoutAdapter :: IO ()
-sessionBackendPostgresFailsFastWithoutAdapter = do
+sessionBackendPostgresFailsFastOnStorageValidationFailure :: IO ()
+sessionBackendPostgresFailsFastOnStorageValidationFailure = do
   let dbCfg = DatabaseConfig
         { databaseHost = "127.0.0.1"
-        , databasePort = 5432
+        , databasePort = 1
         , databaseName = "foucl"
         , databaseUser = "foucl"
         , databasePassword = "foucl"
         }
   result <- makeSessionStore SessionBackendPostgres (Just dbCfg) "." testSessionConfig
   case result of
-    Left "Postgres session backend wiring is not available yet; implement story 020" ->
-      assertBool "Expected explicit postgres session fail-fast before adapter implementation" True
+    Left err | "Postgres session storage validation failed:" `isPrefixOf` err ->
+      assertBool "Expected postgres session storage validation failure" True
     Left err -> assertFailure ("Unexpected postgres session wiring error: " ++ err)
-    Right _ -> assertFailure "Expected postgres session backend to fail fast before story 020"
+    Right _ -> assertFailure "Expected postgres session backend to fail fast when storage validation fails"
 
 testSessionConfig :: SessionConfig
 testSessionConfig =
@@ -1348,6 +1348,14 @@ sessionFilesystemAdapterTests = test
   , "Session FS adapter delete-all binding should be deterministic and idempotent" ~: fsRepoDeleteAllBindingsIsIdempotent
   ]
 
+sessionPostgresRepositoryTests = test
+  [ "Session Postgres adapter should round-trip state/handle/binding lifecycle" ~: pgRepoRoundTripLifecycle
+  , "Session Postgres adapter should return AlreadyExists on duplicate handle create" ~: pgRepoDuplicateHandleCreateReturnsAlreadyExists
+  , "Session Postgres adapter should return NotFound for missing handle load" ~: pgRepoMissingHandleLoadReturnsNotFound
+  , "Session Postgres adapter should return NotFound for missing state update" ~: pgRepoMissingStateUpdateReturnsNotFound
+  , "Session Postgres adapter delete-all binding should stay deterministic and idempotent" ~: pgRepoDeleteAllBindingsIsIdempotent
+  ]
+
 signedTokenRejectsTampering :: IO ()
 signedTokenRejectsTampering = do
     let token = signSessionId "secret" "sid-1"
@@ -1588,3 +1596,181 @@ withSessionRepoSandbox label action = do
     action baseDir repo `finally` do
       exists <- doesDirectoryExist baseDir
       when exists $ removeDirectoryRecursive baseDir
+
+pgRepoRoundTripLifecycle :: IO ()
+pgRepoRoundTripLifecycle =
+  withOptionalPostgresContext "Skipping Session Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runSessionMigrationsAtPath "." schemaConn MigrateUp
+      case upResult of
+        Left err -> assertFailure ("Expected session migration up success, got " ++ err)
+        Right () -> do
+          now <- getCurrentTime
+          let repo = mkPostgresSessionRepository schemaConn
+              st = SessionState
+                { stateId = "11111111-1111-1111-1111-111111111111"
+                , stateUserId = "pg-user"
+                , stateCreatedAt = now
+                , stateExpiresAt = addUTCTime 30 now
+                , stateIdleExpiresAt = addUTCTime 30 now
+                , stateRevokedAt = Nothing
+                }
+              handle = SessionHandle
+                { handleSessionId = "22222222-2222-2222-2222-222222222222"
+                , handleStateId = stateId st
+                , handleIssuedAt = now
+                , handleRevokedAt = Nothing
+                }
+          createState <- runExceptT $ repoCreateSessionState repo st
+          case createState of
+            Left err -> assertFailure ("Expected state create success, got " ++ show err)
+            Right () -> pure ()
+
+          createHandle <- runExceptT $ repoCreateSessionHandle repo handle
+          case createHandle of
+            Left err -> assertFailure ("Expected handle create success, got " ++ show err)
+            Right () -> pure ()
+
+          createBinding <- runExceptT $ repoCreateUserStateBinding repo "pg-user" UserStateBinding { boundStateId = stateId st }
+          case createBinding of
+            Left err -> assertFailure ("Expected binding create success, got " ++ show err)
+            Right () -> pure ()
+
+          loadedState <- runExceptT $ repoLoadSessionStateByStateId repo (stateId st)
+          case loadedState of
+            Left err -> assertFailure ("Expected load state success, got " ++ show err)
+            Right loaded ->
+              assertEqual "Expected loaded state id to match" (stateId st) (stateId loaded)
+
+          loadedHandle <- runExceptT $ repoLoadSessionHandleBySessionId repo (handleSessionId handle)
+          case loadedHandle of
+            Left err -> assertFailure ("Expected load handle success, got " ++ show err)
+            Right loaded ->
+              assertEqual "Expected loaded handle session id to match" (handleSessionId handle) (handleSessionId loaded)
+
+          loadedBinding <- runExceptT $ repoLoadUserStateBindingByUserId repo "pg-user"
+          case loadedBinding of
+            Left err -> assertFailure ("Expected load binding success, got " ++ show err)
+            Right loaded ->
+              assertEqual "Expected loaded binding state id to match" (stateId st) (boundStateId loaded)
+
+pgRepoDuplicateHandleCreateReturnsAlreadyExists :: IO ()
+pgRepoDuplicateHandleCreateReturnsAlreadyExists =
+  withOptionalPostgresContext "Skipping Session Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runSessionMigrationsAtPath "." schemaConn MigrateUp
+      case upResult of
+        Left err -> assertFailure ("Expected session migration up success, got " ++ err)
+        Right () -> do
+          now <- getCurrentTime
+          let repo = mkPostgresSessionRepository schemaConn
+              st = SessionState
+                { stateId = "33333333-3333-3333-3333-333333333333"
+                , stateUserId = "dup-user"
+                , stateCreatedAt = now
+                , stateExpiresAt = addUTCTime 30 now
+                , stateIdleExpiresAt = addUTCTime 30 now
+                , stateRevokedAt = Nothing
+                }
+              handle = SessionHandle
+                { handleSessionId = "44444444-4444-4444-4444-444444444444"
+                , handleStateId = stateId st
+                , handleIssuedAt = now
+                , handleRevokedAt = Nothing
+                }
+          _ <- runExceptT $ repoCreateSessionState repo st
+          first <- runExceptT $ repoCreateSessionHandle repo handle
+          case first of
+            Left err -> assertFailure ("Expected first handle create success, got " ++ show err)
+            Right () -> pure ()
+          second <- runExceptT $ repoCreateSessionHandle repo handle
+          case second of
+            Left AlreadyExists -> assertBool "Expected AlreadyExists on duplicate handle create" True
+            Left err -> assertFailure ("Expected AlreadyExists, got " ++ show err)
+            Right () -> assertFailure "Expected duplicate handle create to fail"
+
+pgRepoMissingHandleLoadReturnsNotFound :: IO ()
+pgRepoMissingHandleLoadReturnsNotFound =
+  withOptionalPostgresContext "Skipping Session Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runSessionMigrationsAtPath "." schemaConn MigrateUp
+      case upResult of
+        Left err -> assertFailure ("Expected session migration up success, got " ++ err)
+        Right () -> do
+          let repo = mkPostgresSessionRepository schemaConn
+          result <- runExceptT $ repoLoadSessionHandleBySessionId repo "55555555-5555-5555-5555-555555555555"
+          case result of
+            Left NotFound -> assertBool "Expected NotFound for missing handle load" True
+            Left err -> assertFailure ("Expected NotFound, got " ++ show err)
+            Right _ -> assertFailure "Expected missing handle load to fail"
+
+pgRepoMissingStateUpdateReturnsNotFound :: IO ()
+pgRepoMissingStateUpdateReturnsNotFound =
+  withOptionalPostgresContext "Skipping Session Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runSessionMigrationsAtPath "." schemaConn MigrateUp
+      case upResult of
+        Left err -> assertFailure ("Expected session migration up success, got " ++ err)
+        Right () -> do
+          now <- getCurrentTime
+          let repo = mkPostgresSessionRepository schemaConn
+              st = SessionState
+                { stateId = "66666666-6666-6666-6666-666666666666"
+                , stateUserId = "missing-update-user"
+                , stateCreatedAt = now
+                , stateExpiresAt = addUTCTime 30 now
+                , stateIdleExpiresAt = addUTCTime 30 now
+                , stateRevokedAt = Nothing
+                }
+          result <- runExceptT $ repoUpdateSessionState repo st
+          case result of
+            Left NotFound -> assertBool "Expected NotFound for missing state update" True
+            Left err -> assertFailure ("Expected NotFound, got " ++ show err)
+            Right () -> assertFailure "Expected missing state update to fail"
+
+pgRepoDeleteAllBindingsIsIdempotent :: IO ()
+pgRepoDeleteAllBindingsIsIdempotent =
+  withOptionalPostgresContext "Skipping Session Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runSessionMigrationsAtPath "." schemaConn MigrateUp
+      case upResult of
+        Left err -> assertFailure ("Expected session migration up success, got " ++ err)
+        Right () -> do
+          now <- getCurrentTime
+          let repo = mkPostgresSessionRepository schemaConn
+              st = SessionState
+                { stateId = "77777777-7777-7777-7777-777777777777"
+                , stateUserId = "idempotent-user"
+                , stateCreatedAt = now
+                , stateExpiresAt = addUTCTime 30 now
+                , stateIdleExpiresAt = addUTCTime 30 now
+                , stateRevokedAt = Nothing
+                }
+          _ <- runExceptT $ repoCreateSessionState repo st
+          first <- runExceptT $ repoDeleteAllUserStateBindingsForUser repo "idempotent-user"
+          case first of
+            Left err -> assertFailure ("Expected first delete-all to succeed, got " ++ show err)
+            Right () -> pure ()
+          createResult <- runExceptT $ repoCreateUserStateBinding repo "idempotent-user" UserStateBinding { boundStateId = stateId st }
+          case createResult of
+            Left err -> assertFailure ("Expected binding create success, got " ++ show err)
+            Right () -> pure ()
+          second <- runExceptT $ repoDeleteAllUserStateBindingsForUser repo "idempotent-user"
+          case second of
+            Left err -> assertFailure ("Expected second delete-all to succeed, got " ++ show err)
+            Right () -> pure ()
+          third <- runExceptT $ repoDeleteAllUserStateBindingsForUser repo "idempotent-user"
+          case third of
+            Left err -> assertFailure ("Expected third delete-all to succeed, got " ++ show err)
+            Right () -> pure ()
+
+withIsolatedPostgresSchemaConn :: PostgresTestContext -> (String -> IO ()) -> IO ()
+withIsolatedPostgresSchemaConn ctx action = do
+    createResult <- runSqlCommandCtx ctx ("CREATE SCHEMA " ++ ctxSchemaName ctx)
+    case createResult of
+      Left err -> assertFailure ("Failed creating schema: " ++ err)
+      Right () -> do
+        let schemaConnUrl = ctxConnUrl ctx ++ " options='-c search_path=" ++ ctxSchemaName ctx ++ ",public'"
+        action schemaConnUrl `finally` do
+          _ <- runSqlCommandCtx ctx ("DROP SCHEMA IF EXISTS " ++ ctxSchemaName ctx ++ " CASCADE")
+          pure ()

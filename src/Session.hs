@@ -13,7 +13,9 @@ module Session
   , SessionStore(..)
   , mkSessionStore
   , mkFilesystemSessionRepository
+  , mkPostgresSessionRepository
   , mkFileSessionStore
+  , verifyPostgresSessionStorage
   , signSessionId
   , verifyAndExtractSessionId
   ) where
@@ -32,6 +34,18 @@ import Data.Maybe (isJust, isNothing)
 import Data.Time.Clock (UTCTime, NominalDiffTime, addUTCTime, getCurrentTime)
 import Data.UUID (toString)
 import Data.UUID.V4 (nextRandom)
+import Data.Int (Int64)
+import qualified Data.ByteString.Char8 as BS8
+import Database.PostgreSQL.Simple
+  ( Connection
+  , SqlError(..)
+  , Only(..)
+  , close
+  , connectPostgreSQL
+  , execute
+  , query
+  , query_
+  )
 import Repository (RepositoryError(..))
 import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile, renameFile)
 import System.FilePath ((</>), takeDirectory)
@@ -181,6 +195,47 @@ mkFilesystemSessionRepository baseDir =
     , repoDeleteUserStateBindingByUserId = fsDeleteUserStateBindingByUserId baseDir
     , repoDeleteAllUserStateBindingsForUser = fsDeleteAllUserStateBindingsForUser baseDir
     }
+
+mkPostgresSessionRepository :: String -> SessionRepository
+mkPostgresSessionRepository connectionString =
+  SessionRepository
+    { repoCreateSessionHandle = pgCreateSessionHandle connectionString
+    , repoLoadSessionHandleBySessionId = pgLoadSessionHandleBySessionId connectionString
+    , repoUpdateSessionHandle = pgUpdateSessionHandle connectionString
+    , repoDeleteSessionHandleBySessionId = pgDeleteSessionHandleBySessionId connectionString
+    , repoCreateSessionState = pgCreateSessionState connectionString
+    , repoLoadSessionStateByStateId = pgLoadSessionStateByStateId connectionString
+    , repoUpdateSessionState = pgUpdateSessionState connectionString
+    , repoDeleteSessionStateByStateId = pgDeleteSessionStateByStateId connectionString
+    , repoCreateUserStateBinding = pgCreateUserStateBinding connectionString
+    , repoLoadUserStateBindingByUserId = pgLoadUserStateBindingByUserId connectionString
+    , repoDeleteUserStateBindingByUserId = pgDeleteUserStateBindingByUserId connectionString
+    , repoDeleteAllUserStateBindingsForUser = pgDeleteAllUserStateBindingsForUser connectionString
+    }
+
+verifyPostgresSessionStorage :: String -> IO (Either String ())
+verifyPostgresSessionStorage connectionString = do
+  connResult <- Ex.try (connectPostgreSQL (BS8.pack connectionString)) :: IO (Either Ex.SomeException Connection)
+  case connResult of
+    Left err -> pure (Left ("Unable to connect to Postgres: " ++ show err))
+    Right conn -> do
+      pingResult <- Ex.try (query_ conn "SELECT 1" :: IO [Only Int]) :: IO (Either Ex.SomeException [Only Int])
+      statesResult <- Ex.try (query_ conn "SELECT state_id::text, user_id, created_at, expires_at, idle_expires_at, revoked_at FROM session_states LIMIT 0" :: IO [(String, String, UTCTime, UTCTime, UTCTime, Maybe UTCTime)]) :: IO (Either Ex.SomeException [(String, String, UTCTime, UTCTime, UTCTime, Maybe UTCTime)])
+      handlesResult <- Ex.try (query_ conn "SELECT session_id::text, state_id::text, issued_at, revoked_at FROM session_handles LIMIT 0" :: IO [(String, String, UTCTime, Maybe UTCTime)]) :: IO (Either Ex.SomeException [(String, String, UTCTime, Maybe UTCTime)])
+      bindingsResult <- Ex.try (query_ conn "SELECT user_id, state_id::text FROM session_user_bindings LIMIT 0" :: IO [(String, String)]) :: IO (Either Ex.SomeException [(String, String)])
+      close conn
+      case pingResult of
+        Left err -> pure (Left ("Postgres ping query failed: " ++ show err))
+        Right _ ->
+          case statesResult of
+            Left err -> pure (Left ("Session schema check failed for session_states: " ++ show err))
+            Right _ ->
+              case handlesResult of
+                Left err -> pure (Left ("Session schema check failed for session_handles: " ++ show err))
+                Right _ ->
+                  case bindingsResult of
+                    Left err -> pure (Left ("Session schema check failed for session_user_bindings: " ++ show err))
+                    Right _ -> pure (Right ())
 
 createSessionForUserImpl :: SessionRepository -> SessionConfig -> String -> IO String
 createSessionForUserImpl repo config userId = do
@@ -447,6 +502,201 @@ writeJsonAtomic path value = do
   BL.hPut h (encode value)
   hClose h
   renameFile tmpPath path
+
+withPgConnection :: String -> RepositoryError -> (Connection -> ExceptT RepositoryError IO a) -> ExceptT RepositoryError IO a
+withPgConnection connectionString connectionError action = do
+  connResult <- liftIO $ Ex.try (connectPostgreSQL (BS8.pack connectionString)) :: ExceptT RepositoryError IO (Either Ex.SomeException Connection)
+  case connResult of
+    Left _ -> throwError connectionError
+    Right conn -> do
+      runResult <- liftIO (runExceptT (action conn))
+      _ <- liftIO $ Ex.try (close conn) :: ExceptT RepositoryError IO (Either Ex.SomeException ())
+      either throwError pure runResult
+
+pgCreateSessionHandle :: String -> SessionHandle -> ExceptT RepositoryError IO ()
+pgCreateSessionHandle connectionString SessionHandle {handleSessionId, handleStateId, handleIssuedAt, handleRevokedAt} =
+  withPgConnection connectionString StorageFailure $ \conn -> do
+    writeResult <- liftIO (Ex.try
+      (execute
+        conn
+        "INSERT INTO session_handles (session_id, state_id, issued_at, revoked_at) VALUES (?::uuid, ?::uuid, ?, ?)"
+        (handleSessionId, handleStateId, handleIssuedAt, handleRevokedAt))
+      :: IO (Either Ex.SomeException Int64))
+    case writeResult of
+      Left err -> throwError (mapWriteException err)
+      Right _ -> pure ()
+
+pgLoadSessionHandleBySessionId :: String -> String -> ExceptT RepositoryError IO SessionHandle
+pgLoadSessionHandleBySessionId connectionString sid =
+  withPgConnection connectionString StorageFailure $ \conn -> do
+    readResult <- liftIO (Ex.try
+      (query
+        conn
+        "SELECT session_id::text, state_id::text, issued_at, revoked_at FROM session_handles WHERE session_id = ?::uuid"
+        (Only sid))
+      :: IO (Either Ex.SomeException [(String, String, UTCTime, Maybe UTCTime)]))
+    case readResult of
+      Left err -> throwError (mapReadException err)
+      Right [] -> throwError NotFound
+      Right ((dbSessionId, dbStateId, dbIssuedAt, dbRevokedAt):_) ->
+        pure SessionHandle
+          { handleSessionId = dbSessionId
+          , handleStateId = dbStateId
+          , handleIssuedAt = dbIssuedAt
+          , handleRevokedAt = dbRevokedAt
+          }
+
+pgUpdateSessionHandle :: String -> SessionHandle -> ExceptT RepositoryError IO ()
+pgUpdateSessionHandle connectionString SessionHandle {handleSessionId, handleStateId, handleIssuedAt, handleRevokedAt} =
+  withPgConnection connectionString StorageFailure $ \conn -> do
+    writeResult <- liftIO (Ex.try
+      (execute
+        conn
+        "UPDATE session_handles SET state_id = ?::uuid, issued_at = ?, revoked_at = ? WHERE session_id = ?::uuid"
+        (handleStateId, handleIssuedAt, handleRevokedAt, handleSessionId))
+      :: IO (Either Ex.SomeException Int64))
+    case writeResult of
+      Left err -> throwError (mapWriteException err)
+      Right affected -> if affected == 0 then throwError NotFound else pure ()
+
+pgDeleteSessionHandleBySessionId :: String -> String -> ExceptT RepositoryError IO ()
+pgDeleteSessionHandleBySessionId connectionString sid =
+  withPgConnection connectionString StorageFailure $ \conn -> do
+    writeResult <- liftIO (Ex.try
+      (execute conn "DELETE FROM session_handles WHERE session_id = ?::uuid" (Only sid))
+      :: IO (Either Ex.SomeException Int64))
+    case writeResult of
+      Left err -> throwError (mapWriteException err)
+      Right affected -> if affected == 0 then throwError NotFound else pure ()
+
+pgCreateSessionState :: String -> SessionState -> ExceptT RepositoryError IO ()
+pgCreateSessionState connectionString SessionState {stateId, stateUserId, stateCreatedAt, stateExpiresAt, stateIdleExpiresAt, stateRevokedAt} =
+  withPgConnection connectionString StorageFailure $ \conn -> do
+    writeResult <- liftIO (Ex.try
+      (execute
+        conn
+        "INSERT INTO session_states (state_id, user_id, created_at, expires_at, idle_expires_at, revoked_at) VALUES (?::uuid, ?, ?, ?, ?, ?)"
+        (stateId, stateUserId, stateCreatedAt, stateExpiresAt, stateIdleExpiresAt, stateRevokedAt))
+      :: IO (Either Ex.SomeException Int64))
+    case writeResult of
+      Left err -> throwError (mapWriteException err)
+      Right _ -> pure ()
+
+pgLoadSessionStateByStateId :: String -> String -> ExceptT RepositoryError IO SessionState
+pgLoadSessionStateByStateId connectionString stId =
+  withPgConnection connectionString StorageFailure $ \conn -> do
+    readResult <- liftIO (Ex.try
+      (query
+        conn
+        "SELECT state_id::text, user_id, created_at, expires_at, idle_expires_at, revoked_at FROM session_states WHERE state_id = ?::uuid"
+        (Only stId))
+      :: IO (Either Ex.SomeException [(String, String, UTCTime, UTCTime, UTCTime, Maybe UTCTime)]))
+    case readResult of
+      Left err -> throwError (mapReadException err)
+      Right [] -> throwError NotFound
+      Right ((dbStateId, dbUserId, dbCreatedAt, dbExpiresAt, dbIdleExpiresAt, dbRevokedAt):_) ->
+        pure SessionState
+          { stateId = dbStateId
+          , stateUserId = dbUserId
+          , stateCreatedAt = dbCreatedAt
+          , stateExpiresAt = dbExpiresAt
+          , stateIdleExpiresAt = dbIdleExpiresAt
+          , stateRevokedAt = dbRevokedAt
+          }
+
+pgUpdateSessionState :: String -> SessionState -> ExceptT RepositoryError IO ()
+pgUpdateSessionState connectionString SessionState {stateId, stateUserId, stateCreatedAt, stateExpiresAt, stateIdleExpiresAt, stateRevokedAt} =
+  withPgConnection connectionString StorageFailure $ \conn -> do
+    writeResult <- liftIO (Ex.try
+      (execute
+        conn
+        "UPDATE session_states SET user_id = ?, created_at = ?, expires_at = ?, idle_expires_at = ?, revoked_at = ? WHERE state_id = ?::uuid"
+        (stateUserId, stateCreatedAt, stateExpiresAt, stateIdleExpiresAt, stateRevokedAt, stateId))
+      :: IO (Either Ex.SomeException Int64))
+    case writeResult of
+      Left err -> throwError (mapWriteException err)
+      Right affected -> if affected == 0 then throwError NotFound else pure ()
+
+pgDeleteSessionStateByStateId :: String -> String -> ExceptT RepositoryError IO ()
+pgDeleteSessionStateByStateId connectionString stId =
+  withPgConnection connectionString StorageFailure $ \conn -> do
+    writeResult <- liftIO (Ex.try
+      (execute conn "DELETE FROM session_states WHERE state_id = ?::uuid" (Only stId))
+      :: IO (Either Ex.SomeException Int64))
+    case writeResult of
+      Left err -> throwError (mapWriteException err)
+      Right affected -> if affected == 0 then throwError NotFound else pure ()
+
+pgCreateUserStateBinding :: String -> String -> UserStateBinding -> ExceptT RepositoryError IO ()
+pgCreateUserStateBinding connectionString userId UserStateBinding {boundStateId} =
+  withPgConnection connectionString StorageFailure $ \conn -> do
+    writeResult <- liftIO (Ex.try
+      (execute
+        conn
+        "INSERT INTO session_user_bindings (user_id, state_id) VALUES (?, ?::uuid)"
+        (userId, boundStateId))
+      :: IO (Either Ex.SomeException Int64))
+    case writeResult of
+      Left err -> throwError (mapWriteException err)
+      Right _ -> pure ()
+
+pgLoadUserStateBindingByUserId :: String -> String -> ExceptT RepositoryError IO UserStateBinding
+pgLoadUserStateBindingByUserId connectionString userId =
+  withPgConnection connectionString StorageFailure $ \conn -> do
+    readResult <- liftIO (Ex.try
+      (query
+        conn
+        "SELECT state_id::text FROM session_user_bindings WHERE user_id = ?"
+        (Only userId))
+      :: IO (Either Ex.SomeException [Only String]))
+    case readResult of
+      Left err -> throwError (mapReadException err)
+      Right [] -> throwError NotFound
+      Right (Only dbStateId:_) -> pure UserStateBinding {boundStateId = dbStateId}
+
+pgDeleteUserStateBindingByUserId :: String -> String -> ExceptT RepositoryError IO ()
+pgDeleteUserStateBindingByUserId connectionString userId =
+  withPgConnection connectionString StorageFailure $ \conn -> do
+    writeResult <- liftIO (Ex.try
+      (execute conn "DELETE FROM session_user_bindings WHERE user_id = ?" (Only userId))
+      :: IO (Either Ex.SomeException Int64))
+    case writeResult of
+      Left err -> throwError (mapWriteException err)
+      Right affected -> if affected == 0 then throwError NotFound else pure ()
+
+pgDeleteAllUserStateBindingsForUser :: String -> String -> ExceptT RepositoryError IO ()
+pgDeleteAllUserStateBindingsForUser connectionString userId =
+  withPgConnection connectionString StorageFailure $ \conn -> do
+    writeResult <- liftIO (Ex.try
+      (execute conn "DELETE FROM session_user_bindings WHERE user_id = ?" (Only userId))
+      :: IO (Either Ex.SomeException Int64))
+    case writeResult of
+      Left err -> throwError (mapWriteException err)
+      Right _ -> pure ()
+
+mapReadException :: Ex.SomeException -> RepositoryError
+mapReadException ex =
+  case Ex.fromException ex :: Maybe SqlError of
+    Just sqlErr ->
+      if isStorageSqlError sqlErr
+        then StorageFailure
+        else ReadFailure
+    Nothing -> StorageFailure
+
+mapWriteException :: Ex.SomeException -> RepositoryError
+mapWriteException ex =
+  case Ex.fromException ex :: Maybe SqlError of
+    Just sqlErr
+      | isUniqueViolation sqlErr -> AlreadyExists
+      | isStorageSqlError sqlErr -> StorageFailure
+      | otherwise -> WriteFailure
+    Nothing -> StorageFailure
+
+isUniqueViolation :: SqlError -> Bool
+isUniqueViolation sqlErr = sqlState sqlErr == BS8.pack "23505"
+
+isStorageSqlError :: SqlError -> Bool
+isStorageSqlError sqlErr = "08" `BS8.isPrefixOf` sqlState sqlErr
 
 signSessionId :: String -> String -> String
 signSessionId secret sid = sid ++ "." ++ signature

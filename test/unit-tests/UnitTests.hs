@@ -41,7 +41,7 @@ import qualified Data.ByteString.Lazy.Char8 as BL8
 import qualified Data.ByteString.Lazy as BL
 
 runUnitTests :: IO ()
-runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, agendaStorageTests, tripSharingStorageTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionBackendConfigTests, postgresMigrationTests, sessionTests]
+runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, agendaStorageTests, tripSharingStorageTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionBackendConfigTests, postgresMigrationTests, sessionTests, sessionFilesystemAdapterTests]
 
 runTestTTAndExit tests = do
   c <- runTestTT tests
@@ -1222,6 +1222,15 @@ sessionTests = test [ "Signed token should reject tampering" ~: signedTokenRejec
                     , "Revoke-all should stay successful when binding delete returns NotFound" ~: revokeAllIgnoresMissingBindingDelete
                     ]
 
+sessionFilesystemAdapterTests = test
+  [ "Session FS adapter should return AlreadyExists on duplicate handle create" ~: fsRepoDuplicateHandleCreateReturnsAlreadyExists
+  , "Session FS adapter should return NotFound for missing handle load" ~: fsRepoMissingHandleLoadReturnsNotFound
+  , "Session FS adapter should return NotFound for missing state update" ~: fsRepoMissingStateUpdateReturnsNotFound
+  , "Session FS adapter should return ReadFailure for malformed state JSON" ~: fsRepoMalformedStateReturnsReadFailure
+  , "Session FS adapter should return AlreadyExists on duplicate binding create" ~: fsRepoDuplicateBindingCreateReturnsAlreadyExists
+  , "Session FS adapter delete-all binding should be deterministic and idempotent" ~: fsRepoDeleteAllBindingsIsIdempotent
+  ]
+
 signedTokenRejectsTampering :: IO ()
 signedTokenRejectsTampering = do
     let token = signSessionId "secret" "sid-1"
@@ -1363,3 +1372,102 @@ revokeAllIgnoresMissingBindingDelete = do
           }
     revoked <- revokeAllForSession store "sid-revoke-all"
     assertBool "Revoke-all should remain successful when binding delete reports NotFound" revoked
+
+fsRepoDuplicateHandleCreateReturnsAlreadyExists :: IO ()
+fsRepoDuplicateHandleCreateReturnsAlreadyExists = withSessionRepoSandbox "dup-handle" $ \baseDir repo -> do
+    now <- getCurrentTime
+    let handle = SessionHandle
+          { handleSessionId = "dup-handle-sid"
+          , handleStateId = "dup-handle-state"
+          , handleIssuedAt = now
+          , handleRevokedAt = Nothing
+          }
+    first <- runExceptT $ repoCreateSessionHandle repo handle
+    case first of
+      Left err -> assertFailure ("Expected first handle create success, got " ++ show err)
+      Right () -> pure ()
+    second <- runExceptT $ repoCreateSessionHandle repo handle
+    case second of
+      Left AlreadyExists -> assertBool "Expected AlreadyExists for duplicate handle create" True
+      Left err -> assertFailure ("Expected AlreadyExists, got " ++ show err)
+      Right () -> assertFailure "Expected duplicate handle create to fail"
+
+fsRepoMissingHandleLoadReturnsNotFound :: IO ()
+fsRepoMissingHandleLoadReturnsNotFound = withSessionRepoSandbox "missing-handle" $ \_ repo -> do
+    result <- runExceptT $ repoLoadSessionHandleBySessionId repo "missing-handle"
+    case result of
+      Left NotFound -> assertBool "Expected NotFound for missing handle load" True
+      Left err -> assertFailure ("Expected NotFound, got " ++ show err)
+      Right _ -> assertFailure "Expected missing handle load to fail"
+
+fsRepoMissingStateUpdateReturnsNotFound :: IO ()
+fsRepoMissingStateUpdateReturnsNotFound = withSessionRepoSandbox "missing-state-update" $ \_ repo -> do
+    now <- getCurrentTime
+    let st = SessionState
+          { stateId = "missing-state"
+          , stateUserId = "missing-user"
+          , stateCreatedAt = now
+          , stateExpiresAt = addUTCTime 30 now
+          , stateIdleExpiresAt = addUTCTime 30 now
+          , stateRevokedAt = Nothing
+          }
+    result <- runExceptT $ repoUpdateSessionState repo st
+    case result of
+      Left NotFound -> assertBool "Expected NotFound for missing state update" True
+      Left err -> assertFailure ("Expected NotFound, got " ++ show err)
+      Right () -> assertFailure "Expected missing state update to fail"
+
+fsRepoMalformedStateReturnsReadFailure :: IO ()
+fsRepoMalformedStateReturnsReadFailure = withSessionRepoSandbox "malformed-state" $ \baseDir repo -> do
+    let path = baseDir ++ "/states/malformed-state.json"
+    BL8.writeFile path (BL8.pack "{not-valid-json")
+    result <- runExceptT $ repoLoadSessionStateByStateId repo "malformed-state"
+    case result of
+      Left ReadFailure -> assertBool "Expected ReadFailure for malformed state JSON" True
+      Left err -> assertFailure ("Expected ReadFailure, got " ++ show err)
+      Right _ -> assertFailure "Expected malformed state load to fail"
+
+fsRepoDuplicateBindingCreateReturnsAlreadyExists :: IO ()
+fsRepoDuplicateBindingCreateReturnsAlreadyExists = withSessionRepoSandbox "dup-binding" $ \_ repo -> do
+    let binding = UserStateBinding { boundStateId = "dup-binding-state" }
+    first <- runExceptT $ repoCreateUserStateBinding repo "dup-user" binding
+    case first of
+      Left err -> assertFailure ("Expected first binding create success, got " ++ show err)
+      Right () -> pure ()
+    second <- runExceptT $ repoCreateUserStateBinding repo "dup-user" binding
+    case second of
+      Left AlreadyExists -> assertBool "Expected AlreadyExists for duplicate binding create" True
+      Left err -> assertFailure ("Expected AlreadyExists, got " ++ show err)
+      Right () -> assertFailure "Expected duplicate binding create to fail"
+
+fsRepoDeleteAllBindingsIsIdempotent :: IO ()
+fsRepoDeleteAllBindingsIsIdempotent = withSessionRepoSandbox "delete-all-idempotent" $ \_ repo -> do
+    first <- runExceptT $ repoDeleteAllUserStateBindingsForUser repo "idempotent-user"
+    case first of
+      Left err -> assertFailure ("Expected first delete-all to succeed, got " ++ show err)
+      Right () -> pure ()
+    createResult <- runExceptT $ repoCreateUserStateBinding repo "idempotent-user" UserStateBinding { boundStateId = "state-1" }
+    case createResult of
+      Left err -> assertFailure ("Expected binding create success, got " ++ show err)
+      Right () -> pure ()
+    second <- runExceptT $ repoDeleteAllUserStateBindingsForUser repo "idempotent-user"
+    case second of
+      Left err -> assertFailure ("Expected second delete-all to succeed, got " ++ show err)
+      Right () -> pure ()
+    third <- runExceptT $ repoDeleteAllUserStateBindingsForUser repo "idempotent-user"
+    case third of
+      Left err -> assertFailure ("Expected third delete-all to succeed, got " ++ show err)
+      Right () -> pure ()
+
+withSessionRepoSandbox :: String -> (FilePath -> SessionRepository -> IO ()) -> IO ()
+withSessionRepoSandbox label action = do
+    cd <- getCurrentDirectory
+    nonce <- round . (* 1000000) <$> getPOSIXTime
+    let baseDir = cd ++ "/dist-newstyle/sandbox/session-repo-tests/" ++ label ++ "-" ++ show (nonce :: Integer)
+    createDirectoryIfMissing True (baseDir ++ "/handles")
+    createDirectoryIfMissing True (baseDir ++ "/states")
+    createDirectoryIfMissing True (baseDir ++ "/users")
+    let repo = mkFilesystemSessionRepository baseDir
+    action baseDir repo `finally` do
+      exists <- doesDirectoryExist baseDir
+      when exists $ removeDirectoryRecursive baseDir

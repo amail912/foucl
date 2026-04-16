@@ -12,6 +12,7 @@ module Session
   , SessionRepository(..)
   , SessionStore(..)
   , mkSessionStore
+  , mkFilesystemSessionRepository
   , mkFileSessionStore
   , signSessionId
   , verifyAndExtractSessionId

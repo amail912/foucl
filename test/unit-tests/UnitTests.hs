@@ -54,6 +54,7 @@ import Lib
   , makeNoteRepository
   , makeChecklistRepository
   , DatabaseConfig(..)
+  , startupMigrationDomainsForBackends
   )
 import PostgresMigrations
   ( MigrationDirection(..)
@@ -74,7 +75,7 @@ import qualified Data.ByteString.Lazy as BL
 import System.FilePath ((</>))
 
 runUnitTests :: IO ()
-runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, notesChecklistRepositoryContractTests, agendaStorageTests, tripSharingStorageTests, calendarRepositoryTests, tripSharingRepositoryTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionBackendConfigTests, calendarBackendConfigTests, tripSharingBackendConfigTests, noteBackendConfigTests, checklistBackendConfigTests, postgresMigrationTests, sessionTests, sessionFilesystemAdapterTests, sessionPostgresRepositoryTests, calendarPostgresRepositoryTests, tripSharingPostgresRepositoryTests, notePostgresRepositoryTests, checklistPostgresRepositoryTests]
+runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, notesChecklistRepositoryContractTests, agendaStorageTests, tripSharingStorageTests, calendarRepositoryTests, tripSharingRepositoryTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionBackendConfigTests, calendarBackendConfigTests, tripSharingBackendConfigTests, noteBackendConfigTests, checklistBackendConfigTests, startupMigrationDomainSelectionTests, postgresMigrationTests, sessionTests, sessionFilesystemAdapterTests, sessionPostgresRepositoryTests, calendarPostgresRepositoryTests, tripSharingPostgresRepositoryTests, notePostgresRepositoryTests, checklistPostgresRepositoryTests]
 
 runTestTTAndExit tests = do
   c <- runTestTT tests
@@ -1279,6 +1280,12 @@ checklistBackendConfigTests = test
   , "Checklist backend postgres mode fails fast on storage validation failure" ~: checklistBackendPostgresFailsFastOnStorageValidationFailure
   ]
 
+startupMigrationDomainSelectionTests = test
+  [ "Startup migration domains are empty when all backends are filesystem" ~: startupMigrationDomainsFilesystemOnly
+  , "Startup migration domains follow fixed ordering for mixed backends" ~: startupMigrationDomainsMixedBackends
+  , "Startup migration domains include every domain when all backends are postgres" ~: startupMigrationDomainsAllPostgres
+  ]
+
 authBackendDefaultsToFilesystem :: IO ()
 authBackendDefaultsToFilesystem =
   case parseAuthBackend Nothing of
@@ -1629,6 +1636,45 @@ checklistBackendPostgresFailsFastOnStorageValidationFailure = do
       assertBool "Expected postgres checklist storage validation failure" True
     Left err -> assertFailure ("Unexpected postgres checklist wiring error: " ++ err)
     Right _ -> assertFailure "Expected postgres checklist backend to fail fast when storage validation fails"
+
+startupMigrationDomainsFilesystemOnly :: IO ()
+startupMigrationDomainsFilesystemOnly =
+  assertEqual
+    "Expected no startup migration domains in filesystem-only mode"
+    []
+    (startupMigrationDomainsForBackends
+      AuthBackendFilesystem
+      SessionBackendFilesystem
+      CalendarBackendFilesystem
+      TripSharingBackendFilesystem
+      NoteBackendFilesystem
+      ChecklistBackendFilesystem)
+
+startupMigrationDomainsMixedBackends :: IO ()
+startupMigrationDomainsMixedBackends =
+  assertEqual
+    "Expected startup migration domains to preserve canonical order for mixed backends"
+    ["auth", "calendar", "note"]
+    (startupMigrationDomainsForBackends
+      AuthBackendPostgres
+      SessionBackendFilesystem
+      CalendarBackendPostgres
+      TripSharingBackendFilesystem
+      NoteBackendPostgres
+      ChecklistBackendFilesystem)
+
+startupMigrationDomainsAllPostgres :: IO ()
+startupMigrationDomainsAllPostgres =
+  assertEqual
+    "Expected startup migration domains to include every postgres-backed domain"
+    ["auth", "session", "calendar", "trip-sharing", "note", "checklist"]
+    (startupMigrationDomainsForBackends
+      AuthBackendPostgres
+      SessionBackendPostgres
+      CalendarBackendPostgres
+      TripSharingBackendPostgres
+      NoteBackendPostgres
+      ChecklistBackendPostgres)
 
 testSessionConfig :: SessionConfig
 testSessionConfig =

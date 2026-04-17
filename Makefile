@@ -49,6 +49,7 @@ _prepare-sandbox:
 	built_exe="$$(cabal list-bin exe:foucl | tail -n 1)"; \
 	rm -rf "$(SANDBOX_DIR)"; \
 	mkdir -p "$(SANDBOX_DIR)/data/note" "$(SANDBOX_DIR)/data/checklist" "$(SANDBOX_DIR)/data/users" "$(SANDBOX_DIR)/data/calendar-items"; \
+	cp -R "$(CURDIR)/db" "$(SANDBOX_DIR)/db"; \
 	cp "$$built_exe" "$(SANDBOX_EXE)"; \
 	chmod +x "$(SANDBOX_EXE)"
 
@@ -60,13 +61,7 @@ _prepare-postgres-test-db:
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/calendar/0001_calendar_schema.down.sql"; \
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/session/0001_session_schema.down.sql"; \
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/auth/0001_auth_schema.down.sql"; \
-	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/auth/0001_auth_schema.up.sql"; \
-	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/session/0001_session_schema.up.sql"; \
-	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/calendar/0001_calendar_schema.up.sql"; \
-	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/trip-sharing/0001_trip_sharing_schema.up.sql"; \
-	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/note/0001_note_schema.up.sql"; \
-	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/checklist/0001_checklist_schema.up.sql"; \
-	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -c "TRUNCATE TABLE auth_users, session_handles, session_user_bindings, session_states, calendar_items, trip_shares, trip_subscriptions, note_items, checklist_items";
+	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -c "DROP TABLE IF EXISTS schema_migrations";
 
 _start-postgres-test-db:
 	@set -euo pipefail; \

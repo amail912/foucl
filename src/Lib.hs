@@ -23,6 +23,7 @@ module Lib
     , makeNoteRepository
     , makeChecklistRepository
     , DatabaseConfig(..)
+    , startupMigrationDomainsForBackends
     ) where
 
 import Prelude hiding (log, writeFile)
@@ -90,6 +91,15 @@ import Session (SessionConfig(..), SessionPrincipal(..), SessionStore(..), Sessi
 import Repository (RepositoryError(..))
 import Database.PostgreSQL.Simple (Connection, Only(..), SqlError(..), close, connectPostgreSQL, execute, query, query_)
 import Database.PostgreSQL.Simple.Types (PGArray(..))
+import PostgresMigrations
+  ( MigrationDirection(..)
+  , runAuthMigrationsAtPath
+  , runSessionMigrationsAtPath
+  , runCalendarMigrationsAtPath
+  , runTripSharingMigrationsAtPath
+  , runNoteMigrationsAtPath
+  , runChecklistMigrationsAtPath
+  )
 
 type AppM a = ExceptT String (ServerPartT IO) a
 
@@ -597,6 +607,20 @@ runApp = do
         case databaseConfig appConfig of
           Nothing -> pure ()
           Just dbCfg -> putStrLn ("[startup] database target: " ++ renderDatabaseTarget dbCfg)
+        migrationsResult <-
+          runStartupMigrationsIfNeeded
+            selectedAuthBackend
+            selectedSessionBackend
+            selectedCalendarBackend
+            selectedTripSharingBackend
+            selectedNoteBackend
+            selectedChecklistBackend
+            (databaseConfig appConfig)
+        case migrationsResult of
+          Left err -> do
+            putStrLn $ "[startup-error] " ++ err
+            exitFailure
+          Right () -> pure ()
         sessionStoreResult <- makeSessionStore selectedSessionBackend (databaseConfig appConfig) cd sessionCfg
         case sessionStoreResult of
           Left err -> do
@@ -686,6 +710,65 @@ runApp = do
                                                          , serveStaticResource
                                                          , mzero
                                                          ]
+
+startupMigrationDomainsForBackends
+  :: AuthBackend
+  -> SessionBackend
+  -> CalendarBackend
+  -> TripSharingBackend
+  -> NoteBackend
+  -> ChecklistBackend
+  -> [String]
+startupMigrationDomainsForBackends authMode sessionMode calendarMode tripSharingMode noteMode checklistMode =
+  concat
+    [ if authMode == AuthBackendPostgres then ["auth"] else []
+    , if sessionMode == SessionBackendPostgres then ["session"] else []
+    , if calendarMode == CalendarBackendPostgres then ["calendar"] else []
+    , if tripSharingMode == TripSharingBackendPostgres then ["trip-sharing"] else []
+    , if noteMode == NoteBackendPostgres then ["note"] else []
+    , if checklistMode == ChecklistBackendPostgres then ["checklist"] else []
+    ]
+
+runStartupMigrationsIfNeeded
+  :: AuthBackend
+  -> SessionBackend
+  -> CalendarBackend
+  -> TripSharingBackend
+  -> NoteBackend
+  -> ChecklistBackend
+  -> Maybe DatabaseConfig
+  -> IO (Either String ())
+runStartupMigrationsIfNeeded authMode sessionMode calendarMode tripSharingMode noteMode checklistMode mDatabaseCfg = do
+  let domains = startupMigrationDomainsForBackends authMode sessionMode calendarMode tripSharingMode noteMode checklistMode
+  case (domains, mDatabaseCfg) of
+    ([], _) -> pure (Right ())
+    (_, Nothing) -> pure (Left "Configuration database is required when any backend uses postgres")
+    (_, Just dbCfg) -> do
+      let connectionString = renderPostgresConnectionString dbCfg
+      putStrLn ("[startup][migrations] running domains=" ++ intercalate "," domains ++ " direction=MigrateUp")
+      runDomains "." connectionString domains
+  where
+    runDomains _ _ [] = pure (Right ())
+    runDomains basePath connectionString (domain:rest) = do
+      result <- runDomainMigration basePath connectionString domain
+      case result of
+        Left err -> pure (Left err)
+        Right () -> runDomains basePath connectionString rest
+
+runDomainMigration :: FilePath -> String -> String -> IO (Either String ())
+runDomainMigration basePath connectionString domain = do
+  result <-
+    case domain of
+      "auth" -> runAuthMigrationsAtPath basePath connectionString MigrateUp
+      "session" -> runSessionMigrationsAtPath basePath connectionString MigrateUp
+      "calendar" -> runCalendarMigrationsAtPath basePath connectionString MigrateUp
+      "trip-sharing" -> runTripSharingMigrationsAtPath basePath connectionString MigrateUp
+      "note" -> runNoteMigrationsAtPath basePath connectionString MigrateUp
+      "checklist" -> runChecklistMigrationsAtPath basePath connectionString MigrateUp
+      _ -> pure (Left ("Unsupported migration domain: " ++ domain))
+  case result of
+    Left err -> pure (Left ("Startup migrations failed for domain=" ++ domain ++ ": " ++ err))
+    Right () -> pure (Right ())
 
 makeAuthRepository :: AuthBackend -> Maybe DatabaseConfig -> IO (Either String AuthRepository)
 makeAuthRepository AuthBackendFilesystem _ = pure (Right defaultAuthRepository)

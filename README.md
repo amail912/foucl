@@ -17,6 +17,7 @@ Required config fields:
   - `database.name`
   - `database.user`
   - `database.password`
+- When using `noteBackend = "postgres"` or `checklistBackend = "postgres"`, the same top-level `database` object is required.
 
 ## API
 

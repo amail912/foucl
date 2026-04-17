@@ -44,9 +44,15 @@ import Lib
   , parseCalendarBackend
   , TripSharingBackend(..)
   , parseTripSharingBackend
+  , NoteBackend(..)
+  , parseNoteBackend
+  , ChecklistBackend(..)
+  , parseChecklistBackend
   , makeSessionStore
   , makeCalendarRepository
   , makeTripSharingRepository
+  , makeNoteRepository
+  , makeChecklistRepository
   , DatabaseConfig(..)
   )
 import PostgresMigrations
@@ -66,7 +72,7 @@ import qualified Data.ByteString.Lazy as BL
 import System.FilePath ((</>))
 
 runUnitTests :: IO ()
-runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, notesChecklistRepositoryContractTests, agendaStorageTests, tripSharingStorageTests, calendarRepositoryTests, tripSharingRepositoryTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionBackendConfigTests, calendarBackendConfigTests, tripSharingBackendConfigTests, postgresMigrationTests, sessionTests, sessionFilesystemAdapterTests, sessionPostgresRepositoryTests, calendarPostgresRepositoryTests, tripSharingPostgresRepositoryTests]
+runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, notesChecklistRepositoryContractTests, agendaStorageTests, tripSharingStorageTests, calendarRepositoryTests, tripSharingRepositoryTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionBackendConfigTests, calendarBackendConfigTests, tripSharingBackendConfigTests, noteBackendConfigTests, checklistBackendConfigTests, postgresMigrationTests, sessionTests, sessionFilesystemAdapterTests, sessionPostgresRepositoryTests, calendarPostgresRepositoryTests, tripSharingPostgresRepositoryTests]
 
 runTestTTAndExit tests = do
   c <- runTestTT tests
@@ -1251,6 +1257,26 @@ tripSharingBackendConfigTests = test
   , "Trip-sharing backend postgres mode fails fast on storage validation failure" ~: tripSharingBackendPostgresFailsFastOnStorageValidationFailure
   ]
 
+noteBackendConfigTests = test
+  [ "Note backend defaults to filesystem when omitted" ~: noteBackendDefaultsToFilesystem
+  , "Note backend accepts filesystem" ~: noteBackendAcceptsFilesystem
+  , "Note backend accepts postgres" ~: noteBackendAcceptsPostgres
+  , "Note backend rejects invalid values" ~: noteBackendRejectsInvalid
+  , "Note backend wiring composes filesystem repository" ~: noteBackendWiringComposesFilesystem
+  , "Note backend postgres mode requires database config" ~: noteBackendPostgresRequiresDatabaseConfig
+  , "Note backend postgres mode fails fast before adapter implementation" ~: noteBackendPostgresFailsFastBeforeAdapterImplementation
+  ]
+
+checklistBackendConfigTests = test
+  [ "Checklist backend defaults to filesystem when omitted" ~: checklistBackendDefaultsToFilesystem
+  , "Checklist backend accepts filesystem" ~: checklistBackendAcceptsFilesystem
+  , "Checklist backend accepts postgres" ~: checklistBackendAcceptsPostgres
+  , "Checklist backend rejects invalid values" ~: checklistBackendRejectsInvalid
+  , "Checklist backend wiring composes filesystem repository" ~: checklistBackendWiringComposesFilesystem
+  , "Checklist backend postgres mode requires database config" ~: checklistBackendPostgresRequiresDatabaseConfig
+  , "Checklist backend postgres mode fails fast before adapter implementation" ~: checklistBackendPostgresFailsFastBeforeAdapterImplementation
+  ]
+
 authBackendDefaultsToFilesystem :: IO ()
 authBackendDefaultsToFilesystem =
   case parseAuthBackend Nothing of
@@ -1469,6 +1495,138 @@ tripSharingBackendPostgresFailsFastOnStorageValidationFailure = do
       assertBool "Expected postgres trip-sharing storage validation failure" True
     Left err -> assertFailure ("Unexpected postgres trip-sharing wiring error: " ++ err)
     Right _ -> assertFailure "Expected postgres trip-sharing backend to fail fast when storage validation fails"
+
+noteBackendDefaultsToFilesystem :: IO ()
+noteBackendDefaultsToFilesystem =
+  case parseNoteBackend Nothing of
+    Right NoteBackendFilesystem -> assertBool "Expected filesystem default" True
+    _ -> assertFailure "Expected omitted note backend to default to filesystem"
+
+noteBackendAcceptsFilesystem :: IO ()
+noteBackendAcceptsFilesystem =
+  case parseNoteBackend (Just "filesystem") of
+    Right NoteBackendFilesystem -> assertBool "Expected filesystem note backend" True
+    _ -> assertFailure "Expected filesystem note backend to be accepted"
+
+noteBackendAcceptsPostgres :: IO ()
+noteBackendAcceptsPostgres =
+  case parseNoteBackend (Just "postgres") of
+    Right NoteBackendPostgres -> assertBool "Expected postgres note backend" True
+    _ -> assertFailure "Expected postgres note backend to be accepted"
+
+noteBackendRejectsInvalid :: IO ()
+noteBackendRejectsInvalid =
+  case parseNoteBackend (Just "sqlite") of
+    Left "Configuration noteBackend must be one of: filesystem, postgres" ->
+      assertBool "Expected invalid note backend rejection" True
+    _ -> assertFailure "Expected invalid note backend value to be rejected"
+
+noteBackendWiringComposesFilesystem :: IO ()
+noteBackendWiringComposesFilesystem = withBackendSandbox "note-backend-fs-wiring" $ do
+  result <- makeNoteRepository NoteBackendFilesystem Nothing
+  case result of
+    Left err -> assertFailure ("Expected filesystem note backend wiring success, got " ++ err)
+    Right repo -> do
+      createResult <- runExceptT $ repoCreateItem repo (NoteContent (Just "note-backend-title") "note-backend-content")
+      case createResult of
+        Left err -> assertFailure ("Expected note create through wired filesystem repository, got " ++ show err)
+        Right _ -> do
+          listed <- runExceptT $ repoListItems repo
+          case listed of
+            Left err -> assertFailure ("Expected note list through wired filesystem repository, got " ++ show err)
+            Right [_] -> assertBool "Expected one note from filesystem repository wiring" True
+            Right notes -> assertFailure ("Expected one note, got " ++ show notes)
+
+noteBackendPostgresRequiresDatabaseConfig :: IO ()
+noteBackendPostgresRequiresDatabaseConfig = do
+  result <- makeNoteRepository NoteBackendPostgres Nothing
+  case result of
+    Left "Configuration database is required when noteBackend=postgres" ->
+      assertBool "Expected missing database config rejection for postgres note backend" True
+    Left err -> assertFailure ("Unexpected postgres note missing-db error: " ++ err)
+    Right _ -> assertFailure "Expected postgres note backend without database config to fail"
+
+noteBackendPostgresFailsFastBeforeAdapterImplementation :: IO ()
+noteBackendPostgresFailsFastBeforeAdapterImplementation = do
+  let dbCfg = DatabaseConfig
+        { databaseHost = "127.0.0.1"
+        , databasePort = 5432
+        , databaseName = "foucl"
+        , databaseUser = "foucl"
+        , databasePassword = "foucl"
+        }
+  result <- makeNoteRepository NoteBackendPostgres (Just dbCfg)
+  case result of
+    Left "Postgres note backend wiring is not implemented yet" ->
+      assertBool "Expected postgres note backend to fail fast before adapter implementation" True
+    Left err -> assertFailure ("Unexpected postgres note wiring error: " ++ err)
+    Right _ -> assertFailure "Expected postgres note backend wiring to fail fast before adapter implementation"
+
+checklistBackendDefaultsToFilesystem :: IO ()
+checklistBackendDefaultsToFilesystem =
+  case parseChecklistBackend Nothing of
+    Right ChecklistBackendFilesystem -> assertBool "Expected filesystem default" True
+    _ -> assertFailure "Expected omitted checklist backend to default to filesystem"
+
+checklistBackendAcceptsFilesystem :: IO ()
+checklistBackendAcceptsFilesystem =
+  case parseChecklistBackend (Just "filesystem") of
+    Right ChecklistBackendFilesystem -> assertBool "Expected filesystem checklist backend" True
+    _ -> assertFailure "Expected filesystem checklist backend to be accepted"
+
+checklistBackendAcceptsPostgres :: IO ()
+checklistBackendAcceptsPostgres =
+  case parseChecklistBackend (Just "postgres") of
+    Right ChecklistBackendPostgres -> assertBool "Expected postgres checklist backend" True
+    _ -> assertFailure "Expected postgres checklist backend to be accepted"
+
+checklistBackendRejectsInvalid :: IO ()
+checklistBackendRejectsInvalid =
+  case parseChecklistBackend (Just "sqlite") of
+    Left "Configuration checklistBackend must be one of: filesystem, postgres" ->
+      assertBool "Expected invalid checklist backend rejection" True
+    _ -> assertFailure "Expected invalid checklist backend value to be rejected"
+
+checklistBackendWiringComposesFilesystem :: IO ()
+checklistBackendWiringComposesFilesystem = withBackendSandbox "checklist-backend-fs-wiring" $ do
+  result <- makeChecklistRepository ChecklistBackendFilesystem Nothing
+  case result of
+    Left err -> assertFailure ("Expected filesystem checklist backend wiring success, got " ++ err)
+    Right repo -> do
+      createResult <- runExceptT $ repoCreateItem repo (ChecklistContent "checklist-backend-name" [ChecklistItem "item1" False])
+      case createResult of
+        Left err -> assertFailure ("Expected checklist create through wired filesystem repository, got " ++ show err)
+        Right _ -> do
+          listed <- runExceptT $ repoListItems repo
+          case listed of
+            Left err -> assertFailure ("Expected checklist list through wired filesystem repository, got " ++ show err)
+            Right [_] -> assertBool "Expected one checklist from filesystem repository wiring" True
+            Right checklists -> assertFailure ("Expected one checklist, got " ++ show checklists)
+
+checklistBackendPostgresRequiresDatabaseConfig :: IO ()
+checklistBackendPostgresRequiresDatabaseConfig = do
+  result <- makeChecklistRepository ChecklistBackendPostgres Nothing
+  case result of
+    Left "Configuration database is required when checklistBackend=postgres" ->
+      assertBool "Expected missing database config rejection for postgres checklist backend" True
+    Left err -> assertFailure ("Unexpected postgres checklist missing-db error: " ++ err)
+    Right _ -> assertFailure "Expected postgres checklist backend without database config to fail"
+
+checklistBackendPostgresFailsFastBeforeAdapterImplementation :: IO ()
+checklistBackendPostgresFailsFastBeforeAdapterImplementation = do
+  let dbCfg = DatabaseConfig
+        { databaseHost = "127.0.0.1"
+        , databasePort = 5432
+        , databaseName = "foucl"
+        , databaseUser = "foucl"
+        , databasePassword = "foucl"
+        }
+  result <- makeChecklistRepository ChecklistBackendPostgres (Just dbCfg)
+  case result of
+    Left "Postgres checklist backend wiring is not implemented yet" ->
+      assertBool "Expected postgres checklist backend to fail fast before adapter implementation" True
+    Left err -> assertFailure ("Unexpected postgres checklist wiring error: " ++ err)
+    Right _ -> assertFailure "Expected postgres checklist backend wiring to fail fast before adapter implementation"
 
 testSessionConfig :: SessionConfig
 testSessionConfig =

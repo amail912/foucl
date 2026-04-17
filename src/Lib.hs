@@ -13,9 +13,15 @@ module Lib
     , parseCalendarBackend
     , TripSharingBackend(..)
     , parseTripSharingBackend
+    , NoteBackend(..)
+    , parseNoteBackend
+    , ChecklistBackend(..)
+    , parseChecklistBackend
     , makeSessionStore
     , makeCalendarRepository
     , makeTripSharingRepository
+    , makeNoteRepository
+    , makeChecklistRepository
     , DatabaseConfig(..)
     ) where
 
@@ -55,6 +61,8 @@ import NoteCrud (NoteServiceConfig(..), defaultNoteServiceConfig)
 import ChecklistCrud (ChecklistServiceConfig(..), defaultChecklistServiceConfig)
 import NotesChecklistRepository
   ( NotesChecklistRepository(..)
+  , NoteRepository
+  , ChecklistRepository
   , defaultChecklistRepository
   , defaultNoteRepository
   )
@@ -109,6 +117,8 @@ data AppConfigFile = AppConfigFile
   , appAuth :: AuthConfigFile
   , appCalendarBackendFile :: !(Maybe String)
   , appTripSharingBackendFile :: !(Maybe String)
+  , appNoteBackendFile :: !(Maybe String)
+  , appChecklistBackendFile :: !(Maybe String)
   , appDatabase :: !(Maybe DatabaseConfigFile)
   } deriving (Generic)
 
@@ -118,6 +128,8 @@ instance FromJSON AppConfigFile where
     <*> v .: "auth"
     <*> v .:? "calendarBackend"
     <*> v .:? "tripSharingBackend"
+    <*> v .:? "noteBackend"
+    <*> v .:? "checklistBackend"
     <*> v .:? "database"
 
 data DatabaseConfigFile = DatabaseConfigFile
@@ -143,6 +155,8 @@ data AppConfig = AppConfig
   , authBackend :: AuthBackend
   , calendarBackend :: CalendarBackend
   , tripSharingBackend :: TripSharingBackend
+  , noteBackend :: NoteBackend
+  , checklistBackend :: ChecklistBackend
   , databaseConfig :: !(Maybe DatabaseConfig)
   }
 
@@ -172,6 +186,16 @@ data CalendarBackend
 data TripSharingBackend
   = TripSharingBackendFilesystem
   | TripSharingBackendPostgres
+  deriving (Eq, Show)
+
+data NoteBackend
+  = NoteBackendFilesystem
+  | NoteBackendPostgres
+  deriving (Eq, Show)
+
+data ChecklistBackend
+  = ChecklistBackendFilesystem
+  | ChecklistBackendPostgres
   deriving (Eq, Show)
 
 newtype AppContext = AppContext
@@ -451,7 +475,7 @@ loadAppConfigFromFile = do
                 Right appConfig -> pure $ Right appConfig
 
 toAppConfig :: String -> AppConfigFile -> Maybe Bool -> Either String AppConfig
-toAppConfig secret AppConfigFile {appSession = SessionConfigFile {sessionCookieNameFile, sessionAbsoluteTtlSecondsFile, sessionIdleTtlSecondsFile, sessionBackendFile}, appAuth = AuthConfigFile {bootstrapAdminUsernameFile, authBackendFile}, appCalendarBackendFile, appTripSharingBackendFile, appDatabase} mCookieSecure
+toAppConfig secret AppConfigFile {appSession = SessionConfigFile {sessionCookieNameFile, sessionAbsoluteTtlSecondsFile, sessionIdleTtlSecondsFile, sessionBackendFile}, appAuth = AuthConfigFile {bootstrapAdminUsernameFile, authBackendFile}, appCalendarBackendFile, appTripSharingBackendFile, appNoteBackendFile, appChecklistBackendFile, appDatabase} mCookieSecure
   | null bootstrapAdminUsernameFile = Left "Configuration auth.bootstrapAdminUsername cannot be empty"
   | otherwise =
       case parseSessionBackend sessionBackendFile of
@@ -466,25 +490,33 @@ toAppConfig secret AppConfigFile {appSession = SessionConfigFile {sessionCookieN
                   case parseTripSharingBackend appTripSharingBackendFile of
                     Left err -> Left err
                     Right selectedTripSharingBackend ->
-                      case traverse validateDatabaseConfig appDatabase of
+                      case parseNoteBackend appNoteBackendFile of
                         Left err -> Left err
-                        Right parsedDatabaseConfig ->
-                          Right AppConfig
-                            { sessionConfig =
-                                defaultSessionConfig
-                                  { sessionSecret = secret
-                                  , sessionCookieName = fromMaybe (sessionCookieName defaultSessionConfig) sessionCookieNameFile
-                                  , sessionAbsoluteTtlSeconds = fromIntegral (fromMaybe (round (sessionAbsoluteTtlSeconds defaultSessionConfig)) sessionAbsoluteTtlSecondsFile)
-                                  , sessionIdleTtlSeconds = fromIntegral (fromMaybe (round (sessionIdleTtlSeconds defaultSessionConfig)) sessionIdleTtlSecondsFile)
-                                  , sessionCookieSecure = fromMaybe (sessionCookieSecure defaultSessionConfig) mCookieSecure
-                                  }
-                            , sessionBackend = selectedSessionBackend
-                            , bootstrapAdminUsername = bootstrapAdminUsernameFile
-                            , authBackend = selectedAuthBackend
-                            , calendarBackend = selectedCalendarBackend
-                            , tripSharingBackend = selectedTripSharingBackend
-                            , databaseConfig = parsedDatabaseConfig
-                            }
+                        Right selectedNoteBackend ->
+                          case parseChecklistBackend appChecklistBackendFile of
+                            Left err -> Left err
+                            Right selectedChecklistBackend ->
+                              case traverse validateDatabaseConfig appDatabase of
+                                Left err -> Left err
+                                Right parsedDatabaseConfig ->
+                                  Right AppConfig
+                                    { sessionConfig =
+                                        defaultSessionConfig
+                                          { sessionSecret = secret
+                                          , sessionCookieName = fromMaybe (sessionCookieName defaultSessionConfig) sessionCookieNameFile
+                                          , sessionAbsoluteTtlSeconds = fromIntegral (fromMaybe (round (sessionAbsoluteTtlSeconds defaultSessionConfig)) sessionAbsoluteTtlSecondsFile)
+                                          , sessionIdleTtlSeconds = fromIntegral (fromMaybe (round (sessionIdleTtlSeconds defaultSessionConfig)) sessionIdleTtlSecondsFile)
+                                          , sessionCookieSecure = fromMaybe (sessionCookieSecure defaultSessionConfig) mCookieSecure
+                                          }
+                                    , sessionBackend = selectedSessionBackend
+                                    , bootstrapAdminUsername = bootstrapAdminUsernameFile
+                                    , authBackend = selectedAuthBackend
+                                    , calendarBackend = selectedCalendarBackend
+                                    , tripSharingBackend = selectedTripSharingBackend
+                                    , noteBackend = selectedNoteBackend
+                                    , checklistBackend = selectedChecklistBackend
+                                    , databaseConfig = parsedDatabaseConfig
+                                    }
 
 parseAuthBackend :: Maybe String -> Either String AuthBackend
 parseAuthBackend Nothing = Right AuthBackendFilesystem
@@ -509,6 +541,18 @@ parseTripSharingBackend Nothing = Right TripSharingBackendFilesystem
 parseTripSharingBackend (Just "filesystem") = Right TripSharingBackendFilesystem
 parseTripSharingBackend (Just "postgres") = Right TripSharingBackendPostgres
 parseTripSharingBackend (Just _) = Left "Configuration tripSharingBackend must be one of: filesystem, postgres"
+
+parseNoteBackend :: Maybe String -> Either String NoteBackend
+parseNoteBackend Nothing = Right NoteBackendFilesystem
+parseNoteBackend (Just "filesystem") = Right NoteBackendFilesystem
+parseNoteBackend (Just "postgres") = Right NoteBackendPostgres
+parseNoteBackend (Just _) = Left "Configuration noteBackend must be one of: filesystem, postgres"
+
+parseChecklistBackend :: Maybe String -> Either String ChecklistBackend
+parseChecklistBackend Nothing = Right ChecklistBackendFilesystem
+parseChecklistBackend (Just "filesystem") = Right ChecklistBackendFilesystem
+parseChecklistBackend (Just "postgres") = Right ChecklistBackendPostgres
+parseChecklistBackend (Just _) = Left "Configuration checklistBackend must be one of: filesystem, postgres"
 
 parseBool :: String -> Maybe Bool
 parseBool raw =
@@ -536,10 +580,14 @@ runApp = do
             selectedSessionBackend = sessionBackend appConfig
             selectedCalendarBackend = calendarBackend appConfig
             selectedTripSharingBackend = tripSharingBackend appConfig
+            selectedNoteBackend = noteBackend appConfig
+            selectedChecklistBackend = checklistBackend appConfig
         putStrLn ("[startup] auth backend: " ++ renderAuthBackend selectedAuthBackend)
         putStrLn ("[startup] session backend: " ++ renderSessionBackend selectedSessionBackend)
         putStrLn ("[startup] calendar backend: " ++ renderCalendarBackend selectedCalendarBackend)
         putStrLn ("[startup] trip-sharing backend: " ++ renderTripSharingBackend selectedTripSharingBackend)
+        putStrLn ("[startup] note backend: " ++ renderNoteBackend selectedNoteBackend)
+        putStrLn ("[startup] checklist backend: " ++ renderChecklistBackend selectedChecklistBackend)
         case databaseConfig appConfig of
           Nothing -> pure ()
           Just dbCfg -> putStrLn ("[startup] database target: " ++ renderDatabaseTarget dbCfg)
@@ -597,14 +645,30 @@ runApp = do
                                   Left err -> do
                                     putStrLn $ "[startup-error] " ++ err
                                     exitFailure
-                                  Right () ->
-                                    simpleHTTP nullConf { port = 8081 } $ do
-                                        log "Incoming request" >> log "=========================END REQUEST====================\n"
-                                        msum [ homePage
-                                             , apiController authRepo calendarRepo tripSharingRepo signupRateLimitState tmpDir appConfig sessionStore
-                                             , serveStaticResource
-                                             , mzero
-                                             ]
+                                  Right () -> do
+                                    noteRepoResult <- makeNoteRepository selectedNoteBackend (databaseConfig appConfig)
+                                    case noteRepoResult of
+                                      Left err -> do
+                                        putStrLn ("[startup] note backend wiring failed for: " ++ renderNoteBackend selectedNoteBackend)
+                                        putStrLn $ "[startup-error] " ++ err
+                                        exitFailure
+                                      Right noteRepo -> do
+                                        putStrLn ("[startup] note backend wiring ready: " ++ renderNoteBackend selectedNoteBackend)
+                                        checklistRepoResult <- makeChecklistRepository selectedChecklistBackend (databaseConfig appConfig)
+                                        case checklistRepoResult of
+                                          Left err -> do
+                                            putStrLn ("[startup] checklist backend wiring failed for: " ++ renderChecklistBackend selectedChecklistBackend)
+                                            putStrLn $ "[startup-error] " ++ err
+                                            exitFailure
+                                          Right checklistRepo -> do
+                                            putStrLn ("[startup] checklist backend wiring ready: " ++ renderChecklistBackend selectedChecklistBackend)
+                                            simpleHTTP nullConf { port = 8081 } $ do
+                                                log "Incoming request" >> log "=========================END REQUEST====================\n"
+                                                msum [ homePage
+                                                     , apiController authRepo calendarRepo tripSharingRepo noteRepo checklistRepo signupRateLimitState tmpDir appConfig sessionStore
+                                                     , serveStaticResource
+                                                     , mzero
+                                                     ]
 
 makeAuthRepository :: AuthBackend -> Maybe DatabaseConfig -> IO (Either String AuthRepository)
 makeAuthRepository AuthBackendFilesystem _ = pure (Right defaultAuthRepository)
@@ -1356,6 +1420,14 @@ renderTripSharingBackend :: TripSharingBackend -> String
 renderTripSharingBackend TripSharingBackendFilesystem = "filesystem"
 renderTripSharingBackend TripSharingBackendPostgres = "postgres"
 
+renderNoteBackend :: NoteBackend -> String
+renderNoteBackend NoteBackendFilesystem = "filesystem"
+renderNoteBackend NoteBackendPostgres = "postgres"
+
+renderChecklistBackend :: ChecklistBackend -> String
+renderChecklistBackend ChecklistBackendFilesystem = "filesystem"
+renderChecklistBackend ChecklistBackendPostgres = "postgres"
+
 makeCalendarRepository :: CalendarBackend -> Maybe DatabaseConfig -> IO (Either String CalendarRepository)
 makeCalendarRepository CalendarBackendFilesystem _ = pure (Right defaultCalendarRepository)
 makeCalendarRepository CalendarBackendPostgres mDatabaseCfg =
@@ -1379,6 +1451,20 @@ makeTripSharingRepository TripSharingBackendPostgres mDatabaseCfg =
       case validationResult of
         Left err -> pure (Left ("Postgres trip-sharing storage validation failed: " ++ err))
         Right () -> pure (Right (postgresTripSharingRepository connectionString))
+
+makeNoteRepository :: NoteBackend -> Maybe DatabaseConfig -> IO (Either String NoteRepository)
+makeNoteRepository NoteBackendFilesystem _ = pure (Right defaultNoteRepository)
+makeNoteRepository NoteBackendPostgres mDatabaseCfg =
+  case mDatabaseCfg of
+    Nothing -> pure (Left "Configuration database is required when noteBackend=postgres")
+    Just _ -> pure (Left "Postgres note backend wiring is not implemented yet")
+
+makeChecklistRepository :: ChecklistBackend -> Maybe DatabaseConfig -> IO (Either String ChecklistRepository)
+makeChecklistRepository ChecklistBackendFilesystem _ = pure (Right defaultChecklistRepository)
+makeChecklistRepository ChecklistBackendPostgres mDatabaseCfg =
+  case mDatabaseCfg of
+    Nothing -> pure (Left "Configuration database is required when checklistBackend=postgres")
+    Just _ -> pure (Left "Postgres checklist backend wiring is not implemented yet")
 
 makeSessionStore :: SessionBackend -> Maybe DatabaseConfig -> FilePath -> SessionConfig -> IO (Either String SessionStore)
 makeSessionStore SessionBackendFilesystem _ cd sessionCfg =
@@ -1434,16 +1520,16 @@ pgQuote raw = "'" ++ concatMap escape raw ++ "'"
     escape '\\' = "\\\\"
     escape c = [c]
 
-apiController :: AuthRepository -> CalendarRepository -> TripSharingRepository -> MVar [UTCTime] -> FilePath -> AppConfig -> SessionStore -> ServerPartT IO Response
-apiController authRepo calendarRepo tripSharingRepo signupRateLimitState tmpDir appConfig sessionStore =
+apiController :: AuthRepository -> CalendarRepository -> TripSharingRepository -> NoteRepository -> ChecklistRepository -> MVar [UTCTime] -> FilePath -> AppConfig -> SessionStore -> ServerPartT IO Response
+apiController authRepo calendarRepo tripSharingRepo noteRepo checklistRepo signupRateLimitState tmpDir appConfig sessionStore =
   let sessionCfg = sessionConfig appConfig
       bootstrapAdmin = bootstrapAdminUsername appConfig
   in dir "api" $ msum [ signupController authRepo signupRateLimitState tmpDir bootstrapAdmin
                       , signinController authRepo sessionCfg sessionStore
                       , signoutController sessionCfg sessionStore
                       , requireAuth sessionCfg sessionStore (authController authRepo)
-                      , requireAuth sessionCfg sessionStore noteController
-                      , requireAuth sessionCfg sessionStore checklistController
+                      , requireAuth sessionCfg sessionStore (`noteController` noteRepo)
+                      , requireAuth sessionCfg sessionStore (`checklistController` checklistRepo)
                       , requireAuth sessionCfg sessionStore tripPlacesController
                       , requireAuth sessionCfg sessionStore (tripSharingController authRepo tripSharingRepo calendarRepo)
                       , requireAuth sessionCfg sessionStore (agendaController calendarRepo)
@@ -1651,11 +1737,11 @@ requireApprovedAdmin authRepo AppContext { sessionPrincipal = SessionPrincipal {
     Right True -> handler
 
 
-noteController :: AppContext -> ServerPartT IO Response
-noteController _ = dir "note" (notesChecklistHandlers "note" defaultNoteRepository)
+noteController :: AppContext -> NoteRepository -> ServerPartT IO Response
+noteController _ noteRepo = dir "note" (notesChecklistHandlers "note" noteRepo)
 
-checklistController :: AppContext -> ServerPartT IO Response
-checklistController _ = dir "checklist" (notesChecklistHandlers "checklist" defaultChecklistRepository)
+checklistController :: AppContext -> ChecklistRepository -> ServerPartT IO Response
+checklistController _ checklistRepo = dir "checklist" (notesChecklistHandlers "checklist" checklistRepo)
 
 notesChecklistHandlers :: Content a => String -> NotesChecklistRepository a -> ServerPartT IO Response
 notesChecklistHandlers crudTypeName repo =

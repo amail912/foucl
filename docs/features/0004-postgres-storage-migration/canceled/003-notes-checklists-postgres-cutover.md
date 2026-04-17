@@ -21,7 +21,7 @@ This coupling made sequencing, testing, and rollback boundaries unclear.
 ## Replaced By
 
 - [032 Notes And Checklists Repository Contracts](../done/032-notes-checklists-repository-contracts.md)
-- [033 Notes And Checklists Backend Selection And Wiring](../to-refine/033-notes-checklists-backend-selection-and-wiring.md)
+- [033 Notes And Checklists Backend Selection And Wiring](../done/033-notes-checklists-backend-selection-and-wiring.md)
 - [034 Notes And Checklists Filesystem Adapter Parity](../to-refine/034-notes-checklists-filesystem-adapter-parity.md)
 - [035 Notes And Checklists Postgres Schema And Migrations](../to-refine/035-notes-checklists-postgres-schema-and-migrations.md)
 - [036 Notes And Checklists Postgres Adapter Implementation](../to-refine/036-notes-checklists-postgres-adapter-implementation.md)

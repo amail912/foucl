@@ -65,6 +65,10 @@ import NotesChecklistRepository
   , ChecklistRepository
   , defaultChecklistRepository
   , defaultNoteRepository
+  , postgresChecklistRepository
+  , postgresNoteRepository
+  , verifyPostgresChecklistStorage
+  , verifyPostgresNoteStorage
   )
 import System.Directory (doesFileExist, doesDirectoryExist, listDirectory, getCurrentDirectory, canonicalizePath, getTemporaryDirectory)
 import System.FilePath ((</>), pathSeparator, takeBaseName, takeExtension)
@@ -1457,14 +1461,24 @@ makeNoteRepository NoteBackendFilesystem _ = pure (Right defaultNoteRepository)
 makeNoteRepository NoteBackendPostgres mDatabaseCfg =
   case mDatabaseCfg of
     Nothing -> pure (Left "Configuration database is required when noteBackend=postgres")
-    Just _ -> pure (Left "Postgres note backend wiring is not implemented yet")
+    Just dbCfg -> do
+      let connectionString = renderPostgresConnectionString dbCfg
+      validationResult <- verifyPostgresNoteStorage connectionString
+      case validationResult of
+        Left err -> pure (Left ("Postgres note storage validation failed: " ++ err))
+        Right () -> pure (Right (postgresNoteRepository connectionString))
 
 makeChecklistRepository :: ChecklistBackend -> Maybe DatabaseConfig -> IO (Either String ChecklistRepository)
 makeChecklistRepository ChecklistBackendFilesystem _ = pure (Right defaultChecklistRepository)
 makeChecklistRepository ChecklistBackendPostgres mDatabaseCfg =
   case mDatabaseCfg of
     Nothing -> pure (Left "Configuration database is required when checklistBackend=postgres")
-    Just _ -> pure (Left "Postgres checklist backend wiring is not implemented yet")
+    Just dbCfg -> do
+      let connectionString = renderPostgresConnectionString dbCfg
+      validationResult <- verifyPostgresChecklistStorage connectionString
+      case validationResult of
+        Left err -> pure (Left ("Postgres checklist storage validation failed: " ++ err))
+        Right () -> pure (Right (postgresChecklistRepository connectionString))
 
 makeSessionStore :: SessionBackend -> Maybe DatabaseConfig -> FilePath -> SessionConfig -> IO (Either String SessionStore)
 makeSessionStore SessionBackendFilesystem _ cd sessionCfg =

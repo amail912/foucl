@@ -74,7 +74,7 @@ import qualified Data.ByteString.Lazy as BL
 import System.FilePath ((</>))
 
 runUnitTests :: IO ()
-runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, notesChecklistRepositoryContractTests, agendaStorageTests, tripSharingStorageTests, calendarRepositoryTests, tripSharingRepositoryTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionBackendConfigTests, calendarBackendConfigTests, tripSharingBackendConfigTests, noteBackendConfigTests, checklistBackendConfigTests, postgresMigrationTests, sessionTests, sessionFilesystemAdapterTests, sessionPostgresRepositoryTests, calendarPostgresRepositoryTests, tripSharingPostgresRepositoryTests]
+runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, notesChecklistRepositoryContractTests, agendaStorageTests, tripSharingStorageTests, calendarRepositoryTests, tripSharingRepositoryTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionBackendConfigTests, calendarBackendConfigTests, tripSharingBackendConfigTests, noteBackendConfigTests, checklistBackendConfigTests, postgresMigrationTests, sessionTests, sessionFilesystemAdapterTests, sessionPostgresRepositoryTests, calendarPostgresRepositoryTests, tripSharingPostgresRepositoryTests, notePostgresRepositoryTests, checklistPostgresRepositoryTests]
 
 runTestTTAndExit tests = do
   c <- runTestTT tests
@@ -1266,7 +1266,7 @@ noteBackendConfigTests = test
   , "Note backend rejects invalid values" ~: noteBackendRejectsInvalid
   , "Note backend wiring composes filesystem repository" ~: noteBackendWiringComposesFilesystem
   , "Note backend postgres mode requires database config" ~: noteBackendPostgresRequiresDatabaseConfig
-  , "Note backend postgres mode fails fast before adapter implementation" ~: noteBackendPostgresFailsFastBeforeAdapterImplementation
+  , "Note backend postgres mode fails fast on storage validation failure" ~: noteBackendPostgresFailsFastOnStorageValidationFailure
   ]
 
 checklistBackendConfigTests = test
@@ -1276,7 +1276,7 @@ checklistBackendConfigTests = test
   , "Checklist backend rejects invalid values" ~: checklistBackendRejectsInvalid
   , "Checklist backend wiring composes filesystem repository" ~: checklistBackendWiringComposesFilesystem
   , "Checklist backend postgres mode requires database config" ~: checklistBackendPostgresRequiresDatabaseConfig
-  , "Checklist backend postgres mode fails fast before adapter implementation" ~: checklistBackendPostgresFailsFastBeforeAdapterImplementation
+  , "Checklist backend postgres mode fails fast on storage validation failure" ~: checklistBackendPostgresFailsFastOnStorageValidationFailure
   ]
 
 authBackendDefaultsToFilesystem :: IO ()
@@ -1548,8 +1548,8 @@ noteBackendPostgresRequiresDatabaseConfig = do
     Left err -> assertFailure ("Unexpected postgres note missing-db error: " ++ err)
     Right _ -> assertFailure "Expected postgres note backend without database config to fail"
 
-noteBackendPostgresFailsFastBeforeAdapterImplementation :: IO ()
-noteBackendPostgresFailsFastBeforeAdapterImplementation = do
+noteBackendPostgresFailsFastOnStorageValidationFailure :: IO ()
+noteBackendPostgresFailsFastOnStorageValidationFailure = do
   let dbCfg = DatabaseConfig
         { databaseHost = "127.0.0.1"
         , databasePort = 5432
@@ -1559,10 +1559,10 @@ noteBackendPostgresFailsFastBeforeAdapterImplementation = do
         }
   result <- makeNoteRepository NoteBackendPostgres (Just dbCfg)
   case result of
-    Left "Postgres note backend wiring is not implemented yet" ->
-      assertBool "Expected postgres note backend to fail fast before adapter implementation" True
+    Left err | "Postgres note storage validation failed:" `isPrefixOf` err ->
+      assertBool "Expected postgres note storage validation failure" True
     Left err -> assertFailure ("Unexpected postgres note wiring error: " ++ err)
-    Right _ -> assertFailure "Expected postgres note backend wiring to fail fast before adapter implementation"
+    Right _ -> assertFailure "Expected postgres note backend to fail fast when storage validation fails"
 
 checklistBackendDefaultsToFilesystem :: IO ()
 checklistBackendDefaultsToFilesystem =
@@ -1614,8 +1614,8 @@ checklistBackendPostgresRequiresDatabaseConfig = do
     Left err -> assertFailure ("Unexpected postgres checklist missing-db error: " ++ err)
     Right _ -> assertFailure "Expected postgres checklist backend without database config to fail"
 
-checklistBackendPostgresFailsFastBeforeAdapterImplementation :: IO ()
-checklistBackendPostgresFailsFastBeforeAdapterImplementation = do
+checklistBackendPostgresFailsFastOnStorageValidationFailure :: IO ()
+checklistBackendPostgresFailsFastOnStorageValidationFailure = do
   let dbCfg = DatabaseConfig
         { databaseHost = "127.0.0.1"
         , databasePort = 5432
@@ -1625,10 +1625,10 @@ checklistBackendPostgresFailsFastBeforeAdapterImplementation = do
         }
   result <- makeChecklistRepository ChecklistBackendPostgres (Just dbCfg)
   case result of
-    Left "Postgres checklist backend wiring is not implemented yet" ->
-      assertBool "Expected postgres checklist backend to fail fast before adapter implementation" True
+    Left err | "Postgres checklist storage validation failed:" `isPrefixOf` err ->
+      assertBool "Expected postgres checklist storage validation failure" True
     Left err -> assertFailure ("Unexpected postgres checklist wiring error: " ++ err)
-    Right _ -> assertFailure "Expected postgres checklist backend wiring to fail fast before adapter implementation"
+    Right _ -> assertFailure "Expected postgres checklist backend to fail fast when storage validation fails"
 
 testSessionConfig :: SessionConfig
 testSessionConfig =
@@ -2309,6 +2309,18 @@ tripSharingPostgresRepositoryTests = test
   , "Trip-sharing Postgres adapter should keep subscriptions independent from shares" ~: pgTripSharingRepoSubscriptionsIndependent
   ]
 
+notePostgresRepositoryTests = test
+  [ "Note Postgres adapter should round-trip create/list/update/delete lifecycle" ~: pgNoteRepoRoundTripLifecycle
+  , "Note Postgres adapter should return NotCurrentVersion for stale update" ~: pgNoteRepoWrongVersionReturnsNotCurrentVersion
+  , "Note Postgres adapter should keep missing delete idempotent" ~: pgNoteRepoDeleteMissingIsIdempotent
+  ]
+
+checklistPostgresRepositoryTests = test
+  [ "Checklist Postgres adapter should round-trip create/list/update/delete lifecycle" ~: pgChecklistRepoRoundTripLifecycle
+  , "Checklist Postgres adapter should return NotCurrentVersion for stale update" ~: pgChecklistRepoWrongVersionReturnsNotCurrentVersion
+  , "Checklist Postgres adapter should keep missing delete idempotent" ~: pgChecklistRepoDeleteMissingIsIdempotent
+  ]
+
 signedTokenRejectsTampering :: IO ()
 signedTokenRejectsTampering = do
     let token = signSessionId "secret" "sid-1"
@@ -2867,6 +2879,178 @@ pgTripSharingRepoSubscriptionsIndependent =
           case deleteSubscription of
             Right () -> assertBool "Expected missing subscription delete to remain idempotent" True
             Left err -> assertFailure ("Expected idempotent missing subscription delete, got " ++ show err)
+
+pgNoteRepoRoundTripLifecycle :: IO ()
+pgNoteRepoRoundTripLifecycle =
+  withOptionalPostgresContext "Skipping Note Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runNoteMigrationsAtPath "." schemaConn MigrateUp
+      case upResult of
+        Left err -> assertFailure ("Expected note migration up success, got " ++ err)
+        Right () -> do
+          let repo = postgresNoteRepository schemaConn
+              createdContent = NoteContent { title = Just "pg note title", noteContent = "pg note body" }
+              updatedContent = NoteContent { title = Just "pg note title updated", noteContent = "pg note body updated" }
+
+          createResult <- runExceptT $ repoCreateItem repo createdContent
+          case createResult of
+            Left err -> assertFailure ("Expected note create success, got " ++ show err)
+            Right createdStorageId -> do
+              listedAfterCreate <- runExceptT $ repoListItems repo
+              case listedAfterCreate of
+                Left err -> assertFailure ("Expected note list success, got " ++ show err)
+                Right [createdItem] -> do
+                  assertEqual "Expected listed note id to match created id" (id createdStorageId) (id (storageId createdItem))
+                  assertEqual "Expected listed note content to match create payload" createdContent (content createdItem)
+                Right listed -> assertFailure ("Expected one note item after create, got " ++ show (length listed))
+
+              updateResult <- runExceptT $ repoUpdateItem repo (Identifiable createdStorageId updatedContent)
+              case updateResult of
+                Left err -> assertFailure ("Expected note update success, got " ++ show err)
+                Right updatedStorageId -> do
+                  assertEqual "Expected note id to stay stable after update" (id createdStorageId) (id updatedStorageId)
+                  assertBool "Expected note version to change after update" (version createdStorageId /= version updatedStorageId)
+
+                  listedAfterUpdate <- runExceptT $ repoListItems repo
+                  case listedAfterUpdate of
+                    Left err -> assertFailure ("Expected note list after update success, got " ++ show err)
+                    Right [updatedItem] -> do
+                      assertEqual "Expected listed updated note id to match created id" (id createdStorageId) (id (storageId updatedItem))
+                      assertEqual "Expected listed updated note content to match update payload" updatedContent (content updatedItem)
+                    Right listed -> assertFailure ("Expected one note item after update, got " ++ show (length listed))
+
+                  deleteResult <- runExceptT $ repoDeleteItemById repo (id createdStorageId)
+                  case deleteResult of
+                    Left err -> assertFailure ("Expected note delete success, got " ++ show err)
+                    Right () -> do
+                      listedAfterDelete <- runExceptT $ repoListItems repo
+                      case listedAfterDelete of
+                        Left err -> assertFailure ("Expected note list after delete success, got " ++ show err)
+                        Right [] -> assertBool "Expected note list to be empty after delete" True
+                        Right listed -> assertFailure ("Expected empty note list after delete, got " ++ show (length listed))
+
+pgNoteRepoWrongVersionReturnsNotCurrentVersion :: IO ()
+pgNoteRepoWrongVersionReturnsNotCurrentVersion =
+  withOptionalPostgresContext "Skipping Note Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runNoteMigrationsAtPath "." schemaConn MigrateUp
+      case upResult of
+        Left err -> assertFailure ("Expected note migration up success, got " ++ err)
+        Right () -> do
+          let repo = postgresNoteRepository schemaConn
+              createdContent = NoteContent { title = Just "pg note stale", noteContent = "pg stale body" }
+              staleContent = NoteContent { title = Just "pg note stale updated", noteContent = "pg stale body updated" }
+          createResult <- runExceptT $ repoCreateItem repo createdContent
+          case createResult of
+            Left err -> assertFailure ("Expected note create success, got " ++ show err)
+            Right createdStorageId -> do
+              let staleStorageId = createdStorageId {version = version createdStorageId ++ "-stale"}
+              staleUpdateResult <- runExceptT $ repoUpdateItem repo (Identifiable staleStorageId staleContent)
+              case staleUpdateResult of
+                Left (NotCurrentVersion actualStorageId) ->
+                  assertEqual "Expected stale note update to report stale storage id" staleStorageId actualStorageId
+                Left err -> assertFailure ("Expected NotCurrentVersion for stale note update, got " ++ show err)
+                Right _ -> assertFailure "Expected stale note update to fail"
+
+pgNoteRepoDeleteMissingIsIdempotent :: IO ()
+pgNoteRepoDeleteMissingIsIdempotent =
+  withOptionalPostgresContext "Skipping Note Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runNoteMigrationsAtPath "." schemaConn MigrateUp
+      case upResult of
+        Left err -> assertFailure ("Expected note migration up success, got " ++ err)
+        Right () -> do
+          let repo = postgresNoteRepository schemaConn
+          deleteResult <- runExceptT $ repoDeleteItemById repo "missing-note-id"
+          case deleteResult of
+            Left err -> assertFailure ("Expected missing note delete to succeed, got " ++ show err)
+            Right () -> assertBool "Expected missing note delete to remain idempotent" True
+
+pgChecklistRepoRoundTripLifecycle :: IO ()
+pgChecklistRepoRoundTripLifecycle =
+  withOptionalPostgresContext "Skipping Checklist Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runChecklistMigrationsAtPath "." schemaConn MigrateUp
+      case upResult of
+        Left err -> assertFailure ("Expected checklist migration up success, got " ++ err)
+        Right () -> do
+          let repo = postgresChecklistRepository schemaConn
+              createdContent = ChecklistContent { name = "pg checklist", items = [ChecklistItem {label = "first", checked = False}] }
+              updatedContent = ChecklistContent { name = "pg checklist updated", items = [ChecklistItem {label = "first", checked = True}, ChecklistItem {label = "second", checked = False}] }
+
+          createResult <- runExceptT $ repoCreateItem repo createdContent
+          case createResult of
+            Left err -> assertFailure ("Expected checklist create success, got " ++ show err)
+            Right createdStorageId -> do
+              listedAfterCreate <- runExceptT $ repoListItems repo
+              case listedAfterCreate of
+                Left err -> assertFailure ("Expected checklist list success, got " ++ show err)
+                Right [createdItem] -> do
+                  assertEqual "Expected listed checklist id to match created id" (id createdStorageId) (id (storageId createdItem))
+                  assertEqual "Expected listed checklist content to match create payload" createdContent (content createdItem)
+                Right listed -> assertFailure ("Expected one checklist item after create, got " ++ show (length listed))
+
+              updateResult <- runExceptT $ repoUpdateItem repo (Identifiable createdStorageId updatedContent)
+              case updateResult of
+                Left err -> assertFailure ("Expected checklist update success, got " ++ show err)
+                Right updatedStorageId -> do
+                  assertEqual "Expected checklist id to stay stable after update" (id createdStorageId) (id updatedStorageId)
+                  assertBool "Expected checklist version to change after update" (version createdStorageId /= version updatedStorageId)
+
+                  listedAfterUpdate <- runExceptT $ repoListItems repo
+                  case listedAfterUpdate of
+                    Left err -> assertFailure ("Expected checklist list after update success, got " ++ show err)
+                    Right [updatedItem] -> do
+                      assertEqual "Expected listed updated checklist id to match created id" (id createdStorageId) (id (storageId updatedItem))
+                      assertEqual "Expected listed updated checklist content to match update payload" updatedContent (content updatedItem)
+                    Right listed -> assertFailure ("Expected one checklist item after update, got " ++ show (length listed))
+
+                  deleteResult <- runExceptT $ repoDeleteItemById repo (id createdStorageId)
+                  case deleteResult of
+                    Left err -> assertFailure ("Expected checklist delete success, got " ++ show err)
+                    Right () -> do
+                      listedAfterDelete <- runExceptT $ repoListItems repo
+                      case listedAfterDelete of
+                        Left err -> assertFailure ("Expected checklist list after delete success, got " ++ show err)
+                        Right [] -> assertBool "Expected checklist list to be empty after delete" True
+                        Right listed -> assertFailure ("Expected empty checklist list after delete, got " ++ show (length listed))
+
+pgChecklistRepoWrongVersionReturnsNotCurrentVersion :: IO ()
+pgChecklistRepoWrongVersionReturnsNotCurrentVersion =
+  withOptionalPostgresContext "Skipping Checklist Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runChecklistMigrationsAtPath "." schemaConn MigrateUp
+      case upResult of
+        Left err -> assertFailure ("Expected checklist migration up success, got " ++ err)
+        Right () -> do
+          let repo = postgresChecklistRepository schemaConn
+              createdContent = ChecklistContent { name = "pg checklist stale", items = [ChecklistItem {label = "first", checked = False}] }
+              staleContent = ChecklistContent { name = "pg checklist stale updated", items = [ChecklistItem {label = "first", checked = True}] }
+          createResult <- runExceptT $ repoCreateItem repo createdContent
+          case createResult of
+            Left err -> assertFailure ("Expected checklist create success, got " ++ show err)
+            Right createdStorageId -> do
+              let staleStorageId = createdStorageId {version = version createdStorageId ++ "-stale"}
+              staleUpdateResult <- runExceptT $ repoUpdateItem repo (Identifiable staleStorageId staleContent)
+              case staleUpdateResult of
+                Left (NotCurrentVersion actualStorageId) ->
+                  assertEqual "Expected stale checklist update to report stale storage id" staleStorageId actualStorageId
+                Left err -> assertFailure ("Expected NotCurrentVersion for stale checklist update, got " ++ show err)
+                Right _ -> assertFailure "Expected stale checklist update to fail"
+
+pgChecklistRepoDeleteMissingIsIdempotent :: IO ()
+pgChecklistRepoDeleteMissingIsIdempotent =
+  withOptionalPostgresContext "Skipping Checklist Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runChecklistMigrationsAtPath "." schemaConn MigrateUp
+      case upResult of
+        Left err -> assertFailure ("Expected checklist migration up success, got " ++ err)
+        Right () -> do
+          let repo = postgresChecklistRepository schemaConn
+          deleteResult <- runExceptT $ repoDeleteItemById repo "missing-checklist-id"
+          case deleteResult of
+            Left err -> assertFailure ("Expected missing checklist delete to succeed, got " ++ show err)
+            Right () -> assertBool "Expected missing checklist delete to remain idempotent" True
 
 withIsolatedPostgresSchemaConn :: PostgresTestContext -> (String -> IO ()) -> IO ()
 withIsolatedPostgresSchemaConn ctx action = do

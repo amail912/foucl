@@ -1,4 +1,4 @@
-.PHONY: help lint build test ci start-sandbox restart-sandbox stop-sandbox integration-test integration-test-postgres integration-test-auth-postgres _prepare-sandbox _wait-server _prepare-postgres-test-db _write-postgres-config _write-auth-startup-import-fixtures _write-session-startup-import-fixtures _write-calendar-startup-import-fixtures _write-trip-sharing-startup-import-fixtures _start-postgres-test-db _stop-postgres-test-db
+.PHONY: help lint build test ci start-sandbox restart-sandbox stop-sandbox integration-test integration-test-postgres integration-test-auth-postgres _prepare-sandbox _wait-server _prepare-postgres-test-db _write-postgres-config _write-auth-startup-import-fixtures _write-session-startup-import-fixtures _write-calendar-startup-import-fixtures _write-trip-sharing-startup-import-fixtures _write-notes-checklists-startup-import-fixtures _start-postgres-test-db _stop-postgres-test-db
 
 SHELL := /bin/bash
 
@@ -73,7 +73,9 @@ _prepare-postgres-test-db:
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -c "INSERT INTO session_user_bindings (user_id, state_id) VALUES ('startup-binding-conflict-user', '11111111-1111-1111-1111-111111111111'::uuid), ('startup-pg-only-user', '22222222-2222-2222-2222-222222222222'::uuid)"; \
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -c "INSERT INTO calendar_items (user_id, item_id, item_kind, legacy_item_type, legacy_title, legacy_window_start, legacy_window_end, legacy_status) VALUES ('startup-calendar-conflict-user', 'startup-calendar-conflict-item', 'legacy', 'INTENTION', 'postgres-calendar-conflict-title', '2025-01-01T08:00', '2025-01-01T09:00', 'TODO'), ('startup-calendar-postgres-only-user', 'startup-calendar-postgres-only-item', 'legacy', 'INTENTION', 'postgres-calendar-only-title', '2025-01-02T08:00', '2025-01-02T09:00', 'TODO')"; \
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -c "INSERT INTO trip_shares (owner_user_id, target_username) VALUES ('startup-trip-sharing-owner', 'startup-trip-sharing-conflict-target'), ('startup-trip-sharing-postgres-only-owner', 'startup-trip-sharing-postgres-only-target')"; \
-	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -c "INSERT INTO trip_subscriptions (owner_user_id, target_username) VALUES ('startup-trip-sharing-owner', 'startup-trip-sharing-conflict-target'), ('startup-trip-sharing-postgres-only-owner', 'startup-trip-sharing-postgres-only-target')";
+	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -c "INSERT INTO trip_subscriptions (owner_user_id, target_username) VALUES ('startup-trip-sharing-owner', 'startup-trip-sharing-conflict-target'), ('startup-trip-sharing-postgres-only-owner', 'startup-trip-sharing-postgres-only-target')"; \
+	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -c "INSERT INTO note_items (item_id, item_version, item_content) VALUES ('startup-note-conflict-item', 'startup-note-postgres-version', '{\"title\":\"postgres-note-conflict-title\",\"noteContent\":\"postgres-note-conflict-body\"}'::jsonb), ('startup-note-postgres-only-item', 'startup-note-postgres-only-version', '{\"title\":\"postgres-note-only-title\",\"noteContent\":\"postgres-note-only-body\"}'::jsonb)"; \
+	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -c "INSERT INTO checklist_items (item_id, item_version, item_content) VALUES ('startup-checklist-conflict-item', 'startup-checklist-postgres-version', '{\"name\":\"postgres-checklist-conflict-name\",\"items\":[{\"label\":\"postgres-conflict-item\",\"checked\":true}]}'::jsonb), ('startup-checklist-postgres-only-item', 'startup-checklist-postgres-only-version', '{\"name\":\"postgres-checklist-only-name\",\"items\":[{\"label\":\"postgres-only-item\",\"checked\":false}]}'::jsonb)";
 
 _start-postgres-test-db:
 	@set -euo pipefail; \
@@ -209,6 +211,60 @@ _write-trip-sharing-startup-import-fixtures:
 	'  "startup-trip-sharing-fs-only-target"' \
 	']' > "$(SANDBOX_DIR)/data/trip-sharing/subscriptions/startup-trip-sharing-owner.json"
 
+_write-notes-checklists-startup-import-fixtures:
+	@set -euo pipefail; \
+	mkdir -p "$(SANDBOX_DIR)/data/note" "$(SANDBOX_DIR)/data/checklist"; \
+	printf '%s\n' \
+	'{' \
+	'  "storageId": {' \
+	'    "id": "startup-note-fs-only-item",' \
+	'    "version": "startup-note-fs-only-version"' \
+	'  },' \
+	'  "content": {' \
+	'    "title": "filesystem-note-only-title",' \
+	'    "noteContent": "filesystem-note-only-body"' \
+	'  }' \
+	'}' > "$(SANDBOX_DIR)/data/note/startup-note-fs-only-item.txt"; \
+	printf '%s\n' \
+	'{' \
+	'  "storageId": {' \
+	'    "id": "startup-note-conflict-item",' \
+	'    "version": "startup-note-fs-conflict-version"' \
+	'  },' \
+	'  "content": {' \
+	'    "title": "filesystem-note-conflict-title",' \
+	'    "noteContent": "filesystem-note-conflict-body"' \
+	'  }' \
+	'}' > "$(SANDBOX_DIR)/data/note/startup-note-conflict-item.txt"; \
+	printf '%s\n' \
+	'{' \
+	'  "storageId": {' \
+	'    "id": "startup-checklist-fs-only-item",' \
+	'    "version": "startup-checklist-fs-only-version"' \
+	'  },' \
+	'  "content": {' \
+	'    "name": "filesystem-checklist-only-name",' \
+	'    "items": [{' \
+	'      "label": "filesystem-checklist-only-item",' \
+	'      "checked": false' \
+	'    }]' \
+	'  }' \
+	'}' > "$(SANDBOX_DIR)/data/checklist/startup-checklist-fs-only-item.txt"; \
+	printf '%s\n' \
+	'{' \
+	'  "storageId": {' \
+	'    "id": "startup-checklist-conflict-item",' \
+	'    "version": "startup-checklist-fs-conflict-version"' \
+	'  },' \
+	'  "content": {' \
+	'    "name": "filesystem-checklist-conflict-name",' \
+	'    "items": [{' \
+	'      "label": "filesystem-checklist-conflict-item",' \
+	'      "checked": false' \
+	'    }]' \
+	'  }' \
+	'}' > "$(SANDBOX_DIR)/data/checklist/startup-checklist-conflict-item.txt"
+
 _wait-server:
 	@set -euo pipefail; \
 	for i in $$(seq 1 40); do \
@@ -267,6 +323,7 @@ integration-test-postgres:
 	$(MAKE) --no-print-directory _write-session-startup-import-fixtures; \
 	$(MAKE) --no-print-directory _write-calendar-startup-import-fixtures; \
 	$(MAKE) --no-print-directory _write-trip-sharing-startup-import-fixtures; \
+	$(MAKE) --no-print-directory _write-notes-checklists-startup-import-fixtures; \
 	trap '$(DAEMON_SCRIPT) stop --pidfile "$(SANDBOX_PIDFILE)" >/dev/null 2>&1 || true; $(MAKE) --no-print-directory _stop-postgres-test-db >/dev/null 2>&1 || true' EXIT INT TERM; \
 	export FOUCL_SESSION_COOKIE_SECURE="$${FOUCL_SESSION_COOKIE_SECURE:-false}"; \
 	( \

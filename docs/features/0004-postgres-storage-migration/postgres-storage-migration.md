@@ -63,12 +63,12 @@ Move persistence to Postgres incrementally, with per-domain cutover control, and
 - [035 Notes And Checklists Postgres Schema And Migrations](done/035-notes-checklists-postgres-schema-and-migrations.md)
 - [036 Notes And Checklists Postgres Adapter Implementation](done/036-notes-checklists-postgres-adapter-implementation.md)
 - [037 Notes And Checklists Postgres Parity Verification](done/037-notes-checklists-postgres-parity-verification.md)
+- [038 Notes And Checklists Startup Import](done/038-notes-checklists-startup-import.md)
 
 ### To Refine
 
 - [004 Domain Switching And Bootstrap Import](to-refine/004-domain-switching-and-bootstrap-import.md)
 - [005 Remove Filesystem Backend Per Migrated Domain](to-refine/005-remove-fs-backend-per-domain.md)
-- [038 Notes And Checklists Startup Import](to-refine/038-notes-checklists-startup-import.md)
 
 ### Canceled
 

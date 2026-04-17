@@ -46,12 +46,14 @@ import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
 import qualified Data.Set as Set
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteString.Lazy.Char8 as BL8
 import qualified Control.Exception as Ex
 import Happstack.Server (FilterMonad, Response, ServerPartT, RqBody, takeRequestBody, unBody, rqBody, decodeBody, askRq, defaultBodyPolicy, nullDir, path, serveFileFrom, guessContentTypeM, mimeTypes, uriRest, nullConf, simpleHTTP, toResponse, method, ok, internalServerError, notFound, dir, Method(GET, POST, DELETE, PUT), Conf(..), addCookie, mkCookie, CookieLife(Session, Expired), getHeaderM, unauthorized, requestEntityTooLarge, look, setResponseCode)
 import qualified Happstack.Server as HServer
 import Happstack.Server.Internal.Cookie (Cookie(..), SameSite(..))
 import Happstack.Server.Internal.MessageWrap (bodyInput, BodyPolicy)
 import Model (NoteContent, ChecklistContent, Content, Identifiable(..))
+import qualified Model as Model
 import qualified AgendaModel as Agenda
 import CalendarRepository (CalendarRepository(..), defaultCalendarRepository, postgresCalendarRepository, verifyPostgresCalendarStorage)
 import TripSharingRepository (TripSharingRepository(..), defaultTripSharingRepository, postgresTripSharingRepository, verifyPostgresTripSharingStorage)
@@ -666,13 +668,24 @@ runApp = do
                                             exitFailure
                                           Right checklistRepo -> do
                                             putStrLn ("[startup] checklist backend wiring ready: " ++ renderChecklistBackend selectedChecklistBackend)
-                                            simpleHTTP nullConf { port = 8081 } $ do
-                                                log "Incoming request" >> log "=========================END REQUEST====================\n"
-                                                msum [ homePage
-                                                     , apiController authRepo calendarRepo tripSharingRepo noteRepo checklistRepo signupRateLimitState tmpDir appConfig sessionStore
-                                                     , serveStaticResource
-                                                     , mzero
-                                                     ]
+                                            notesChecklistImportResult <-
+                                              runNotesChecklistStartupImportIfNeeded
+                                                selectedNoteBackend
+                                                selectedChecklistBackend
+                                                (databaseConfig appConfig)
+                                                cd
+                                            case notesChecklistImportResult of
+                                              Left err -> do
+                                                putStrLn $ "[startup-error] " ++ err
+                                                exitFailure
+                                              Right () ->
+                                                simpleHTTP nullConf { port = 8081 } $ do
+                                                    log "Incoming request" >> log "=========================END REQUEST====================\n"
+                                                    msum [ homePage
+                                                         , apiController authRepo calendarRepo tripSharingRepo noteRepo checklistRepo signupRateLimitState tmpDir appConfig sessionStore
+                                                         , serveStaticResource
+                                                         , mzero
+                                                         ]
 
 makeAuthRepository :: AuthBackend -> Maybe DatabaseConfig -> IO (Either String AuthRepository)
 makeAuthRepository AuthBackendFilesystem _ = pure (Right defaultAuthRepository)
@@ -1003,6 +1016,253 @@ runCalendarTripSharingStartupImportIfNeeded calendarMode tripSharingMode (Just d
       case tripSharingMode of
         TripSharingBackendFilesystem -> pure (Right ())
         TripSharingBackendPostgres -> runTripSharingStartupImport connectionString cd
+
+runNotesChecklistStartupImportIfNeeded
+  :: NoteBackend
+  -> ChecklistBackend
+  -> Maybe DatabaseConfig
+  -> FilePath
+  -> IO (Either String ())
+runNotesChecklistStartupImportIfNeeded noteMode checklistMode _ _
+  | noteMode == NoteBackendFilesystem
+      && checklistMode == ChecklistBackendFilesystem =
+      pure (Right ())
+runNotesChecklistStartupImportIfNeeded NoteBackendPostgres _ Nothing _ =
+  pure (Left "Configuration database is required when noteBackend=postgres")
+runNotesChecklistStartupImportIfNeeded _ ChecklistBackendPostgres Nothing _ =
+  pure (Left "Configuration database is required when checklistBackend=postgres")
+runNotesChecklistStartupImportIfNeeded noteMode checklistMode (Just dbCfg) cd = do
+  let connectionString = renderPostgresConnectionString dbCfg
+  noteResult <-
+    case noteMode of
+      NoteBackendFilesystem -> pure (Right ())
+      NoteBackendPostgres -> runNoteStartupImport connectionString cd
+  case noteResult of
+    Left err -> pure (Left err)
+    Right () ->
+      case checklistMode of
+        ChecklistBackendFilesystem -> pure (Right ())
+        ChecklistBackendPostgres -> runChecklistStartupImport connectionString cd
+
+runNoteStartupImport :: String -> FilePath -> IO (Either String ())
+runNoteStartupImport connectionString cd = do
+  let notesBaseDir = cd </> "data" </> "note"
+  filesystemEntriesResult <- loadFilesystemNoteImportEntries notesBaseDir
+  case filesystemEntriesResult of
+    Left err -> pure (Left err)
+    Right fsEntries -> do
+      connResult <- Ex.try (connectPostgreSQL (BS8.pack connectionString)) :: IO (Either Ex.SomeException Connection)
+      case connResult of
+        Left err -> pure (Left ("Note startup import failed while connecting to Postgres: " ++ show err))
+        Right conn -> do
+          snapshotResult <- Ex.try (query_ conn "SELECT item_id FROM note_items" :: IO [Only String]) :: IO (Either Ex.SomeException [Only String])
+          case snapshotResult of
+            Left err -> do
+              _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
+              pure (Left ("Note startup import failed while reading Postgres notes: " ++ show err))
+            Right pgRows -> do
+              let orderedFsEntries = sortOn (\(itemId, _, _) -> itemId) fsEntries
+                  knownIds = Set.fromList (map fromOnly pgRows)
+              when (not (null orderedFsEntries) && not (null pgRows)) $
+                putStrLn
+                  ( "[startup][note-import][warning] overlap detected:"
+                      ++ " filesystem_count="
+                      ++ show (length orderedFsEntries)
+                      ++ " postgres_count="
+                      ++ show (length pgRows)
+                      ++ " conflict_policy=postgres-wins"
+                  )
+              importResult <- foldM (importSingleNoteItem conn) (Right (0 :: Int, 0 :: Int, knownIds)) orderedFsEntries
+              _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
+              case importResult of
+                Left err -> pure (Left err)
+                Right (importedCount, skippedCount, _) -> do
+                  putStrLn
+                    ( "[startup][note-import] completed"
+                        ++ " filesystem_count="
+                        ++ show (length orderedFsEntries)
+                        ++ " postgres_count="
+                        ++ show (length pgRows)
+                        ++ " imported="
+                        ++ show importedCount
+                        ++ " skipped_conflicts="
+                        ++ show skippedCount
+                    )
+                  pure (Right ())
+
+runChecklistStartupImport :: String -> FilePath -> IO (Either String ())
+runChecklistStartupImport connectionString cd = do
+  let checklistsBaseDir = cd </> "data" </> "checklist"
+  filesystemEntriesResult <- loadFilesystemChecklistImportEntries checklistsBaseDir
+  case filesystemEntriesResult of
+    Left err -> pure (Left err)
+    Right fsEntries -> do
+      connResult <- Ex.try (connectPostgreSQL (BS8.pack connectionString)) :: IO (Either Ex.SomeException Connection)
+      case connResult of
+        Left err -> pure (Left ("Checklist startup import failed while connecting to Postgres: " ++ show err))
+        Right conn -> do
+          snapshotResult <- Ex.try (query_ conn "SELECT item_id FROM checklist_items" :: IO [Only String]) :: IO (Either Ex.SomeException [Only String])
+          case snapshotResult of
+            Left err -> do
+              _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
+              pure (Left ("Checklist startup import failed while reading Postgres checklists: " ++ show err))
+            Right pgRows -> do
+              let orderedFsEntries = sortOn (\(itemId, _, _) -> itemId) fsEntries
+                  knownIds = Set.fromList (map fromOnly pgRows)
+              when (not (null orderedFsEntries) && not (null pgRows)) $
+                putStrLn
+                  ( "[startup][checklist-import][warning] overlap detected:"
+                      ++ " filesystem_count="
+                      ++ show (length orderedFsEntries)
+                      ++ " postgres_count="
+                      ++ show (length pgRows)
+                      ++ " conflict_policy=postgres-wins"
+                  )
+              importResult <- foldM (importSingleChecklistItem conn) (Right (0 :: Int, 0 :: Int, knownIds)) orderedFsEntries
+              _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
+              case importResult of
+                Left err -> pure (Left err)
+                Right (importedCount, skippedCount, _) -> do
+                  putStrLn
+                    ( "[startup][checklist-import] completed"
+                        ++ " filesystem_count="
+                        ++ show (length orderedFsEntries)
+                        ++ " postgres_count="
+                        ++ show (length pgRows)
+                        ++ " imported="
+                        ++ show importedCount
+                        ++ " skipped_conflicts="
+                        ++ show skippedCount
+                    )
+                  pure (Right ())
+
+importSingleNoteItem
+  :: Connection
+  -> Either String (Int, Int, Set.Set String)
+  -> (String, String, NoteContent)
+  -> IO (Either String (Int, Int, Set.Set String))
+importSingleNoteItem _ (Left err) _ = pure (Left err)
+importSingleNoteItem conn (Right (importedCount, skippedCount, knownIds)) (itemId, itemVersion, noteContent) =
+  if Set.member itemId knownIds
+    then do
+      putStrLn ("[startup][note-import][warning] skipping conflicting item_id=" ++ itemId ++ " policy=postgres-wins")
+      pure (Right (importedCount, skippedCount + 1, knownIds))
+    else do
+      writeResult <- Ex.try
+        (execute conn
+          "INSERT INTO note_items (item_id, item_version, item_content) VALUES (?, ?, ?::jsonb)"
+          (itemId, itemVersion, BL8.unpack (encode noteContent)))
+        :: IO (Either Ex.SomeException Int64)
+      case writeResult of
+        Right _ ->
+          pure (Right (importedCount + 1, skippedCount, Set.insert itemId knownIds))
+        Left err ->
+          case Ex.fromException err of
+            Just sqlErr
+              | isUniqueViolation sqlErr -> do
+                  putStrLn ("[startup][note-import][warning] skipping conflicting item_id=" ++ itemId ++ " policy=postgres-wins")
+                  pure (Right (importedCount, skippedCount + 1, Set.insert itemId knownIds))
+            _ ->
+              pure (Left ("Note startup import failed while writing item_id=" ++ itemId ++ ": " ++ show err))
+
+importSingleChecklistItem
+  :: Connection
+  -> Either String (Int, Int, Set.Set String)
+  -> (String, String, ChecklistContent)
+  -> IO (Either String (Int, Int, Set.Set String))
+importSingleChecklistItem _ (Left err) _ = pure (Left err)
+importSingleChecklistItem conn (Right (importedCount, skippedCount, knownIds)) (itemId, itemVersion, checklistContent) =
+  if Set.member itemId knownIds
+    then do
+      putStrLn ("[startup][checklist-import][warning] skipping conflicting item_id=" ++ itemId ++ " policy=postgres-wins")
+      pure (Right (importedCount, skippedCount + 1, knownIds))
+    else do
+      writeResult <- Ex.try
+        (execute conn
+          "INSERT INTO checklist_items (item_id, item_version, item_content) VALUES (?, ?, ?::jsonb)"
+          (itemId, itemVersion, BL8.unpack (encode checklistContent)))
+        :: IO (Either Ex.SomeException Int64)
+      case writeResult of
+        Right _ ->
+          pure (Right (importedCount + 1, skippedCount, Set.insert itemId knownIds))
+        Left err ->
+          case Ex.fromException err of
+            Just sqlErr
+              | isUniqueViolation sqlErr -> do
+                  putStrLn ("[startup][checklist-import][warning] skipping conflicting item_id=" ++ itemId ++ " policy=postgres-wins")
+                  pure (Right (importedCount, skippedCount + 1, Set.insert itemId knownIds))
+            _ ->
+              pure (Left ("Checklist startup import failed while writing item_id=" ++ itemId ++ ": " ++ show err))
+
+loadFilesystemNoteImportEntries :: FilePath -> IO (Either String [(String, String, NoteContent)])
+loadFilesystemNoteImportEntries rootDir = do
+  exists <- doesDirectoryExist rootDir
+  if not exists
+    then do
+      putStrLn "[startup][note-import] source note directory is missing; treating filesystem note source as empty"
+      pure (Right [])
+    else do
+      files <- listDirectory rootDir
+      foldM (decodeSingleFilesystemNote rootDir) (Right []) (sort files)
+
+decodeSingleFilesystemNote
+  :: FilePath
+  -> Either String [(String, String, NoteContent)]
+  -> FilePath
+  -> IO (Either String [(String, String, NoteContent)])
+decodeSingleFilesystemNote _ (Left err) _ = pure (Left err)
+decodeSingleFilesystemNote rootDir (Right acc) fileName
+  | takeExtension fileName /= ".txt" = pure (Right acc)
+  | otherwise = do
+      let fullPath = rootDir </> fileName
+      contentResult <- Ex.try (BL.readFile fullPath) :: IO (Either Ex.IOException BL.ByteString)
+      case contentResult of
+        Left err ->
+          pure (Left ("Note startup import failed while reading filesystem note file " ++ fullPath ++ ": " ++ show err))
+        Right raw ->
+          case decode raw of
+            Nothing ->
+              pure (Left ("Note startup import failed while reading filesystem notes: invalid JSON in " ++ fullPath))
+            Just noteItem ->
+              let itemStorageId = storageId (noteItem :: Identifiable NoteContent)
+                  itemId = Model.id itemStorageId
+                  itemVersion = Model.version itemStorageId
+               in pure (Right ((itemId, itemVersion, content noteItem) : acc))
+
+loadFilesystemChecklistImportEntries :: FilePath -> IO (Either String [(String, String, ChecklistContent)])
+loadFilesystemChecklistImportEntries rootDir = do
+  exists <- doesDirectoryExist rootDir
+  if not exists
+    then do
+      putStrLn "[startup][checklist-import] source checklist directory is missing; treating filesystem checklist source as empty"
+      pure (Right [])
+    else do
+      files <- listDirectory rootDir
+      foldM (decodeSingleFilesystemChecklist rootDir) (Right []) (sort files)
+
+decodeSingleFilesystemChecklist
+  :: FilePath
+  -> Either String [(String, String, ChecklistContent)]
+  -> FilePath
+  -> IO (Either String [(String, String, ChecklistContent)])
+decodeSingleFilesystemChecklist _ (Left err) _ = pure (Left err)
+decodeSingleFilesystemChecklist rootDir (Right acc) fileName
+  | takeExtension fileName /= ".txt" = pure (Right acc)
+  | otherwise = do
+      let fullPath = rootDir </> fileName
+      contentResult <- Ex.try (BL.readFile fullPath) :: IO (Either Ex.IOException BL.ByteString)
+      case contentResult of
+        Left err ->
+          pure (Left ("Checklist startup import failed while reading filesystem checklist file " ++ fullPath ++ ": " ++ show err))
+        Right raw ->
+          case decode raw of
+            Nothing ->
+              pure (Left ("Checklist startup import failed while reading filesystem checklists: invalid JSON in " ++ fullPath))
+            Just checklistItem ->
+              let itemStorageId = storageId (checklistItem :: Identifiable ChecklistContent)
+                  itemId = Model.id itemStorageId
+                  itemVersion = Model.version itemStorageId
+               in pure (Right ((itemId, itemVersion, content checklistItem) : acc))
 
 runCalendarStartupImport :: String -> FilePath -> IO (Either String ())
 runCalendarStartupImport connectionString cd = do

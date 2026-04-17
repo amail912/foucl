@@ -196,6 +196,65 @@ runIntegrationPostgresTests = do
         fsOnlySubscriptionCount <- fetchTripSubscriptionCountByKey "startup-trip-sharing-owner" "startup-trip-sharing-fs-only-target"
         assertEqual "Expected exactly one imported filesystem-only startup trip subscription" 1 fsOnlySubscriptionCount
 
+    describe "Notes and checklists startup import" $ do
+      it "imports filesystem-only items and preserves postgres-conflicting items" $ do
+        noteFsOnlyExists <- noteItemExists "startup-note-fs-only-item"
+        assertBool "Expected filesystem-only startup note to be imported into Postgres" noteFsOnlyExists
+
+        noteConflictTitle <- fetchNoteTitle "startup-note-conflict-item"
+        assertEqual "Expected conflicting startup note to keep Postgres value" "postgres-note-conflict-title" noteConflictTitle
+
+        notePostgresOnlyExists <- noteItemExists "startup-note-postgres-only-item"
+        assertBool "Expected existing Postgres-only startup note to be preserved" notePostgresOnlyExists
+
+        checklistFsOnlyExists <- checklistItemExists "startup-checklist-fs-only-item"
+        assertBool "Expected filesystem-only startup checklist to be imported into Postgres" checklistFsOnlyExists
+
+        checklistConflictName <- fetchChecklistName "startup-checklist-conflict-item"
+        assertEqual "Expected conflicting startup checklist to keep Postgres value" "postgres-checklist-conflict-name" checklistConflictName
+
+        checklistPostgresOnlyExists <- checklistItemExists "startup-checklist-postgres-only-item"
+        assertBool "Expected existing Postgres-only startup checklist to be preserved" checklistPostgresOnlyExists
+
+      it "emits startup overlap/conflict warnings in server log" $ do
+        logContent <- readStartupLog
+        assertBool
+          "Expected overlap warning log entry for note startup import"
+          ("[startup][note-import][warning] overlap detected" `isInfixOf` logContent)
+        assertBool
+          "Expected conflict warning log entry for note conflict"
+          ("[startup][note-import][warning] skipping conflicting item_id=startup-note-conflict-item policy=postgres-wins" `isInfixOf` logContent)
+        assertBool
+          "Expected overlap warning log entry for checklist startup import"
+          ("[startup][checklist-import][warning] overlap detected" `isInfixOf` logContent)
+        assertBool
+          "Expected conflict warning log entry for checklist conflict"
+          ("[startup][checklist-import][warning] skipping conflicting item_id=startup-checklist-conflict-item policy=postgres-wins" `isInfixOf` logContent)
+
+      it "remains idempotent across sandbox restart" $ do
+        noteCountBefore <- fetchNoteItemsCount
+        checklistCountBefore <- fetchChecklistItemsCount
+
+        restartPostgresSandboxServer
+
+        noteCountAfter <- fetchNoteItemsCount
+        checklistCountAfter <- fetchChecklistItemsCount
+
+        assertEqual "Expected note startup import to remain idempotent after restart" noteCountBefore noteCountAfter
+        assertEqual "Expected checklist startup import to remain idempotent after restart" checklistCountBefore checklistCountAfter
+
+        noteFsOnlyCount <- fetchNoteItemCountById "startup-note-fs-only-item"
+        assertEqual "Expected exactly one imported filesystem-only startup note" 1 noteFsOnlyCount
+
+        checklistFsOnlyCount <- fetchChecklistItemCountById "startup-checklist-fs-only-item"
+        assertEqual "Expected exactly one imported filesystem-only startup checklist" 1 checklistFsOnlyCount
+
+        noteConflictTitle <- fetchNoteTitle "startup-note-conflict-item"
+        assertEqual "Expected conflicting startup note to remain Postgres-authored after restart" "postgres-note-conflict-title" noteConflictTitle
+
+        checklistConflictName <- fetchChecklistName "startup-checklist-conflict-item"
+        assertEqual "Expected conflicting startup checklist to remain Postgres-authored after restart" "postgres-checklist-conflict-name" checklistConflictName
+
     around_ withFreshPostgresFixtures $ do
       describe "Auth parity" $ do
         it "keeps signup success/conflict semantics" $ do
@@ -1476,6 +1535,94 @@ fetchTripSubscriptionCountByKey ownerUserId targetUsername = do
     Right raw ->
       case readMaybe (trimTrailingNewline raw) of
         Nothing -> assertFailure ("Unable to parse trip subscription count for owner_user_id=" ++ ownerUserId ++ " target_username=" ++ targetUsername ++ " from value: " ++ raw) >> pure 0
+        Just value -> pure value
+
+noteItemExists :: String -> IO Bool
+noteItemExists itemId = do
+  scalarResult <- runPsqlScalar
+    ("SELECT EXISTS(SELECT 1 FROM note_items WHERE item_id = " ++ quoteSql itemId ++ ")")
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query note item existence for item_id=" ++ itemId ++ ": " ++ err) >> pure False
+    Right raw ->
+      case trimTrailingNewline raw of
+        "t" -> pure True
+        "f" -> pure False
+        value -> assertFailure ("Unexpected note EXISTS value for item_id=" ++ itemId ++ ": " ++ value) >> pure False
+
+fetchNoteTitle :: String -> IO String
+fetchNoteTitle itemId = do
+  scalarResult <- runPsqlScalar
+    ("SELECT item_content->>'title' FROM note_items WHERE item_id = " ++ quoteSql itemId)
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query note title for item_id=" ++ itemId ++ ": " ++ err) >> pure ""
+    Right raw ->
+      let value = trimTrailingNewline raw
+       in if null value
+            then assertFailure ("Expected non-empty note title for item_id=" ++ itemId) >> pure ""
+            else pure value
+
+fetchNoteItemsCount :: IO Int
+fetchNoteItemsCount = do
+  scalarResult <- runPsqlScalar "SELECT COUNT(*) FROM note_items"
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query note item count: " ++ err) >> pure 0
+    Right raw ->
+      case readMaybe (trimTrailingNewline raw) of
+        Nothing -> assertFailure ("Unable to parse note item count from value: " ++ raw) >> pure 0
+        Just value -> pure value
+
+fetchNoteItemCountById :: String -> IO Int
+fetchNoteItemCountById itemId = do
+  scalarResult <- runPsqlScalar ("SELECT COUNT(*) FROM note_items WHERE item_id = " ++ quoteSql itemId)
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query note item count for item_id=" ++ itemId ++ ": " ++ err) >> pure 0
+    Right raw ->
+      case readMaybe (trimTrailingNewline raw) of
+        Nothing -> assertFailure ("Unable to parse note item count for item_id=" ++ itemId ++ " from value: " ++ raw) >> pure 0
+        Just value -> pure value
+
+checklistItemExists :: String -> IO Bool
+checklistItemExists itemId = do
+  scalarResult <- runPsqlScalar
+    ("SELECT EXISTS(SELECT 1 FROM checklist_items WHERE item_id = " ++ quoteSql itemId ++ ")")
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query checklist item existence for item_id=" ++ itemId ++ ": " ++ err) >> pure False
+    Right raw ->
+      case trimTrailingNewline raw of
+        "t" -> pure True
+        "f" -> pure False
+        value -> assertFailure ("Unexpected checklist EXISTS value for item_id=" ++ itemId ++ ": " ++ value) >> pure False
+
+fetchChecklistName :: String -> IO String
+fetchChecklistName itemId = do
+  scalarResult <- runPsqlScalar
+    ("SELECT item_content->>'name' FROM checklist_items WHERE item_id = " ++ quoteSql itemId)
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query checklist name for item_id=" ++ itemId ++ ": " ++ err) >> pure ""
+    Right raw ->
+      let value = trimTrailingNewline raw
+       in if null value
+            then assertFailure ("Expected non-empty checklist name for item_id=" ++ itemId) >> pure ""
+            else pure value
+
+fetchChecklistItemsCount :: IO Int
+fetchChecklistItemsCount = do
+  scalarResult <- runPsqlScalar "SELECT COUNT(*) FROM checklist_items"
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query checklist item count: " ++ err) >> pure 0
+    Right raw ->
+      case readMaybe (trimTrailingNewline raw) of
+        Nothing -> assertFailure ("Unable to parse checklist item count from value: " ++ raw) >> pure 0
+        Just value -> pure value
+
+fetchChecklistItemCountById :: String -> IO Int
+fetchChecklistItemCountById itemId = do
+  scalarResult <- runPsqlScalar ("SELECT COUNT(*) FROM checklist_items WHERE item_id = " ++ quoteSql itemId)
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query checklist item count for item_id=" ++ itemId ++ ": " ++ err) >> pure 0
+    Right raw ->
+      case readMaybe (trimTrailingNewline raw) of
+        Nothing -> assertFailure ("Unable to parse checklist item count for item_id=" ++ itemId ++ " from value: " ++ raw) >> pure 0
         Just value -> pure value
 
 readStartupLog :: IO String

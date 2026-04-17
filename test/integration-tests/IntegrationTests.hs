@@ -66,6 +66,24 @@ runIntegrationTests = do
         cookie <- signinOnly baseUsername basePassword
         runCrudLifecycle cookie ChecklistEndpoint firstChecklistContent firstChecklistNewContent
 
+      it "should return not found on stale note update and missing note delete" $ do
+        cookie <- signinOnly baseUsername basePassword
+        assertCrudEndpointConflictAndMissingDelete
+          cookie
+          NoteEndpoint
+          (NoteContent { title = Just "stale note", noteContent = "initial content" })
+          (NoteContent { title = Just "updated note", noteContent = "updated content" })
+          200
+
+      it "should return not found on stale checklist update and missing checklist delete" $ do
+        cookie <- signinOnly baseUsername basePassword
+        assertCrudEndpointConflictAndMissingDelete
+          cookie
+          ChecklistEndpoint
+          (ChecklistContent { name = "stale checklist", items = [ChecklistItem { label = "item-1", checked = False }] })
+          (ChecklistContent { name = "updated checklist", items = [ChecklistItem { label = "item-2", checked = True }] })
+          200
+
       it "should authenticate signin using stored signup password hash" $ do
         signinResponse <- performSigninJSON baseUsername basePassword
         assertStatusCode "Signin should succeed with valid credentials" 200 signinResponse
@@ -1107,6 +1125,34 @@ runCrudLifecycle cookie endpoint initialContent updatedContent = do
   deleteItem cookie endpoint updatedItemId
   assertNoItemAtEndpoint cookie endpoint
 
+assertCrudEndpointConflictAndMissingDelete
+  :: ( Content contentType
+     , Endpoint endpointType
+     , RequestType GET endpointType () [Identifiable contentType]
+     , RequestType POST endpointType contentType StorageId
+     , RequestType PUT endpointType (Identifiable contentType) StorageId
+     )
+  => String
+  -> endpointType
+  -> contentType
+  -> contentType
+  -> Int
+  -> Expectation
+assertCrudEndpointConflictAndMissingDelete cookie endpoint initialContent updatedContent expectedDeleteStatus = do
+  assertNoItemAtEndpoint cookie endpoint
+  createNewContent cookie endpoint initialContent
+  [createdItem] <- assertGetWithContent cookie endpoint initialContent
+  let staleStorageId =
+        case storageId createdItem of
+          StorageId { id = itemId, version = itemVersion } ->
+            StorageId { id = itemId, version = itemVersion ++ "-stale" }
+      staleUpdate = modifyNote updatedContent createdItem { storageId = staleStorageId }
+      missingId =
+        case storageId createdItem of
+          StorageId { id = itemId } -> itemId ++ "-missing"
+  updateItemExpectMessage cookie endpoint staleUpdate 404 "Unable to find storage dir"
+  deleteItemExpectEmptyResponse cookie endpoint missingId expectedDeleteStatus
+
 assertNoItemAtEndpoint :: (Content contentType, RequestType GET endpointType () [Identifiable contentType]) => String -> endpointType -> Expectation
 assertNoItemAtEndpoint cookie endpoint = do
   getResponse :: Response [Identifiable contentType] <- sendRequestWithJSONBodyImplWithCookie (Just cookie) GET endpoint ()
@@ -1134,6 +1180,33 @@ deleteItem cookie endpoint idToDelete = do
                 $ setRequestHeader "Cookie" [BS.pack cookie] req
   deleteResponse <- httpBS deleteReq
   assertStatusCode200 ("Failed to delete item" ++ show idToDelete) deleteResponse
+
+deleteItemExpectEmptyResponse :: Endpoint a => String -> a -> String -> Int -> Expectation
+deleteItemExpectEmptyResponse cookie endpoint idToDelete expectedStatus = do
+  req <- parseRequest ("DELETE http://localhost:8081" ++ getEndpoint endpoint ++ "/" ++ idToDelete)
+  resp <- httpJSON $ setRequestMethod "DELETE"
+                  $ setRequestHeader "Cookie" [BS.pack cookie] req
+  assertStatusCode "Delete should return expected status" expectedStatus (resp :: Response Value)
+  assertEqual "Expected empty JSON response body" (object []) (getResponseBody resp)
+
+updateItemExpectMessage
+  :: ( Endpoint endpointType
+     , ToJSON contentType
+     )
+  => String
+  -> endpointType
+  -> contentType
+  -> Int
+  -> String
+  -> Expectation
+updateItemExpectMessage cookie endpoint updateContent expectedStatus expectedMessage = do
+  req <- parseRequest ("PUT http://localhost:8081" ++ getEndpoint endpoint)
+  resp <- httpJSON $ setRequestMethod "PUT"
+                  $ setRequestHeader "Cookie" [BS.pack cookie]
+                  $ setRequestHeader "Content-Type" ["application/json"]
+                  $ setRequestBodyJSON updateContent req
+  assertStatusCode "Update should return expected status" expectedStatus (resp :: Response Value)
+  assertMessageResponse expectedMessage resp
 
 assertWithFoundContent :: Content a => String -> [a] -> Response [Identifiable a] -> IO [Identifiable a]
 assertWithFoundContent errorPrefix expectedContents response = do

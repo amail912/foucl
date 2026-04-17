@@ -61,6 +61,8 @@ import PostgresMigrations
   , runSessionMigrationsAtPath
   , runCalendarMigrationsAtPath
   , runTripSharingMigrationsAtPath
+  , runNoteMigrationsAtPath
+  , runChecklistMigrationsAtPath
   , psqlAvailable
   )
 import Data.Text (Text, pack)
@@ -1669,6 +1671,12 @@ postgresMigrationTests = test
   , "Postgres trip-sharing migrations: up creates schema contract" ~: tripSharingMigrationUpCreatesSchema
   , "Postgres trip-sharing migrations: down removes schema objects" ~: tripSharingMigrationDownRemovesSchema
   , "Postgres trip-sharing migrations: up/down/up is repeatable" ~: tripSharingMigrationReapplyAfterDown
+  , "Postgres note migrations: up creates schema contract" ~: noteMigrationUpCreatesSchema
+  , "Postgres note migrations: down removes schema objects" ~: noteMigrationDownRemovesSchema
+  , "Postgres note migrations: up/down/up is repeatable" ~: noteMigrationReapplyAfterDown
+  , "Postgres checklist migrations: up creates schema contract" ~: checklistMigrationUpCreatesSchema
+  , "Postgres checklist migrations: down removes schema objects" ~: checklistMigrationDownRemovesSchema
+  , "Postgres checklist migrations: up/down/up is repeatable" ~: checklistMigrationReapplyAfterDown
   ]
 
 migrationUpCreatesAuthSchema :: IO ()
@@ -2004,6 +2012,150 @@ tripSharingMigrationReapplyAfterDown =
                   subscriptionsExists <- fetchTableExists ctx "trip_subscriptions"
                   assertBool "Expected trip_shares table to exist after reapply" sharesExists
                   assertBool "Expected trip_subscriptions table to exist after reapply" subscriptionsExists
+
+noteMigrationUpCreatesSchema :: IO ()
+noteMigrationUpCreatesSchema =
+  withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchema ctx $ do
+      result <- runNoteMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      case result of
+        Left err -> assertFailure ("Expected note migration up success, got " ++ err)
+        Right () -> do
+          tableExists <- fetchTableExists ctx "note_items"
+          assertBool "Expected note_items table to exist" tableExists
+
+          idType <- fetchColumnType ctx "note_items" "item_id"
+          versionType <- fetchColumnType ctx "note_items" "item_version"
+          contentType <- fetchColumnType ctx "note_items" "item_content"
+          assertEqual "Expected note_items.item_id to be text" (Just "text") idType
+          assertEqual "Expected note_items.item_version to be text" (Just "text") versionType
+          assertEqual "Expected note_items.item_content to be jsonb" (Just "jsonb") contentType
+
+          versionIdx <- fetchIndexExists ctx "idx_note_items_item_version"
+          assertBool "Expected idx_note_items_item_version to exist" versionIdx
+
+          insertNote <- runSqlCommandCtx ctx "INSERT INTO note_items (item_id, item_version, item_content) VALUES ('note-1', 'v1', '{\"title\":\"First note\",\"noteContent\":\"Content\"}'::jsonb)"
+          case insertNote of
+            Left err -> assertFailure ("Expected insert into note_items success, got " ++ err)
+            Right () -> pure ()
+
+          duplicateNote <- runSqlCommandCtx ctx "INSERT INTO note_items (item_id, item_version, item_content) VALUES ('note-1', 'v2', '{\"title\":\"Duplicate\",\"noteContent\":\"Content\"}'::jsonb)"
+          assertBool "Expected duplicate note item_id insert to fail by primary key" $
+            case duplicateNote of
+              Left _ -> True
+              Right () -> False
+
+          invalidVersion <- runSqlCommandCtx ctx "INSERT INTO note_items (item_id, item_version, item_content) VALUES ('note-2', '', '{\"title\":\"Bad\",\"noteContent\":\"Content\"}'::jsonb)"
+          assertBool "Expected empty note version insert to fail due to CHECK constraint" $
+            case invalidVersion of
+              Left _ -> True
+              Right () -> False
+
+noteMigrationDownRemovesSchema :: IO ()
+noteMigrationDownRemovesSchema =
+  withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchema ctx $ do
+      upResult <- runNoteMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      case upResult of
+        Left err -> assertFailure ("Expected note migration up success, got " ++ err)
+        Right () -> do
+          downResult <- runNoteMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown
+          case downResult of
+            Left err -> assertFailure ("Expected note migration down success, got " ++ err)
+            Right () -> do
+              tableExists <- fetchTableExists ctx "note_items"
+              assertBool "Expected note_items table to be removed" (not tableExists)
+
+noteMigrationReapplyAfterDown :: IO ()
+noteMigrationReapplyAfterDown =
+  withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchema ctx $ do
+      firstUp <- runNoteMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      case firstUp of
+        Left err -> assertFailure ("Expected first note migration up success, got " ++ err)
+        Right () -> do
+          downResult <- runNoteMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown
+          case downResult of
+            Left err -> assertFailure ("Expected note migration down success, got " ++ err)
+            Right () -> do
+              secondUp <- runNoteMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+              case secondUp of
+                Left err -> assertFailure ("Expected second note migration up success, got " ++ err)
+                Right () -> do
+                  tableExists <- fetchTableExists ctx "note_items"
+                  assertBool "Expected note_items table to exist after reapply" tableExists
+
+checklistMigrationUpCreatesSchema :: IO ()
+checklistMigrationUpCreatesSchema =
+  withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchema ctx $ do
+      result <- runChecklistMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      case result of
+        Left err -> assertFailure ("Expected checklist migration up success, got " ++ err)
+        Right () -> do
+          tableExists <- fetchTableExists ctx "checklist_items"
+          assertBool "Expected checklist_items table to exist" tableExists
+
+          idType <- fetchColumnType ctx "checklist_items" "item_id"
+          versionType <- fetchColumnType ctx "checklist_items" "item_version"
+          contentType <- fetchColumnType ctx "checklist_items" "item_content"
+          assertEqual "Expected checklist_items.item_id to be text" (Just "text") idType
+          assertEqual "Expected checklist_items.item_version to be text" (Just "text") versionType
+          assertEqual "Expected checklist_items.item_content to be jsonb" (Just "jsonb") contentType
+
+          versionIdx <- fetchIndexExists ctx "idx_checklist_items_item_version"
+          assertBool "Expected idx_checklist_items_item_version to exist" versionIdx
+
+          insertChecklist <- runSqlCommandCtx ctx "INSERT INTO checklist_items (item_id, item_version, item_content) VALUES ('checklist-1', 'v1', '{\"name\":\"First checklist\",\"items\":[{\"label\":\"item\",\"checked\":false}]}'::jsonb)"
+          case insertChecklist of
+            Left err -> assertFailure ("Expected insert into checklist_items success, got " ++ err)
+            Right () -> pure ()
+
+          duplicateChecklist <- runSqlCommandCtx ctx "INSERT INTO checklist_items (item_id, item_version, item_content) VALUES ('checklist-1', 'v2', '{\"name\":\"Duplicate\",\"items\":[]}'::jsonb)"
+          assertBool "Expected duplicate checklist item_id insert to fail by primary key" $
+            case duplicateChecklist of
+              Left _ -> True
+              Right () -> False
+
+          invalidVersion <- runSqlCommandCtx ctx "INSERT INTO checklist_items (item_id, item_version, item_content) VALUES ('checklist-2', '', '{\"name\":\"Bad checklist\",\"items\":[]}'::jsonb)"
+          assertBool "Expected empty checklist version insert to fail due to CHECK constraint" $
+            case invalidVersion of
+              Left _ -> True
+              Right () -> False
+
+checklistMigrationDownRemovesSchema :: IO ()
+checklistMigrationDownRemovesSchema =
+  withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchema ctx $ do
+      upResult <- runChecklistMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      case upResult of
+        Left err -> assertFailure ("Expected checklist migration up success, got " ++ err)
+        Right () -> do
+          downResult <- runChecklistMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown
+          case downResult of
+            Left err -> assertFailure ("Expected checklist migration down success, got " ++ err)
+            Right () -> do
+              tableExists <- fetchTableExists ctx "checklist_items"
+              assertBool "Expected checklist_items table to be removed" (not tableExists)
+
+checklistMigrationReapplyAfterDown :: IO ()
+checklistMigrationReapplyAfterDown =
+  withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchema ctx $ do
+      firstUp <- runChecklistMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      case firstUp of
+        Left err -> assertFailure ("Expected first checklist migration up success, got " ++ err)
+        Right () -> do
+          downResult <- runChecklistMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown
+          case downResult of
+            Left err -> assertFailure ("Expected checklist migration down success, got " ++ err)
+            Right () -> do
+              secondUp <- runChecklistMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+              case secondUp of
+                Left err -> assertFailure ("Expected second checklist migration up success, got " ++ err)
+                Right () -> do
+                  tableExists <- fetchTableExists ctx "checklist_items"
+                  assertBool "Expected checklist_items table to exist after reapply" tableExists
 
 data PostgresTestContext = PostgresTestContext
   { ctxConnUrl :: String

@@ -8,6 +8,10 @@ module PostgresMigrations
   , runCalendarMigrationsAtPath
   , runTripSharingMigrations
   , runTripSharingMigrationsAtPath
+  , runNoteMigrations
+  , runNoteMigrationsAtPath
+  , runChecklistMigrations
+  , runChecklistMigrationsAtPath
   , psqlAvailable
   ) where
 
@@ -61,6 +65,20 @@ runTripSharingMigrations = runTripSharingMigrationsAtPath "."
 runTripSharingMigrationsAtPath :: FilePath -> String -> MigrationDirection -> IO (Either String ())
 runTripSharingMigrationsAtPath basePath connectionUrl direction =
   runMigrationsAtPath "trip-sharing" basePath connectionUrl direction tripSharingMigrations
+
+runNoteMigrations :: String -> MigrationDirection -> IO (Either String ())
+runNoteMigrations = runNoteMigrationsAtPath "."
+
+runNoteMigrationsAtPath :: FilePath -> String -> MigrationDirection -> IO (Either String ())
+runNoteMigrationsAtPath basePath connectionUrl direction =
+  runMigrationsAtPath "note" basePath connectionUrl direction noteMigrations
+
+runChecklistMigrations :: String -> MigrationDirection -> IO (Either String ())
+runChecklistMigrations = runChecklistMigrationsAtPath "."
+
+runChecklistMigrationsAtPath :: FilePath -> String -> MigrationDirection -> IO (Either String ())
+runChecklistMigrationsAtPath basePath connectionUrl direction =
+  runMigrationsAtPath "checklist" basePath connectionUrl direction checklistMigrations
 
 runMigrationsAtPath :: String -> FilePath -> String -> MigrationDirection -> [SqlMigration] -> IO (Either String ())
 runMigrationsAtPath domain basePath connectionUrl direction migrations = do
@@ -126,6 +144,24 @@ tripSharingMigrations =
       { migrationId = "0001_trip_sharing_schema"
       , upSqlPath = "db/migrations/trip-sharing/0001_trip_sharing_schema.up.sql"
       , downSqlPath = "db/migrations/trip-sharing/0001_trip_sharing_schema.down.sql"
+      }
+  ]
+
+noteMigrations :: [SqlMigration]
+noteMigrations =
+  [ SqlMigration
+      { migrationId = "0001_note_schema"
+      , upSqlPath = "db/migrations/note/0001_note_schema.up.sql"
+      , downSqlPath = "db/migrations/note/0001_note_schema.down.sql"
+      }
+  ]
+
+checklistMigrations :: [SqlMigration]
+checklistMigrations =
+  [ SqlMigration
+      { migrationId = "0001_checklist_schema"
+      , upSqlPath = "db/migrations/checklist/0001_checklist_schema.up.sql"
+      , downSqlPath = "db/migrations/checklist/0001_checklist_schema.down.sql"
       }
   ]
 

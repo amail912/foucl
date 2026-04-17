@@ -288,6 +288,194 @@ runIntegrationPostgresTests = do
           assertStatusCode "Signout all should remain successful on session technical failure" 200 signoutResp
           assertExpiredSetCookie signoutResp
 
+      describe "Calendar and trip-sharing parity" $ do
+        it "keeps agenda create/list/update/validate/delete semantics" $ do
+          suffix <- uniqueSuffix
+          let username = "pg-030-agenda-" ++ suffix
+          seedApprovedUser username ["member"]
+          cookie <- signinOnly username testPassword
+
+          initialItems <- getAgendaItems cookie
+          assertEqual "Agenda should start empty" [] initialItems
+
+          created <- createAgendaItemValue cookie (mkLegacyContent "Agenda parity title" "2025-04-01T09:00" "2025-04-01T10:00" "TODO")
+          itemId <- extractCalendarItemId created
+          assertEqual
+            "Agenda create payload should keep expected shape"
+            (object
+              [ "id" .= itemId
+              , "type" .= ("INTENTION" :: String)
+              , "titre" .= ("Agenda parity title" :: String)
+              , "fenetre_debut" .= ("2025-04-01T09:00" :: String)
+              , "fenetre_fin" .= ("2025-04-01T10:00" :: String)
+              , "statut" .= ("TODO" :: String)
+              ])
+            created
+
+          listedAfterCreate <- getAgendaItems cookie
+          assertEqual "Agenda list should contain created item" [created] listedAfterCreate
+
+          updated <- createAgendaItemValue cookie
+            (object
+              [ "id" .= itemId
+              , "type" .= ("INTENTION" :: String)
+              , "titre" .= ("Agenda parity updated" :: String)
+              , "fenetre_debut" .= ("2025-04-01T09:00" :: String)
+              , "fenetre_fin" .= ("2025-04-01T10:00" :: String)
+              , "statut" .= ("EN_COURS" :: String)
+              ])
+          assertEqual
+            "Agenda update payload should keep expected shape"
+            (object
+              [ "id" .= itemId
+              , "type" .= ("INTENTION" :: String)
+              , "titre" .= ("Agenda parity updated" :: String)
+              , "fenetre_debut" .= ("2025-04-01T09:00" :: String)
+              , "fenetre_fin" .= ("2025-04-01T10:00" :: String)
+              , "statut" .= ("EN_COURS" :: String)
+              ])
+            updated
+
+          validateAgendaItem cookie itemId 37
+          listedAfterValidate <- getAgendaItems cookie
+          assertEqual
+            "Agenda validate should set actual duration minutes"
+            [ object
+              [ "id" .= itemId
+              , "type" .= ("INTENTION" :: String)
+              , "titre" .= ("Agenda parity updated" :: String)
+              , "fenetre_debut" .= ("2025-04-01T09:00" :: String)
+              , "fenetre_fin" .= ("2025-04-01T10:00" :: String)
+              , "statut" .= ("EN_COURS" :: String)
+              , "duree_reelle_minutes" .= (37 :: Int)
+              ]
+            ]
+            listedAfterValidate
+
+          deleteAgendaItem cookie itemId
+          listedAfterDelete <- getAgendaItems cookie
+          assertEqual "Agenda should be empty after delete" [] listedAfterDelete
+
+          deleteAgendaItemExpectStatus cookie "missing-agenda-item" 404
+
+        it "keeps share/subscription add-list-delete semantics, ordering, and independence" $ do
+          suffix <- uniqueSuffix
+          let ownerUsername = "pg-030-share-owner-" ++ suffix
+              otherUsername = "pg-030-share-other-" ++ suffix
+              thirdUsername = "pg-030-share-third-" ++ suffix
+          seedApprovedUser ownerUsername ["member"]
+          seedApprovedUser otherUsername ["member"]
+          seedApprovedUser thirdUsername ["member"]
+          ownerCookie <- signinOnly ownerUsername testPassword
+
+          emptyShares <- getSharedUsersList ownerCookie
+          emptySubscriptions <- getSubscribedUsersList ownerCookie
+          assertEqual "Shares should start empty" [] emptyShares
+          assertEqual "Subscriptions should start empty" [] emptySubscriptions
+
+          addSharedUser ownerCookie thirdUsername
+          addSharedUser ownerCookie otherUsername
+          addSharedUser ownerCookie otherUsername
+          shares <- getSharedUsersList ownerCookie
+          assertEqual
+            "Shares should stay ordered and idempotent"
+            [tripSharingUserValue otherUsername, tripSharingUserValue thirdUsername]
+            shares
+
+          deleteSharedUser ownerCookie otherUsername
+          deleteSharedUser ownerCookie otherUsername
+          sharesAfterDelete <- getSharedUsersList ownerCookie
+          assertEqual "Deleting missing shared user should remain idempotent" [tripSharingUserValue thirdUsername] sharesAfterDelete
+
+          addSubscribedUser ownerCookie thirdUsername
+          addSubscribedUser ownerCookie otherUsername
+          addSubscribedUser ownerCookie otherUsername
+          subscriptions <- getSubscribedUsersList ownerCookie
+          assertEqual
+            "Subscriptions should stay ordered and idempotent"
+            [tripSharingUserValue otherUsername, tripSharingUserValue thirdUsername]
+            subscriptions
+
+          deleteSubscribedUser ownerCookie otherUsername
+          deleteSubscribedUser ownerCookie otherUsername
+          subscriptionsAfterDelete <- getSubscribedUsersList ownerCookie
+          assertEqual
+            "Deleting missing subscribed user should remain idempotent"
+            [tripSharingUserValue thirdUsername]
+            subscriptionsAfterDelete
+
+          addSharedUser ownerCookie otherUsername
+          addSubscribedUser ownerCookie otherUsername
+          independentShares <- getSharedUsersList ownerCookie
+          independentSubscriptions <- getSubscribedUsersList ownerCookie
+          assertEqual
+            "Shares should remain independent from subscriptions"
+            [tripSharingUserValue otherUsername, tripSharingUserValue thirdUsername]
+            independentShares
+          assertEqual
+            "Subscriptions should remain independent from shares"
+            [tripSharingUserValue otherUsername, tripSharingUserValue thirdUsername]
+            independentSubscriptions
+
+        it "keeps period-trips query validation semantics" $ do
+          suffix <- uniqueSuffix
+          let username = "pg-030-period-validate-" ++ suffix
+          seedApprovedUser username ["member"]
+          cookie <- signinOnly username testPassword
+
+          assertPeriodTripsValidationError cookie Nothing (Just "2025-03-10T12:00") "start is required"
+          assertPeriodTripsValidationError cookie (Just "not-a-date") (Just "2025-03-10T12:00") "start must be a valid ISO date-time string"
+          assertPeriodTripsValidationError cookie (Just "2025-03-10T12:00") (Just "2025-03-10T12:00") "end must be strictly after start"
+
+        it "keeps period-trips visibility ordering and seed-window semantics" $ do
+          suffix <- uniqueSuffix
+          let baseUsername = "pg-030-period-base-" ++ suffix
+              otherUsername = "pg-030-period-other-" ++ suffix
+              thirdUsername = "pg-030-period-third-" ++ suffix
+          seedApprovedUser baseUsername ["member"]
+          seedApprovedUser otherUsername ["member"]
+          seedApprovedUser thirdUsername ["member"]
+          baseCookie <- signinOnly baseUsername testPassword
+          otherCookie <- signinOnly otherUsername testPassword
+          thirdCookie <- signinOnly thirdUsername testPassword
+
+          otherTrip <- createAgendaItemValue otherCookie (mkTripContent "2025-03-10T09:00" "2025-03-10T10:00" "Paris" "Le Mesnil")
+          thirdTrip <- createAgendaItemValue thirdCookie (mkTripContent "2025-03-10T11:00" "2025-03-10T12:00" "Le Mesnil" "St Clair")
+
+          addSubscribedUser baseCookie otherUsername
+          addSharedUser thirdCookie baseUsername
+          hiddenTrips <- getPeriodTripsList baseCookie "2025-03-10T00:00" "2025-03-11T00:00"
+          assertEqual "Period trips should stay hidden without both relations" [] hiddenTrips
+
+          addSharedUser otherCookie baseUsername
+          addSubscribedUser baseCookie thirdUsername
+          firstRead <- getPeriodTripsList baseCookie "2025-03-10T00:00" "2025-03-11T00:00"
+          secondRead <- getPeriodTripsList baseCookie "2025-03-10T00:00" "2025-03-11T00:00"
+          let expectedVisible =
+                [ periodTripsUserValue otherUsername [otherTrip]
+                , periodTripsUserValue thirdUsername [thirdTrip]
+                ]
+          assertEqual "Visible period-trip users should be returned in stable username order" expectedVisible firstRead
+          assertEqual "Repeated period-trip reads should stay stable" expectedVisible secondRead
+
+          deleteSubscribedUser baseCookie thirdUsername
+
+          earlyTrip <- createAgendaItemValue otherCookie (mkTripContent "2025-03-20T07:00" "2025-03-20T08:00" "Paris" "Le Mesnil")
+          seedTrip <- createAgendaItemValue otherCookie (mkTripContent "2025-03-20T09:00" "2025-03-20T09:30" "Le Mesnil" "Paris")
+          startTrip <- createAgendaItemValue otherCookie (mkTripContent "2025-03-20T10:00" "2025-03-20T11:00" "Paris" "St Clair")
+          middleTrip <- createAgendaItemValue otherCookie (mkTripContent "2025-03-20T12:00" "2025-03-20T13:00" "St Clair" "Le Mesnil")
+          endTrip <- createAgendaItemValue otherCookie (mkTripContent "2025-03-20T15:00" "2025-03-20T16:00" "Le Mesnil" "Paris")
+
+          seededWindowTrips <- getPeriodTripsList baseCookie "2025-03-20T10:00" "2025-03-20T15:00"
+          assertEqual
+            "Period trips should include last seed trip before start and only in-window trips"
+            [periodTripsUserValue otherUsername [seedTrip, startTrip, middleTrip]]
+            seededWindowTrips
+
+          _ <- extractCalendarItemId earlyTrip
+          _ <- extractCalendarItemId endTrip
+          pure ()
+
 withFreshPostgresFixtures :: IO () -> IO ()
 withFreshPostgresFixtures action = do
   resetPostgresSchema
@@ -303,6 +491,8 @@ assertPostgresReachable = do
 
 resetPostgresSchema :: IO ()
 resetPostgresSchema = do
+  _ <- runPsqlFile tripSharingDownMigration
+  _ <- runPsqlFile calendarDownMigration
   _ <- runPsqlFile sessionDownMigration
   _ <- runPsqlFile authDownMigration
 
@@ -316,9 +506,19 @@ resetPostgresSchema = do
     Left err -> assertFailure ("Session up migration failed: " ++ err)
     Right () -> pure ()
 
-  truncateResult <- runPsqlCommand "TRUNCATE TABLE auth_users"
+  calendarUpResult <- runPsqlFile calendarUpMigration
+  case calendarUpResult of
+    Left err -> assertFailure ("Calendar up migration failed: " ++ err)
+    Right () -> pure ()
+
+  tripSharingUpResult <- runPsqlFile tripSharingUpMigration
+  case tripSharingUpResult of
+    Left err -> assertFailure ("Trip-sharing up migration failed: " ++ err)
+    Right () -> pure ()
+
+  truncateResult <- runPsqlCommand "TRUNCATE TABLE auth_users, session_handles, session_user_bindings, session_states, calendar_items, trip_shares, trip_subscriptions"
   case truncateResult of
-    Left err -> assertFailure ("Auth table cleanup failed: " ++ err)
+    Left err -> assertFailure ("Postgres table cleanup failed: " ++ err)
     Right () -> pure ()
 
 signinAsAdmin :: IO (Response Value)
@@ -383,6 +583,170 @@ getAuthProfile cookie = do
   httpJSON
     $ setRequestMethod "GET"
     $ setRequestHeader "Cookie" [BS.pack cookie] req
+
+getAgendaItems :: String -> IO [Value]
+getAgendaItems cookie = do
+  req <- parseRequest "GET http://localhost:8081/api/v1/calendar-items"
+  resp <- httpJSON
+    $ setRequestMethod "GET"
+    $ setRequestHeader "Cookie" [BS.pack cookie] req
+  assertStatusCode "Agenda list should succeed" 200 resp
+  pure (getResponseBody resp)
+
+createAgendaItemValue :: String -> Value -> IO Value
+createAgendaItemValue cookie payload = do
+  req <- parseRequest "POST http://localhost:8081/api/v1/calendar-items"
+  resp <- httpJSON
+    $ setRequestMethod "POST"
+    $ setRequestHeader "Cookie" [BS.pack cookie]
+    $ setRequestHeader "Content-Type" ["application/json"]
+    $ setRequestBodyJSON payload req
+  assertStatusCode "Agenda create/update should succeed" 200 resp
+  pure (getResponseBody resp)
+
+validateAgendaItem :: String -> String -> Int -> IO ()
+validateAgendaItem cookie itemId minutes = do
+  req <- parseRequest "POST http://localhost:8081/api/v1/calendar-items"
+  resp <- httpNoBody
+    $ setRequestMethod "POST"
+    $ setRequestHeader "Cookie" [BS.pack cookie]
+    $ setRequestHeader "Content-Type" ["application/json"]
+    $ setRequestBodyJSON
+      (object
+        [ "id" .= itemId
+        , "duree_reelle_minutes" .= minutes
+        ])
+      req
+  assertStatusCode "Agenda validate should succeed" 200 resp
+
+deleteAgendaItem :: String -> String -> IO ()
+deleteAgendaItem cookie itemId = deleteAgendaItemExpectStatus cookie itemId 200
+
+deleteAgendaItemExpectStatus :: String -> String -> Int -> IO ()
+deleteAgendaItemExpectStatus cookie itemId expectedStatus = do
+  req <- parseRequest ("DELETE http://localhost:8081/api/v1/calendar-items/" ++ itemId)
+  resp <- httpNoBody
+    $ setRequestMethod "DELETE"
+    $ setRequestHeader "Cookie" [BS.pack cookie] req
+  assertStatusCode "Agenda delete should return expected status" expectedStatus resp
+
+getSharedUsersList :: String -> IO [Value]
+getSharedUsersList cookie = do
+  req <- parseRequest "GET http://localhost:8081/api/v1/trip-sharing/shares"
+  resp <- httpJSON
+    $ setRequestMethod "GET"
+    $ setRequestHeader "Cookie" [BS.pack cookie] req
+  assertStatusCode "Share list should succeed" 200 resp
+  pure (getResponseBody resp)
+
+addSharedUser :: String -> String -> IO ()
+addSharedUser cookie username = do
+  req <- parseRequest "POST http://localhost:8081/api/v1/trip-sharing/shares"
+  resp <- httpNoBody
+    $ setRequestMethod "POST"
+    $ setRequestHeader "Cookie" [BS.pack cookie]
+    $ setRequestHeader "Content-Type" ["application/json"]
+    $ setRequestBodyJSON (object ["username" .= username]) req
+  assertStatusCode "Share add should succeed" 200 resp
+
+deleteSharedUser :: String -> String -> IO ()
+deleteSharedUser cookie username = do
+  req <- parseRequest ("DELETE http://localhost:8081/api/v1/trip-sharing/shares/" ++ username)
+  resp <- httpNoBody
+    $ setRequestMethod "DELETE"
+    $ setRequestHeader "Cookie" [BS.pack cookie] req
+  assertStatusCode "Share delete should succeed" 200 resp
+
+getSubscribedUsersList :: String -> IO [Value]
+getSubscribedUsersList cookie = do
+  req <- parseRequest "GET http://localhost:8081/api/v1/trip-sharing/subscriptions"
+  resp <- httpJSON
+    $ setRequestMethod "GET"
+    $ setRequestHeader "Cookie" [BS.pack cookie] req
+  assertStatusCode "Subscription list should succeed" 200 resp
+  pure (getResponseBody resp)
+
+addSubscribedUser :: String -> String -> IO ()
+addSubscribedUser cookie username = do
+  req <- parseRequest "POST http://localhost:8081/api/v1/trip-sharing/subscriptions"
+  resp <- httpNoBody
+    $ setRequestMethod "POST"
+    $ setRequestHeader "Cookie" [BS.pack cookie]
+    $ setRequestHeader "Content-Type" ["application/json"]
+    $ setRequestBodyJSON (object ["username" .= username]) req
+  assertStatusCode "Subscription add should succeed" 200 resp
+
+deleteSubscribedUser :: String -> String -> IO ()
+deleteSubscribedUser cookie username = do
+  req <- parseRequest ("DELETE http://localhost:8081/api/v1/trip-sharing/subscriptions/" ++ username)
+  resp <- httpNoBody
+    $ setRequestMethod "DELETE"
+    $ setRequestHeader "Cookie" [BS.pack cookie] req
+  assertStatusCode "Subscription delete should succeed" 200 resp
+
+periodTripsRequest :: Maybe String -> Maybe String -> Maybe String -> IO Request
+periodTripsRequest mCookie mStart mEnd = do
+  req <- parseRequest "GET http://localhost:8081/api/v1/trip-sharing/period-trips"
+  let withCookie =
+        case mCookie of
+          Nothing -> id
+          Just cookie -> setRequestHeader "Cookie" [BS.pack cookie]
+      query =
+        maybe [] (\start -> [("start", Just (BS.pack start))]) mStart
+          ++ maybe [] (\end -> [("end", Just (BS.pack end))]) mEnd
+  pure $ withCookie $ setRequestMethod "GET" $ setRequestQueryString query req
+
+getPeriodTripsList :: String -> String -> String -> IO [Value]
+getPeriodTripsList cookie start end = do
+  req <- periodTripsRequest (Just cookie) (Just start) (Just end)
+  resp <- httpJSON req
+  assertStatusCode "Period trips request should succeed" 200 resp
+  pure (getResponseBody resp)
+
+assertPeriodTripsValidationError :: String -> Maybe String -> Maybe String -> String -> IO ()
+assertPeriodTripsValidationError cookie mStart mEnd expectedMessage = do
+  req <- periodTripsRequest (Just cookie) mStart mEnd
+  resp <- httpJSON req
+  assertStatusCode "Period trips validation should return 400" 400 resp
+  assertMessageResponse expectedMessage resp
+
+extractCalendarItemId :: Value -> IO String
+extractCalendarItemId value =
+  case value of
+    Object v ->
+      case parseMaybe (.: "id") v of
+        Just itemId ->
+          if null (itemId :: String)
+            then assertFailure "Expected non-empty calendar item id" >> pure ""
+            else pure itemId
+        Nothing -> assertFailure "Expected calendar item response with id field" >> pure ""
+    _ -> assertFailure "Expected calendar item JSON object" >> pure ""
+
+mkLegacyContent :: String -> String -> String -> String -> Value
+mkLegacyContent title windowStart windowEnd status =
+  object
+    [ "type" .= ("INTENTION" :: String)
+    , "titre" .= title
+    , "fenetre_debut" .= windowStart
+    , "fenetre_fin" .= windowEnd
+    , "statut" .= status
+    ]
+
+mkTripContent :: String -> String -> String -> String -> Value
+mkTripContent start end departure arrival =
+  object
+    [ "type" .= ("trip" :: String)
+    , "windowStart" .= start
+    , "windowEnd" .= end
+    , "departurePlaceId" .= departure
+    , "arrivalPlaceId" .= arrival
+    ]
+
+tripSharingUserValue :: String -> Value
+tripSharingUserValue username = object ["username" .= username]
+
+periodTripsUserValue :: String -> [Value] -> Value
+periodTripsUserValue username trips = object ["username" .= username, "trips" .= trips]
 
 getPendingSignups :: String -> IO [Value]
 getPendingSignups cookie = do
@@ -774,6 +1138,18 @@ sessionUpMigration = "db/migrations/session/0001_session_schema.up.sql"
 
 sessionDownMigration :: FilePath
 sessionDownMigration = "db/migrations/session/0001_session_schema.down.sql"
+
+calendarUpMigration :: FilePath
+calendarUpMigration = "db/migrations/calendar/0001_calendar_schema.up.sql"
+
+calendarDownMigration :: FilePath
+calendarDownMigration = "db/migrations/calendar/0001_calendar_schema.down.sql"
+
+tripSharingUpMigration :: FilePath
+tripSharingUpMigration = "db/migrations/trip-sharing/0001_trip_sharing_schema.up.sql"
+
+tripSharingDownMigration :: FilePath
+tripSharingDownMigration = "db/migrations/trip-sharing/0001_trip_sharing_schema.down.sql"
 
 testPassword :: String
 testPassword = "averystrongpass"

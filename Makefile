@@ -26,7 +26,7 @@ help:
 	@echo "  make restart-sandbox  Restart sandbox server"
 	@echo "  make stop-sandbox     Stop sandbox server"
 	@echo "  make integration-test Run integration tests against sandbox server"
-	@echo "  make integration-test-postgres Run postgres parity integration tests (auth + session) against postgres backends"
+	@echo "  make integration-test-postgres Run postgres parity integration tests (auth + session + calendar + trip-sharing) against postgres backends"
 
 lint:
 	./scripts/lint.sh
@@ -54,11 +54,15 @@ _prepare-sandbox:
 
 _prepare-postgres-test-db:
 	@set -euo pipefail; \
+	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/trip-sharing/0001_trip_sharing_schema.down.sql"; \
+	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/calendar/0001_calendar_schema.down.sql"; \
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/session/0001_session_schema.down.sql"; \
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/auth/0001_auth_schema.down.sql"; \
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/auth/0001_auth_schema.up.sql"; \
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/session/0001_session_schema.up.sql"; \
-	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -c "TRUNCATE TABLE auth_users, session_handles, session_user_bindings, session_states"; \
+	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/calendar/0001_calendar_schema.up.sql"; \
+	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/trip-sharing/0001_trip_sharing_schema.up.sql"; \
+	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -c "TRUNCATE TABLE auth_users, session_handles, session_user_bindings, session_states, calendar_items, trip_shares, trip_subscriptions"; \
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -c "INSERT INTO auth_users (username, password_hash, role, approved) VALUES ('startup-conflict-user', 'postgres-conflict-hash', 'admin'::auth_user_role, true), ('startup-postgres-only-user', 'postgres-only-hash', 'member'::auth_user_role, false)";
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -c "INSERT INTO session_states (state_id, user_id, created_at, expires_at, idle_expires_at, revoked_at) VALUES ('11111111-1111-1111-1111-111111111111'::uuid, 'startup-pg-conflict-user', '2025-01-01T00:00:00Z'::timestamptz, '2030-01-01T00:00:00Z'::timestamptz, '2030-01-01T01:00:00Z'::timestamptz, NULL), ('22222222-2222-2222-2222-222222222222'::uuid, 'startup-pg-only-user', '2025-01-01T00:00:00Z'::timestamptz, '2030-01-01T00:00:00Z'::timestamptz, '2030-01-01T01:00:00Z'::timestamptz, NULL)"; \
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -c "INSERT INTO session_handles (session_id, state_id, issued_at, revoked_at) VALUES ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'::uuid, '11111111-1111-1111-1111-111111111111'::uuid, '2025-01-01T00:00:00Z'::timestamptz, NULL), ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'::uuid, '22222222-2222-2222-2222-222222222222'::uuid, '2025-01-01T00:00:00Z'::timestamptz, NULL)"; \
@@ -87,6 +91,8 @@ _write-postgres-config:
 	'    "idleTtlSeconds": 86400,' \
 	'    "sessionBackend": "postgres"' \
 	'  },' \
+	'  "calendarBackend": "postgres",' \
+	'  "tripSharingBackend": "postgres",' \
 	'  "database": {' \
 	'    "host": "127.0.0.1",' \
 	'    "port": 5432,' \

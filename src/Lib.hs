@@ -739,21 +739,93 @@ runStartupMigrationsIfNeeded
   -> Maybe DatabaseConfig
   -> IO (Either String ())
 runStartupMigrationsIfNeeded authMode sessionMode calendarMode tripSharingMode noteMode checklistMode mDatabaseCfg = do
-  let domains = startupMigrationDomainsForBackends authMode sessionMode calendarMode tripSharingMode noteMode checklistMode
-  case (domains, mDatabaseCfg) of
-    ([], _) -> pure (Right ())
-    (_, Nothing) -> pure (Left "Configuration database is required when any backend uses postgres")
+  let selectedDomains = startupMigrationDomainsForBackends authMode sessionMode calendarMode tripSharingMode noteMode checklistMode
+      skippedDomains = startupMigrationSkippedDomains selectedDomains
+      selectedRendered = renderStartupMigrationDomainList selectedDomains
+      skippedRendered = renderStartupMigrationDomainList skippedDomains
+      selectedCount = length selectedDomains
+  putStrLn
+    ( "[startup][migrations] start"
+        ++ " direction=MigrateUp"
+        ++ " selected="
+        ++ selectedRendered
+        ++ " skipped="
+        ++ skippedRendered
+    )
+  case (selectedDomains, mDatabaseCfg) of
+    ([], _) -> do
+      putStrLn
+        ( "[startup][migrations] completed"
+            ++ " direction=MigrateUp"
+            ++ " domains=0"
+            ++ " selected="
+            ++ selectedRendered
+            ++ " skipped="
+            ++ skippedRendered
+        )
+      pure (Right ())
+    (_, Nothing) -> do
+      let err = "Configuration database is required when any backend uses postgres"
+      putStrLn
+        ( "[startup][migrations] failed"
+            ++ " direction=MigrateUp"
+            ++ " domain=none"
+            ++ " selected="
+            ++ selectedRendered
+            ++ " skipped="
+            ++ skippedRendered
+            ++ " reason="
+            ++ err
+        )
+      pure (Left err)
     (_, Just dbCfg) -> do
       let connectionString = renderPostgresConnectionString dbCfg
-      putStrLn ("[startup][migrations] running domains=" ++ intercalate "," domains ++ " direction=MigrateUp")
-      runDomains "." connectionString domains
+      runDomains "." connectionString selectedDomains selectedRendered skippedRendered selectedCount
   where
-    runDomains _ _ [] = pure (Right ())
-    runDomains basePath connectionString (domain:rest) = do
+    runDomains _ _ [] selectedRendered skippedRendered selectedCount = do
+      putStrLn
+        ( "[startup][migrations] completed"
+            ++ " direction=MigrateUp"
+            ++ " domains="
+            ++ show selectedCount
+            ++ " selected="
+            ++ selectedRendered
+            ++ " skipped="
+            ++ skippedRendered
+        )
+      pure (Right ())
+    runDomains basePath connectionString (domain:rest) selectedRendered skippedRendered selectedCount = do
+      putStrLn ("[startup][migrations] domain=" ++ domain ++ " phase=start direction=MigrateUp")
       result <- runDomainMigration basePath connectionString domain
       case result of
-        Left err -> pure (Left err)
-        Right () -> runDomains basePath connectionString rest
+        Left err -> do
+          putStrLn
+            ( "[startup][migrations] failed"
+                ++ " direction=MigrateUp"
+                ++ " domain="
+                ++ domain
+                ++ " selected="
+                ++ selectedRendered
+                ++ " skipped="
+                ++ skippedRendered
+                ++ " reason="
+                ++ err
+            )
+          pure (Left err)
+        Right () -> do
+          putStrLn ("[startup][migrations] domain=" ++ domain ++ " phase=done direction=MigrateUp")
+          runDomains basePath connectionString rest selectedRendered skippedRendered selectedCount
+
+startupMigrationSkippedDomains :: [String] -> [String]
+startupMigrationSkippedDomains selectedDomains =
+  filter (`notElem` selectedDomains) startupMigrationCanonicalDomains
+
+startupMigrationCanonicalDomains :: [String]
+startupMigrationCanonicalDomains = ["auth", "session", "calendar", "trip-sharing", "note", "checklist"]
+
+renderStartupMigrationDomainList :: [String] -> String
+renderStartupMigrationDomainList [] = "none"
+renderStartupMigrationDomainList domains = intercalate "," domains
 
 runDomainMigration :: FilePath -> String -> String -> IO (Either String ())
 runDomainMigration basePath connectionString domain = do

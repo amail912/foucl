@@ -116,6 +116,86 @@ runIntegrationPostgresTests = do
         fsOnlyBindingCount <- fetchSessionBindingCountByUserId "startup-fs-only-session-user"
         assertEqual "Expected exactly one imported filesystem-only startup binding" 1 fsOnlyBindingCount
 
+    describe "Calendar startup import" $ do
+      it "imports filesystem-only items and preserves postgres-conflicting items" $ do
+        fsOnlyExists <- calendarItemExists "startup-calendar-fs-only-user" "startup-calendar-fs-only-item"
+        assertBool "Expected filesystem-only startup calendar item to be imported into Postgres" fsOnlyExists
+
+        conflictTitle <- fetchCalendarItemLegacyTitle "startup-calendar-conflict-user" "startup-calendar-conflict-item"
+        assertEqual "Expected conflicting startup calendar item to keep Postgres value" "postgres-calendar-conflict-title" conflictTitle
+
+        postgresOnlyExists <- calendarItemExists "startup-calendar-postgres-only-user" "startup-calendar-postgres-only-item"
+        assertBool "Expected existing Postgres-only startup calendar item to be preserved" postgresOnlyExists
+
+      it "emits startup overlap/conflict warnings in server log" $ do
+        logContent <- readStartupLog
+        assertBool
+          "Expected overlap warning log entry for calendar startup import"
+          ("[startup][calendar-import][warning] overlap detected" `isInfixOf` logContent)
+        assertBool
+          "Expected conflict warning log entry for startup-calendar-conflict-item"
+          ("[startup][calendar-import][warning] skipping conflicting user_id=startup-calendar-conflict-user item_id=startup-calendar-conflict-item policy=postgres-wins" `isInfixOf` logContent)
+
+      it "remains idempotent across sandbox restart" $ do
+        countBefore <- fetchCalendarItemsCount
+        restartPostgresSandboxServer
+        countAfter <- fetchCalendarItemsCount
+        assertEqual "Expected calendar startup import to remain idempotent after restart" countBefore countAfter
+
+        fsOnlyCount <- fetchCalendarItemCountByKey "startup-calendar-fs-only-user" "startup-calendar-fs-only-item"
+        assertEqual "Expected exactly one imported filesystem-only startup calendar item" 1 fsOnlyCount
+
+        conflictTitle <- fetchCalendarItemLegacyTitle "startup-calendar-conflict-user" "startup-calendar-conflict-item"
+        assertEqual "Expected conflicting startup calendar item to remain Postgres-authored after restart" "postgres-calendar-conflict-title" conflictTitle
+
+    describe "Trip-sharing startup import" $ do
+      it "imports filesystem-only relations and preserves postgres-conflicting relations" $ do
+        fsOnlyShareExists <- tripShareExists "startup-trip-sharing-owner" "startup-trip-sharing-fs-only-target"
+        assertBool "Expected filesystem-only startup trip share to be imported into Postgres" fsOnlyShareExists
+
+        conflictShareExists <- tripShareExists "startup-trip-sharing-owner" "startup-trip-sharing-conflict-target"
+        assertBool "Expected conflicting startup trip share to keep Postgres value" conflictShareExists
+
+        postgresOnlyShareExists <- tripShareExists "startup-trip-sharing-postgres-only-owner" "startup-trip-sharing-postgres-only-target"
+        assertBool "Expected existing Postgres-only startup trip share to be preserved" postgresOnlyShareExists
+
+        fsOnlySubscriptionExists <- tripSubscriptionExists "startup-trip-sharing-owner" "startup-trip-sharing-fs-only-target"
+        assertBool "Expected filesystem-only startup trip subscription to be imported into Postgres" fsOnlySubscriptionExists
+
+        conflictSubscriptionExists <- tripSubscriptionExists "startup-trip-sharing-owner" "startup-trip-sharing-conflict-target"
+        assertBool "Expected conflicting startup trip subscription to keep Postgres value" conflictSubscriptionExists
+
+        postgresOnlySubscriptionExists <- tripSubscriptionExists "startup-trip-sharing-postgres-only-owner" "startup-trip-sharing-postgres-only-target"
+        assertBool "Expected existing Postgres-only startup trip subscription to be preserved" postgresOnlySubscriptionExists
+
+      it "emits startup overlap/conflict warnings in server log" $ do
+        logContent <- readStartupLog
+        assertBool
+          "Expected overlap warning log entry for trip-sharing startup import"
+          ("[startup][trip-sharing-import][warning] overlap detected" `isInfixOf` logContent)
+        assertBool
+          "Expected conflict warning log entry for trip-sharing share conflict"
+          ("[startup][trip-sharing-import][warning] skipping conflicting share owner_user_id=startup-trip-sharing-owner target_username=startup-trip-sharing-conflict-target policy=postgres-wins" `isInfixOf` logContent)
+        assertBool
+          "Expected conflict warning log entry for trip-sharing subscription conflict"
+          ("[startup][trip-sharing-import][warning] skipping conflicting subscription owner_user_id=startup-trip-sharing-owner target_username=startup-trip-sharing-conflict-target policy=postgres-wins" `isInfixOf` logContent)
+
+      it "remains idempotent across sandbox restart" $ do
+        shareCountBefore <- fetchTripSharesCount
+        subscriptionCountBefore <- fetchTripSubscriptionsCount
+        restartPostgresSandboxServer
+        shareCountAfter <- fetchTripSharesCount
+        subscriptionCountAfter <- fetchTripSubscriptionsCount
+
+        assertEqual "Expected trip-sharing share startup import to remain idempotent after restart" shareCountBefore shareCountAfter
+        assertEqual "Expected trip-sharing subscription startup import to remain idempotent after restart" subscriptionCountBefore subscriptionCountAfter
+
+        fsOnlyShareCount <- fetchTripShareCountByKey "startup-trip-sharing-owner" "startup-trip-sharing-fs-only-target"
+        assertEqual "Expected exactly one imported filesystem-only startup trip share" 1 fsOnlyShareCount
+
+        fsOnlySubscriptionCount <- fetchTripSubscriptionCountByKey "startup-trip-sharing-owner" "startup-trip-sharing-fs-only-target"
+        assertEqual "Expected exactly one imported filesystem-only startup trip subscription" 1 fsOnlySubscriptionCount
+
     around_ withFreshPostgresFixtures $ do
       describe "Auth parity" $ do
         it "keeps signup success/conflict semantics" $ do
@@ -969,6 +1049,148 @@ fetchSessionBindingCountByUserId userId = do
     Right raw ->
       case readMaybe (trimTrailingNewline raw) of
         Nothing -> assertFailure ("Unable to parse session binding count for '" ++ userId ++ "' from value: " ++ raw) >> pure 0
+        Just value -> pure value
+
+calendarItemExists :: String -> String -> IO Bool
+calendarItemExists userId itemId = do
+  scalarResult <- runPsqlScalar
+    ( "SELECT EXISTS(SELECT 1 FROM calendar_items WHERE user_id = "
+        ++ quoteSql userId
+        ++ " AND item_id = "
+        ++ quoteSql itemId
+        ++ ")"
+    )
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query calendar item existence for user_id=" ++ userId ++ " item_id=" ++ itemId ++ ": " ++ err) >> pure False
+    Right raw ->
+      case trimTrailingNewline raw of
+        "t" -> pure True
+        "f" -> pure False
+        value -> assertFailure ("Unexpected calendar EXISTS value for user_id=" ++ userId ++ " item_id=" ++ itemId ++ ": " ++ value) >> pure False
+
+fetchCalendarItemLegacyTitle :: String -> String -> IO String
+fetchCalendarItemLegacyTitle userId itemId = do
+  scalarResult <- runPsqlScalar
+    ( "SELECT legacy_title FROM calendar_items WHERE user_id = "
+        ++ quoteSql userId
+        ++ " AND item_id = "
+        ++ quoteSql itemId
+    )
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query calendar legacy_title for user_id=" ++ userId ++ " item_id=" ++ itemId ++ ": " ++ err) >> pure ""
+    Right raw ->
+      let value = trimTrailingNewline raw
+       in if null value
+            then assertFailure ("Expected non-empty calendar legacy_title for user_id=" ++ userId ++ " item_id=" ++ itemId) >> pure ""
+            else pure value
+
+fetchCalendarItemsCount :: IO Int
+fetchCalendarItemsCount = do
+  scalarResult <- runPsqlScalar "SELECT COUNT(*) FROM calendar_items"
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query calendar item count: " ++ err) >> pure 0
+    Right raw ->
+      case readMaybe (trimTrailingNewline raw) of
+        Nothing -> assertFailure ("Unable to parse calendar item count from value: " ++ raw) >> pure 0
+        Just value -> pure value
+
+fetchCalendarItemCountByKey :: String -> String -> IO Int
+fetchCalendarItemCountByKey userId itemId = do
+  scalarResult <- runPsqlScalar
+    ( "SELECT COUNT(*) FROM calendar_items WHERE user_id = "
+        ++ quoteSql userId
+        ++ " AND item_id = "
+        ++ quoteSql itemId
+    )
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query calendar item count for user_id=" ++ userId ++ " item_id=" ++ itemId ++ ": " ++ err) >> pure 0
+    Right raw ->
+      case readMaybe (trimTrailingNewline raw) of
+        Nothing -> assertFailure ("Unable to parse calendar item count for user_id=" ++ userId ++ " item_id=" ++ itemId ++ " from value: " ++ raw) >> pure 0
+        Just value -> pure value
+
+tripShareExists :: String -> String -> IO Bool
+tripShareExists ownerUserId targetUsername = do
+  scalarResult <- runPsqlScalar
+    ( "SELECT EXISTS(SELECT 1 FROM trip_shares WHERE owner_user_id = "
+        ++ quoteSql ownerUserId
+        ++ " AND target_username = "
+        ++ quoteSql targetUsername
+        ++ ")"
+    )
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query trip share existence for owner_user_id=" ++ ownerUserId ++ " target_username=" ++ targetUsername ++ ": " ++ err) >> pure False
+    Right raw ->
+      case trimTrailingNewline raw of
+        "t" -> pure True
+        "f" -> pure False
+        value -> assertFailure ("Unexpected trip share EXISTS value for owner_user_id=" ++ ownerUserId ++ " target_username=" ++ targetUsername ++ ": " ++ value) >> pure False
+
+tripSubscriptionExists :: String -> String -> IO Bool
+tripSubscriptionExists ownerUserId targetUsername = do
+  scalarResult <- runPsqlScalar
+    ( "SELECT EXISTS(SELECT 1 FROM trip_subscriptions WHERE owner_user_id = "
+        ++ quoteSql ownerUserId
+        ++ " AND target_username = "
+        ++ quoteSql targetUsername
+        ++ ")"
+    )
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query trip subscription existence for owner_user_id=" ++ ownerUserId ++ " target_username=" ++ targetUsername ++ ": " ++ err) >> pure False
+    Right raw ->
+      case trimTrailingNewline raw of
+        "t" -> pure True
+        "f" -> pure False
+        value -> assertFailure ("Unexpected trip subscription EXISTS value for owner_user_id=" ++ ownerUserId ++ " target_username=" ++ targetUsername ++ ": " ++ value) >> pure False
+
+fetchTripSharesCount :: IO Int
+fetchTripSharesCount = do
+  scalarResult <- runPsqlScalar "SELECT COUNT(*) FROM trip_shares"
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query trip share count: " ++ err) >> pure 0
+    Right raw ->
+      case readMaybe (trimTrailingNewline raw) of
+        Nothing -> assertFailure ("Unable to parse trip share count from value: " ++ raw) >> pure 0
+        Just value -> pure value
+
+fetchTripSubscriptionsCount :: IO Int
+fetchTripSubscriptionsCount = do
+  scalarResult <- runPsqlScalar "SELECT COUNT(*) FROM trip_subscriptions"
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query trip subscription count: " ++ err) >> pure 0
+    Right raw ->
+      case readMaybe (trimTrailingNewline raw) of
+        Nothing -> assertFailure ("Unable to parse trip subscription count from value: " ++ raw) >> pure 0
+        Just value -> pure value
+
+fetchTripShareCountByKey :: String -> String -> IO Int
+fetchTripShareCountByKey ownerUserId targetUsername = do
+  scalarResult <- runPsqlScalar
+    ( "SELECT COUNT(*) FROM trip_shares WHERE owner_user_id = "
+        ++ quoteSql ownerUserId
+        ++ " AND target_username = "
+        ++ quoteSql targetUsername
+    )
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query trip share count for owner_user_id=" ++ ownerUserId ++ " target_username=" ++ targetUsername ++ ": " ++ err) >> pure 0
+    Right raw ->
+      case readMaybe (trimTrailingNewline raw) of
+        Nothing -> assertFailure ("Unable to parse trip share count for owner_user_id=" ++ ownerUserId ++ " target_username=" ++ targetUsername ++ " from value: " ++ raw) >> pure 0
+        Just value -> pure value
+
+fetchTripSubscriptionCountByKey :: String -> String -> IO Int
+fetchTripSubscriptionCountByKey ownerUserId targetUsername = do
+  scalarResult <- runPsqlScalar
+    ( "SELECT COUNT(*) FROM trip_subscriptions WHERE owner_user_id = "
+        ++ quoteSql ownerUserId
+        ++ " AND target_username = "
+        ++ quoteSql targetUsername
+    )
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query trip subscription count for owner_user_id=" ++ ownerUserId ++ " target_username=" ++ targetUsername ++ ": " ++ err) >> pure 0
+    Right raw ->
+      case readMaybe (trimTrailingNewline raw) of
+        Nothing -> assertFailure ("Unable to parse trip subscription count for owner_user_id=" ++ ownerUserId ++ " target_username=" ++ targetUsername ++ " from value: " ++ raw) >> pure 0
         Just value -> pure value
 
 readStartupLog :: IO String

@@ -34,7 +34,7 @@ import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import Control.Monad.IO.Class (liftIO, MonadIO)
 import Data.Either (either)
 import Data.ByteString.Char8 (unpack)
-import Data.List (isPrefixOf, sortOn)
+import Data.List (isPrefixOf, nub, sort, sortOn)
 import Data.Char (toLower)
 import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
 import qualified Data.Set as Set
@@ -69,7 +69,8 @@ import Auth (AuthRequest(..), AuthRequestError(..), AuthError(..), Authenticated
 import qualified AuthRepository as AuthRepository
 import Session (SessionConfig(..), SessionPrincipal(..), SessionStore(..), SessionState(..), SessionHandle(..), UserStateBinding(..), SessionRepository(..), defaultSessionConfig, mkFileSessionStore, mkPostgresSessionRepository, mkSessionStore, signSessionId, verifyPostgresSessionStorage, verifyAndExtractSessionId)
 import Repository (RepositoryError(..))
-import Database.PostgreSQL.Simple (Connection, connectPostgreSQL, close, query_)
+import Database.PostgreSQL.Simple (Connection, Only(..), SqlError(..), close, connectPostgreSQL, execute, query, query_)
+import Database.PostgreSQL.Simple.Types (PGArray(..))
 
 type AppM a = ExceptT String (ServerPartT IO) a
 
@@ -581,13 +582,24 @@ runApp = do
                                 exitFailure
                               Right tripSharingRepo -> do
                                 putStrLn ("[startup] trip-sharing backend wiring ready: " ++ renderTripSharingBackend selectedTripSharingBackend)
-                                simpleHTTP nullConf { port = 8081 } $ do
-                                    log "Incoming request" >> log "=========================END REQUEST====================\n"
-                                    msum [ homePage
-                                         , apiController authRepo calendarRepo tripSharingRepo signupRateLimitState tmpDir appConfig sessionStore
-                                         , serveStaticResource
-                                         , mzero
-                                         ]
+                                calendarTripSharingImportResult <-
+                                  runCalendarTripSharingStartupImportIfNeeded
+                                    selectedCalendarBackend
+                                    selectedTripSharingBackend
+                                    (databaseConfig appConfig)
+                                    cd
+                                case calendarTripSharingImportResult of
+                                  Left err -> do
+                                    putStrLn $ "[startup-error] " ++ err
+                                    exitFailure
+                                  Right () ->
+                                    simpleHTTP nullConf { port = 8081 } $ do
+                                        log "Incoming request" >> log "=========================END REQUEST====================\n"
+                                        msum [ homePage
+                                             , apiController authRepo calendarRepo tripSharingRepo signupRateLimitState tmpDir appConfig sessionStore
+                                             , serveStaticResource
+                                             , mzero
+                                             ]
 
 makeAuthRepository :: AuthBackend -> Maybe DatabaseConfig -> IO (Either String AuthRepository)
 makeAuthRepository AuthBackendFilesystem _ = pure (Right defaultAuthRepository)
@@ -891,6 +903,437 @@ decodeSessionBindingsDirectory dirPath = do
           case decode content of
             Nothing -> pure (Left ("invalid JSON in " ++ fullPath))
             Just parsed -> pure (Right ((userId, parsed) : acc))
+
+runCalendarTripSharingStartupImportIfNeeded
+  :: CalendarBackend
+  -> TripSharingBackend
+  -> Maybe DatabaseConfig
+  -> FilePath
+  -> IO (Either String ())
+runCalendarTripSharingStartupImportIfNeeded calendarMode tripSharingMode _ _
+  | calendarMode == CalendarBackendFilesystem
+      && tripSharingMode == TripSharingBackendFilesystem =
+      pure (Right ())
+runCalendarTripSharingStartupImportIfNeeded CalendarBackendPostgres _ Nothing _ =
+  pure (Left "Configuration database is required when calendarBackend=postgres")
+runCalendarTripSharingStartupImportIfNeeded _ TripSharingBackendPostgres Nothing _ =
+  pure (Left "Configuration database is required when tripSharingBackend=postgres")
+runCalendarTripSharingStartupImportIfNeeded calendarMode tripSharingMode (Just dbCfg) cd = do
+  let connectionString = renderPostgresConnectionString dbCfg
+  calendarResult <-
+    case calendarMode of
+      CalendarBackendFilesystem -> pure (Right ())
+      CalendarBackendPostgres -> runCalendarStartupImport connectionString cd
+  case calendarResult of
+    Left err -> pure (Left err)
+    Right () ->
+      case tripSharingMode of
+        TripSharingBackendFilesystem -> pure (Right ())
+        TripSharingBackendPostgres -> runTripSharingStartupImport connectionString cd
+
+runCalendarStartupImport :: String -> FilePath -> IO (Either String ())
+runCalendarStartupImport connectionString cd = do
+  let calendarBaseDir = cd </> "data" </> "calendar-items"
+  filesystemEntriesResult <- loadFilesystemCalendarImportEntries calendarBaseDir
+  case filesystemEntriesResult of
+    Left err -> pure (Left err)
+    Right fsEntries -> do
+      connResult <- Ex.try (connectPostgreSQL (BS8.pack connectionString)) :: IO (Either Ex.SomeException Connection)
+      case connResult of
+        Left err -> pure (Left ("Calendar startup import failed while connecting to Postgres: " ++ show err))
+        Right conn -> do
+          snapshotResult <- Ex.try (query_ conn "SELECT user_id, item_id FROM calendar_items" :: IO [(String, String)]) :: IO (Either Ex.SomeException [(String, String)])
+          case snapshotResult of
+            Left err -> do
+              _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
+              pure (Left ("Calendar startup import failed while reading Postgres items: " ++ show err))
+            Right pgRows -> do
+              let orderedFsEntries = sortOn (\(userId, itemId, _) -> (userId, itemId)) fsEntries
+                  knownKeys = Set.fromList pgRows
+              when (not (null orderedFsEntries) && not (null pgRows)) $
+                putStrLn
+                  ( "[startup][calendar-import][warning] overlap detected:"
+                      ++ " filesystem_count="
+                      ++ show (length orderedFsEntries)
+                      ++ " postgres_count="
+                      ++ show (length pgRows)
+                      ++ " conflict_policy=postgres-wins"
+                  )
+              importResult <- foldM (importSingleCalendarItem conn) (Right (0 :: Int, 0 :: Int, knownKeys)) orderedFsEntries
+              _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
+              case importResult of
+                Left err -> pure (Left err)
+                Right (importedCount, skippedCount, _) -> do
+                  putStrLn
+                    ( "[startup][calendar-import] completed"
+                        ++ " filesystem_count="
+                        ++ show (length orderedFsEntries)
+                        ++ " postgres_count="
+                        ++ show (length pgRows)
+                        ++ " imported="
+                        ++ show importedCount
+                        ++ " skipped_conflicts="
+                        ++ show skippedCount
+                    )
+                  pure (Right ())
+
+importSingleCalendarItem
+  :: Connection
+  -> Either String (Int, Int, Set.Set (String, String))
+  -> (String, String, Agenda.CalendarItemContent)
+  -> IO (Either String (Int, Int, Set.Set (String, String)))
+importSingleCalendarItem _ (Left err) _ = pure (Left err)
+importSingleCalendarItem conn (Right (importedCount, skippedCount, knownKeys)) (userId, itemId, content) = do
+  let key = (userId, itemId)
+  if Set.member key knownKeys
+    then do
+      putStrLn ("[startup][calendar-import][warning] skipping conflicting user_id=" ++ userId ++ " item_id=" ++ itemId ++ " policy=postgres-wins")
+      pure (Right (importedCount, skippedCount + 1, knownKeys))
+    else do
+      let row = calendarContentToDbRow content
+      writeResult <- Ex.try
+        (execute conn
+          "INSERT INTO calendar_items (user_id, item_id, item_kind, legacy_item_type, legacy_title, legacy_window_start, legacy_window_end, legacy_status, legacy_source_item_id, legacy_actual_duration_minutes, legacy_category, legacy_recurrence_rule_type, legacy_recurrence_interval_days, legacy_recurrence_exception_dates, trip_window_start, trip_window_end, trip_departure_place_id, trip_arrival_place_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+          ( userId
+          , itemId
+          , dbCalendarItemKind row
+          , dbCalendarLegacyItemType row
+          , dbCalendarLegacyTitle row
+          , dbCalendarLegacyWindowStart row
+          , dbCalendarLegacyWindowEnd row
+          , dbCalendarLegacyStatus row
+          , dbCalendarLegacySourceItemId row
+          , dbCalendarLegacyActualDurationMinutes row
+          , dbCalendarLegacyCategory row
+          , dbCalendarLegacyRecurrenceRuleType row
+          , dbCalendarLegacyRecurrenceIntervalDays row
+          , dbCalendarLegacyRecurrenceExceptionDates row
+          , dbCalendarTripWindowStart row
+          , dbCalendarTripWindowEnd row
+          , dbCalendarTripDeparturePlaceId row
+          , dbCalendarTripArrivalPlaceId row
+          ))
+        :: IO (Either Ex.SomeException Int64)
+      case writeResult of
+        Right _ -> pure (Right (importedCount + 1, skippedCount, Set.insert key knownKeys))
+        Left err ->
+          case Ex.fromException err of
+            Just sqlErr
+              | isUniqueViolation sqlErr -> do
+                  putStrLn ("[startup][calendar-import][warning] skipping conflicting user_id=" ++ userId ++ " item_id=" ++ itemId ++ " policy=postgres-wins")
+                  pure (Right (importedCount, skippedCount + 1, Set.insert key knownKeys))
+            _ ->
+              pure (Left ("Calendar startup import failed while writing user_id=" ++ userId ++ " item_id=" ++ itemId ++ ": " ++ show err))
+
+loadFilesystemCalendarImportEntries :: FilePath -> IO (Either String [(String, String, Agenda.CalendarItemContent)])
+loadFilesystemCalendarImportEntries calendarBaseDir = do
+  baseExists <- doesDirectoryExist calendarBaseDir
+  if not baseExists
+    then do
+      putStrLn "[startup][calendar-import] source calendar directory is missing; treating filesystem calendar source as empty"
+      pure (Right [])
+    else do
+      entries <- listDirectory calendarBaseDir
+      foldM (loadSingleCalendarUserDirectory calendarBaseDir) (Right []) (sort entries)
+
+loadSingleCalendarUserDirectory
+  :: FilePath
+  -> Either String [(String, String, Agenda.CalendarItemContent)]
+  -> FilePath
+  -> IO (Either String [(String, String, Agenda.CalendarItemContent)])
+loadSingleCalendarUserDirectory _ (Left err) _ = pure (Left err)
+loadSingleCalendarUserDirectory calendarBaseDir (Right acc) userId = do
+  let userDir = calendarBaseDir </> userId
+  isDir <- doesDirectoryExist userDir
+  if not isDir
+    then pure (Right acc)
+    else do
+      itemsResult <- decodeJsonDirectory userDir :: IO (Either String [Agenda.CalendarItem])
+      case itemsResult of
+        Left err ->
+          pure (Left ("Calendar startup import failed while reading filesystem items for user_id=" ++ userId ++ ": " ++ err))
+        Right items ->
+          foldM
+            (extractCalendarImportEntry userId)
+            (Right acc)
+            items
+
+extractCalendarImportEntry
+  :: String
+  -> Either String [(String, String, Agenda.CalendarItemContent)]
+  -> Agenda.CalendarItem
+  -> IO (Either String [(String, String, Agenda.CalendarItemContent)])
+extractCalendarImportEntry _ (Left err) _ = pure (Left err)
+extractCalendarImportEntry userId (Right acc) item =
+  case item of
+    Agenda.ServerCalendarItem {Agenda.itemId, Agenda.content} ->
+      pure (Right ((userId, itemId, content) : acc))
+    Agenda.NewCalendarItem {} ->
+      pure (Left ("Calendar startup import failed while reading filesystem items for user_id=" ++ userId ++ ": expected stored calendar item with id"))
+
+runTripSharingStartupImport :: String -> FilePath -> IO (Either String ())
+runTripSharingStartupImport connectionString cd = do
+  let sharesBaseDir = cd </> "data" </> "trip-sharing" </> "shares"
+      subscriptionsBaseDir = cd </> "data" </> "trip-sharing" </> "subscriptions"
+  sharesResult <- loadFilesystemOwnerUserPairs sharesBaseDir "shares"
+  case sharesResult of
+    Left err -> pure (Left err)
+    Right fsShares -> do
+      subscriptionsResult <- loadFilesystemOwnerUserPairs subscriptionsBaseDir "subscriptions"
+      case subscriptionsResult of
+        Left err -> pure (Left err)
+        Right fsSubscriptions -> do
+          connResult <- Ex.try (connectPostgreSQL (BS8.pack connectionString)) :: IO (Either Ex.SomeException Connection)
+          case connResult of
+            Left err -> pure (Left ("Trip-sharing startup import failed while connecting to Postgres: " ++ show err))
+            Right conn -> do
+              pgSharesResult <- Ex.try (query_ conn "SELECT owner_user_id, target_username FROM trip_shares" :: IO [(String, String)]) :: IO (Either Ex.SomeException [(String, String)])
+              pgSubscriptionsResult <- Ex.try (query_ conn "SELECT owner_user_id, target_username FROM trip_subscriptions" :: IO [(String, String)]) :: IO (Either Ex.SomeException [(String, String)])
+              case pgSharesResult of
+                Left err -> do
+                  _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
+                  pure (Left ("Trip-sharing startup import failed while reading Postgres shares: " ++ show err))
+                Right pgShares ->
+                  case pgSubscriptionsResult of
+                    Left err -> do
+                      _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
+                      pure (Left ("Trip-sharing startup import failed while reading Postgres subscriptions: " ++ show err))
+                    Right pgSubscriptions -> do
+                      let orderedFsShares = sortOn id fsShares
+                          orderedFsSubscriptions = sortOn id fsSubscriptions
+                          pgShareKeys = Set.fromList pgShares
+                          pgSubscriptionKeys = Set.fromList pgSubscriptions
+                          filesystemCount = length orderedFsShares + length orderedFsSubscriptions
+                          postgresCount = length pgShares + length pgSubscriptions
+                      when (filesystemCount > 0 && postgresCount > 0) $
+                        putStrLn
+                          ( "[startup][trip-sharing-import][warning] overlap detected:"
+                              ++ " filesystem_shares="
+                              ++ show (length orderedFsShares)
+                              ++ " filesystem_subscriptions="
+                              ++ show (length orderedFsSubscriptions)
+                              ++ " postgres_shares="
+                              ++ show (length pgShares)
+                              ++ " postgres_subscriptions="
+                              ++ show (length pgSubscriptions)
+                              ++ " conflict_policy=postgres-wins"
+                          )
+                      sharesImportResult <- foldM (importSingleTripShare conn) (Right (0 :: Int, 0 :: Int, pgShareKeys)) orderedFsShares
+                      case sharesImportResult of
+                        Left err -> do
+                          _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
+                          pure (Left err)
+                        Right (sharesImported, sharesSkipped, _) -> do
+                          subscriptionsImportResult <- foldM (importSingleTripSubscription conn) (Right (0 :: Int, 0 :: Int, pgSubscriptionKeys)) orderedFsSubscriptions
+                          _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
+                          case subscriptionsImportResult of
+                            Left err -> pure (Left err)
+                            Right (subscriptionsImported, subscriptionsSkipped, _) -> do
+                              putStrLn
+                                ( "[startup][trip-sharing-import] completed"
+                                    ++ " filesystem_shares="
+                                    ++ show (length orderedFsShares)
+                                    ++ " filesystem_subscriptions="
+                                    ++ show (length orderedFsSubscriptions)
+                                    ++ " postgres_shares="
+                                    ++ show (length pgShares)
+                                    ++ " postgres_subscriptions="
+                                    ++ show (length pgSubscriptions)
+                                    ++ " imported_shares="
+                                    ++ show sharesImported
+                                    ++ " imported_subscriptions="
+                                    ++ show subscriptionsImported
+                                    ++ " skipped_share_conflicts="
+                                    ++ show sharesSkipped
+                                    ++ " skipped_subscription_conflicts="
+                                    ++ show subscriptionsSkipped
+                                )
+                              pure (Right ())
+
+importSingleTripShare
+  :: Connection
+  -> Either String (Int, Int, Set.Set (String, String))
+  -> (String, String)
+  -> IO (Either String (Int, Int, Set.Set (String, String)))
+importSingleTripShare _ (Left err) _ = pure (Left err)
+importSingleTripShare conn (Right (importedCount, skippedCount, knownKeys)) (ownerUserId, targetUsername) =
+  if Set.member (ownerUserId, targetUsername) knownKeys
+    then do
+      putStrLn ("[startup][trip-sharing-import][warning] skipping conflicting share owner_user_id=" ++ ownerUserId ++ " target_username=" ++ targetUsername ++ " policy=postgres-wins")
+      pure (Right (importedCount, skippedCount + 1, knownKeys))
+    else do
+      writeResult <- Ex.try
+        (execute conn
+          "INSERT INTO trip_shares (owner_user_id, target_username) VALUES (?, ?)"
+          (ownerUserId, targetUsername))
+        :: IO (Either Ex.SomeException Int64)
+      case writeResult of
+        Right _ ->
+          pure (Right (importedCount + 1, skippedCount, Set.insert (ownerUserId, targetUsername) knownKeys))
+        Left err ->
+          case Ex.fromException err of
+            Just sqlErr
+              | isUniqueViolation sqlErr -> do
+                  putStrLn ("[startup][trip-sharing-import][warning] skipping conflicting share owner_user_id=" ++ ownerUserId ++ " target_username=" ++ targetUsername ++ " policy=postgres-wins")
+                  pure (Right (importedCount, skippedCount + 1, Set.insert (ownerUserId, targetUsername) knownKeys))
+            _ ->
+              pure (Left ("Trip-sharing startup import failed while writing share owner_user_id=" ++ ownerUserId ++ " target_username=" ++ targetUsername ++ ": " ++ show err))
+
+importSingleTripSubscription
+  :: Connection
+  -> Either String (Int, Int, Set.Set (String, String))
+  -> (String, String)
+  -> IO (Either String (Int, Int, Set.Set (String, String)))
+importSingleTripSubscription _ (Left err) _ = pure (Left err)
+importSingleTripSubscription conn (Right (importedCount, skippedCount, knownKeys)) (ownerUserId, targetUsername) =
+  if Set.member (ownerUserId, targetUsername) knownKeys
+    then do
+      putStrLn ("[startup][trip-sharing-import][warning] skipping conflicting subscription owner_user_id=" ++ ownerUserId ++ " target_username=" ++ targetUsername ++ " policy=postgres-wins")
+      pure (Right (importedCount, skippedCount + 1, knownKeys))
+    else do
+      writeResult <- Ex.try
+        (execute conn
+          "INSERT INTO trip_subscriptions (owner_user_id, target_username) VALUES (?, ?)"
+          (ownerUserId, targetUsername))
+        :: IO (Either Ex.SomeException Int64)
+      case writeResult of
+        Right _ ->
+          pure (Right (importedCount + 1, skippedCount, Set.insert (ownerUserId, targetUsername) knownKeys))
+        Left err ->
+          case Ex.fromException err of
+            Just sqlErr
+              | isUniqueViolation sqlErr -> do
+                  putStrLn ("[startup][trip-sharing-import][warning] skipping conflicting subscription owner_user_id=" ++ ownerUserId ++ " target_username=" ++ targetUsername ++ " policy=postgres-wins")
+                  pure (Right (importedCount, skippedCount + 1, Set.insert (ownerUserId, targetUsername) knownKeys))
+            _ ->
+              pure (Left ("Trip-sharing startup import failed while writing subscription owner_user_id=" ++ ownerUserId ++ " target_username=" ++ targetUsername ++ ": " ++ show err))
+
+loadFilesystemOwnerUserPairs :: FilePath -> String -> IO (Either String [(String, String)])
+loadFilesystemOwnerUserPairs rootDir relationLabel = do
+  exists <- doesDirectoryExist rootDir
+  if not exists
+    then do
+      putStrLn ("[startup][trip-sharing-import] source " ++ relationLabel ++ " directory is missing; treating filesystem trip-sharing " ++ relationLabel ++ " source as empty")
+      pure (Right [])
+    else do
+      entries <- listDirectory rootDir
+      foldM (loadSingleOwnerUserPairs rootDir relationLabel) (Right []) (sort entries)
+
+loadSingleOwnerUserPairs
+  :: FilePath
+  -> String
+  -> Either String [(String, String)]
+  -> FilePath
+  -> IO (Either String [(String, String)])
+loadSingleOwnerUserPairs _ _ (Left err) _ = pure (Left err)
+loadSingleOwnerUserPairs rootDir relationLabel (Right acc) fileName
+  | takeExtension fileName /= ".json" = pure (Right acc)
+  | otherwise = do
+      let fullPath = rootDir </> fileName
+          ownerUserId = takeBaseName fileName
+      content <- BL.readFile fullPath
+      case decode content of
+        Nothing ->
+          pure (Left ("Trip-sharing startup import failed while reading filesystem " ++ relationLabel ++ " for owner_user_id=" ++ ownerUserId ++ ": invalid JSON in " ++ fullPath))
+        Just usernames ->
+          let normalized = sort (nub (usernames :: [String]))
+              pairs = map (\username -> (ownerUserId, username)) normalized
+           in pure (Right (pairs ++ acc))
+
+isUniqueViolation :: SqlError -> Bool
+isUniqueViolation sqlErr = sqlState sqlErr == "23505"
+
+data CalendarImportDbRow = CalendarImportDbRow
+  { dbCalendarItemKind :: String
+  , dbCalendarLegacyItemType :: Maybe String
+  , dbCalendarLegacyTitle :: Maybe String
+  , dbCalendarLegacyWindowStart :: Maybe String
+  , dbCalendarLegacyWindowEnd :: Maybe String
+  , dbCalendarLegacyStatus :: Maybe String
+  , dbCalendarLegacySourceItemId :: Maybe String
+  , dbCalendarLegacyActualDurationMinutes :: Maybe Int
+  , dbCalendarLegacyCategory :: Maybe String
+  , dbCalendarLegacyRecurrenceRuleType :: Maybe String
+  , dbCalendarLegacyRecurrenceIntervalDays :: Maybe Int
+  , dbCalendarLegacyRecurrenceExceptionDates :: PGArray String
+  , dbCalendarTripWindowStart :: Maybe String
+  , dbCalendarTripWindowEnd :: Maybe String
+  , dbCalendarTripDeparturePlaceId :: Maybe String
+  , dbCalendarTripArrivalPlaceId :: Maybe String
+  }
+
+calendarContentToDbRow :: Agenda.CalendarItemContent -> CalendarImportDbRow
+calendarContentToDbRow content =
+  case content of
+    Agenda.CalendarItemContent
+      { Agenda.itemType
+      , Agenda.title
+      , Agenda.windowStart
+      , Agenda.windowEnd
+      , Agenda.status
+      , Agenda.sourceItemId
+      , Agenda.actualDurationMinutes
+      , Agenda.category
+      , Agenda.recurrenceRule
+      , Agenda.recurrenceExceptionDates
+      } ->
+        CalendarImportDbRow
+          { dbCalendarItemKind = "legacy"
+          , dbCalendarLegacyItemType = Just (calendarItemTypeToDb itemType)
+          , dbCalendarLegacyTitle = Just title
+          , dbCalendarLegacyWindowStart = Just windowStart
+          , dbCalendarLegacyWindowEnd = Just windowEnd
+          , dbCalendarLegacyStatus = Just (calendarItemStatusToDb status)
+          , dbCalendarLegacySourceItemId = sourceItemId
+          , dbCalendarLegacyActualDurationMinutes = actualDurationMinutes
+          , dbCalendarLegacyCategory = category
+          , dbCalendarLegacyRecurrenceRuleType = fst (calendarRecurrenceToDb recurrenceRule)
+          , dbCalendarLegacyRecurrenceIntervalDays = snd (calendarRecurrenceToDb recurrenceRule)
+          , dbCalendarLegacyRecurrenceExceptionDates = PGArray recurrenceExceptionDates
+          , dbCalendarTripWindowStart = Nothing
+          , dbCalendarTripWindowEnd = Nothing
+          , dbCalendarTripDeparturePlaceId = Nothing
+          , dbCalendarTripArrivalPlaceId = Nothing
+          }
+    Agenda.TripCalendarItemContent Agenda.TripItemContent {Agenda.tripWindowStart, Agenda.tripWindowEnd, Agenda.departurePlaceId, Agenda.arrivalPlaceId} ->
+      CalendarImportDbRow
+        { dbCalendarItemKind = "trip"
+        , dbCalendarLegacyItemType = Nothing
+        , dbCalendarLegacyTitle = Nothing
+        , dbCalendarLegacyWindowStart = Nothing
+        , dbCalendarLegacyWindowEnd = Nothing
+        , dbCalendarLegacyStatus = Nothing
+        , dbCalendarLegacySourceItemId = Nothing
+        , dbCalendarLegacyActualDurationMinutes = Nothing
+        , dbCalendarLegacyCategory = Nothing
+        , dbCalendarLegacyRecurrenceRuleType = Nothing
+        , dbCalendarLegacyRecurrenceIntervalDays = Nothing
+        , dbCalendarLegacyRecurrenceExceptionDates = PGArray []
+        , dbCalendarTripWindowStart = Just tripWindowStart
+        , dbCalendarTripWindowEnd = Just tripWindowEnd
+        , dbCalendarTripDeparturePlaceId = Just departurePlaceId
+        , dbCalendarTripArrivalPlaceId = Just arrivalPlaceId
+        }
+
+calendarItemTypeToDb :: Agenda.ItemType -> String
+calendarItemTypeToDb Agenda.Intention = "INTENTION"
+calendarItemTypeToDb Agenda.ScheduledBlock = "BLOC_PLANIFIE"
+
+calendarItemStatusToDb :: Agenda.ItemStatus -> String
+calendarItemStatusToDb Agenda.Todo = "TODO"
+calendarItemStatusToDb Agenda.EnCours = "EN_COURS"
+calendarItemStatusToDb Agenda.Fait = "FAIT"
+calendarItemStatusToDb Agenda.Annule = "ANNULE"
+
+calendarRecurrenceToDb :: Maybe Agenda.RecurrenceRule -> (Maybe String, Maybe Int)
+calendarRecurrenceToDb Nothing = (Nothing, Nothing)
+calendarRecurrenceToDb (Just recurrenceRule) =
+  case recurrenceRule of
+    Agenda.RecurrenceDaily -> (Just "DAILY", Nothing)
+    Agenda.RecurrenceWeekly -> (Just "WEEKLY", Nothing)
+    Agenda.RecurrenceMonthly -> (Just "MONTHLY", Nothing)
+    Agenda.RecurrenceYearly -> (Just "YEARLY", Nothing)
+    Agenda.RecurrenceEveryXDays intervalDays -> (Just "EVERY_X_DAYS", Just intervalDays)
 
 renderAuthBackend :: AuthBackend -> String
 renderAuthBackend AuthBackendFilesystem = "filesystem"

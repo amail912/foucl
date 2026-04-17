@@ -556,6 +556,143 @@ runIntegrationPostgresTests = do
           _ <- extractCalendarItemId endTrip
           pure ()
 
+      describe "Notes and checklists parity" $ do
+        it "keeps note create/list/update/delete and stale/missing semantics" $ do
+          suffix <- uniqueSuffix
+          let username = "pg-037-note-" ++ suffix
+          seedApprovedUser username ["member"]
+          cookie <- signinOnly username testPassword
+          let createdContent = object
+                [ "title" .= ("Postgres note title" :: String)
+                , "noteContent" .= ("Postgres note body" :: String)
+                ]
+              updatedContent = object
+                [ "title" .= ("Postgres note title updated" :: String)
+                , "noteContent" .= ("Postgres note body updated" :: String)
+                ]
+
+          listedInitial <- getNotes cookie
+          assertEqual "Note list should start empty" [] listedInitial
+
+          createdStorageId <- createNote cookie createdContent
+          createdId <- extractStorageIdId createdStorageId
+          createdVersion <- extractStorageIdVersion createdStorageId
+          assertEqual
+            "Note create payload should keep expected shape"
+            (object
+              [ "id" .= createdId
+              , "version" .= createdVersion
+              ])
+            createdStorageId
+
+          listedAfterCreate <- getNotes cookie
+          assertEqual
+            "Note list should contain created note"
+            [object
+              [ "storageId" .= createdStorageId
+              , "content" .= createdContent
+              ]]
+            listedAfterCreate
+
+          updatedStorageId <- updateNote cookie (object ["storageId" .= createdStorageId, "content" .= updatedContent])
+          updatedId <- extractStorageIdId updatedStorageId
+          updatedVersion <- extractStorageIdVersion updatedStorageId
+          assertEqual "Note update should preserve item id" createdId updatedId
+          assertBool "Note update should rotate version" (updatedVersion /= createdVersion)
+
+          listedAfterUpdate <- getNotes cookie
+          assertEqual
+            "Note list should contain updated note"
+            [object
+              [ "storageId" .= updatedStorageId
+              , "content" .= updatedContent
+              ]]
+            listedAfterUpdate
+
+          let staleStorageId = object
+                [ "id" .= createdId
+                , "version" .= (createdVersion ++ "-stale")
+                ]
+              staleUpdate = object
+                [ "storageId" .= staleStorageId
+                , "content" .= updatedContent
+                ]
+          updateNoteExpectMessage cookie staleUpdate 404 "Unable to find storage dir"
+
+          deleteNote cookie createdId
+          listedAfterDelete <- getNotes cookie
+          assertEqual "Note list should be empty after delete" [] listedAfterDelete
+
+          deleteNoteExpectStatus cookie (createdId ++ "-missing") 200
+
+        it "keeps checklist create/list/update/delete and stale/missing semantics" $ do
+          suffix <- uniqueSuffix
+          let username = "pg-037-checklist-" ++ suffix
+          seedApprovedUser username ["member"]
+          cookie <- signinOnly username testPassword
+          let createdContent = object
+                [ "name" .= ("Postgres checklist" :: String)
+                , "items" .= [object ["label" .= ("item-a" :: String), "checked" .= False]]
+                ]
+              updatedContent = object
+                [ "name" .= ("Postgres checklist updated" :: String)
+                , "items" .= [object ["label" .= ("item-a" :: String), "checked" .= True], object ["label" .= ("item-b" :: String), "checked" .= False]]
+                ]
+
+          listedInitial <- getChecklists cookie
+          assertEqual "Checklist list should start empty" [] listedInitial
+
+          createdStorageId <- createChecklist cookie createdContent
+          createdId <- extractStorageIdId createdStorageId
+          createdVersion <- extractStorageIdVersion createdStorageId
+          assertEqual
+            "Checklist create payload should keep expected shape"
+            (object
+              [ "id" .= createdId
+              , "version" .= createdVersion
+              ])
+            createdStorageId
+
+          listedAfterCreate <- getChecklists cookie
+          assertEqual
+            "Checklist list should contain created checklist"
+            [object
+              [ "storageId" .= createdStorageId
+              , "content" .= createdContent
+              ]]
+            listedAfterCreate
+
+          updatedStorageId <- updateChecklist cookie (object ["storageId" .= createdStorageId, "content" .= updatedContent])
+          updatedId <- extractStorageIdId updatedStorageId
+          updatedVersion <- extractStorageIdVersion updatedStorageId
+          assertEqual "Checklist update should preserve item id" createdId updatedId
+          assertBool "Checklist update should rotate version" (updatedVersion /= createdVersion)
+
+          listedAfterUpdate <- getChecklists cookie
+          assertEqual
+            "Checklist list should contain updated checklist"
+            [object
+              [ "storageId" .= updatedStorageId
+              , "content" .= updatedContent
+              ]]
+            listedAfterUpdate
+
+          let staleStorageId = object
+                [ "id" .= createdId
+                , "version" .= (createdVersion ++ "-stale")
+                ]
+              staleUpdate = object
+                [ "storageId" .= staleStorageId
+                , "content" .= updatedContent
+                ]
+          updateChecklistExpectMessage cookie staleUpdate 404 "Unable to find storage dir"
+
+          deleteChecklist cookie createdId
+          listedAfterDelete <- getChecklists cookie
+          assertEqual "Checklist list should be empty after delete" [] listedAfterDelete
+
+          deleteChecklistExpectStatus cookie (createdId ++ "-missing") 200
+
 withFreshPostgresFixtures :: IO () -> IO ()
 withFreshPostgresFixtures action = do
   resetPostgresSchema
@@ -571,6 +708,8 @@ assertPostgresReachable = do
 
 resetPostgresSchema :: IO ()
 resetPostgresSchema = do
+  _ <- runPsqlFile checklistDownMigration
+  _ <- runPsqlFile noteDownMigration
   _ <- runPsqlFile tripSharingDownMigration
   _ <- runPsqlFile calendarDownMigration
   _ <- runPsqlFile sessionDownMigration
@@ -596,7 +735,17 @@ resetPostgresSchema = do
     Left err -> assertFailure ("Trip-sharing up migration failed: " ++ err)
     Right () -> pure ()
 
-  truncateResult <- runPsqlCommand "TRUNCATE TABLE auth_users, session_handles, session_user_bindings, session_states, calendar_items, trip_shares, trip_subscriptions"
+  noteUpResult <- runPsqlFile noteUpMigration
+  case noteUpResult of
+    Left err -> assertFailure ("Note up migration failed: " ++ err)
+    Right () -> pure ()
+
+  checklistUpResult <- runPsqlFile checklistUpMigration
+  case checklistUpResult of
+    Left err -> assertFailure ("Checklist up migration failed: " ++ err)
+    Right () -> pure ()
+
+  truncateResult <- runPsqlCommand "TRUNCATE TABLE auth_users, session_handles, session_user_bindings, session_states, calendar_items, trip_shares, trip_subscriptions, note_items, checklist_items"
   case truncateResult of
     Left err -> assertFailure ("Postgres table cleanup failed: " ++ err)
     Right () -> pure ()
@@ -663,6 +812,118 @@ getAuthProfile cookie = do
   httpJSON
     $ setRequestMethod "GET"
     $ setRequestHeader "Cookie" [BS.pack cookie] req
+
+getNotes :: String -> IO [Value]
+getNotes cookie = do
+  req <- parseRequest "GET http://localhost:8081/api/note"
+  resp <- httpJSON
+    $ setRequestMethod "GET"
+    $ setRequestHeader "Cookie" [BS.pack cookie] req
+  assertStatusCode "Note list should succeed" 200 resp
+  case getResponseBody resp of
+    Array items -> pure (toList items)
+    _ -> assertFailure "Expected note list response array" >> pure []
+
+createNote :: String -> Value -> IO Value
+createNote cookie payload = do
+  req <- parseRequest "POST http://localhost:8081/api/note"
+  resp <- httpJSON
+    $ setRequestMethod "POST"
+    $ setRequestHeader "Cookie" [BS.pack cookie]
+    $ setRequestHeader "Content-Type" ["application/json"]
+    $ setRequestBodyJSON payload req
+  assertStatusCode "Note create should succeed" 200 resp
+  pure (getResponseBody resp)
+
+updateNote :: String -> Value -> IO Value
+updateNote cookie payload = do
+  req <- parseRequest "PUT http://localhost:8081/api/note"
+  resp <- httpJSON
+    $ setRequestMethod "PUT"
+    $ setRequestHeader "Cookie" [BS.pack cookie]
+    $ setRequestHeader "Content-Type" ["application/json"]
+    $ setRequestBodyJSON payload req
+  assertStatusCode "Note update should succeed" 200 resp
+  pure (getResponseBody resp)
+
+updateNoteExpectMessage :: String -> Value -> Int -> String -> IO ()
+updateNoteExpectMessage cookie payload expectedStatus expectedMessage = do
+  req <- parseRequest "PUT http://localhost:8081/api/note"
+  resp <- httpJSON
+    $ setRequestMethod "PUT"
+    $ setRequestHeader "Cookie" [BS.pack cookie]
+    $ setRequestHeader "Content-Type" ["application/json"]
+    $ setRequestBodyJSON payload req
+  assertStatusCode "Note update should return expected status" expectedStatus resp
+  assertMessageResponse expectedMessage resp
+
+deleteNote :: String -> String -> IO ()
+deleteNote cookie noteId = deleteNoteExpectStatus cookie noteId 200
+
+deleteNoteExpectStatus :: String -> String -> Int -> IO ()
+deleteNoteExpectStatus cookie noteId expectedStatus = do
+  req <- parseRequest ("DELETE http://localhost:8081/api/note/" ++ noteId)
+  resp <- httpJSON
+    $ setRequestMethod "DELETE"
+    $ setRequestHeader "Cookie" [BS.pack cookie] req
+  assertStatusCode "Note delete should return expected status" expectedStatus (resp :: Response Value)
+  assertEqual "Expected empty JSON response body" (object []) (getResponseBody resp)
+
+getChecklists :: String -> IO [Value]
+getChecklists cookie = do
+  req <- parseRequest "GET http://localhost:8081/api/checklist"
+  resp <- httpJSON
+    $ setRequestMethod "GET"
+    $ setRequestHeader "Cookie" [BS.pack cookie] req
+  assertStatusCode "Checklist list should succeed" 200 resp
+  case getResponseBody resp of
+    Array items -> pure (toList items)
+    _ -> assertFailure "Expected checklist list response array" >> pure []
+
+createChecklist :: String -> Value -> IO Value
+createChecklist cookie payload = do
+  req <- parseRequest "POST http://localhost:8081/api/checklist"
+  resp <- httpJSON
+    $ setRequestMethod "POST"
+    $ setRequestHeader "Cookie" [BS.pack cookie]
+    $ setRequestHeader "Content-Type" ["application/json"]
+    $ setRequestBodyJSON payload req
+  assertStatusCode "Checklist create should succeed" 200 resp
+  pure (getResponseBody resp)
+
+updateChecklist :: String -> Value -> IO Value
+updateChecklist cookie payload = do
+  req <- parseRequest "PUT http://localhost:8081/api/checklist"
+  resp <- httpJSON
+    $ setRequestMethod "PUT"
+    $ setRequestHeader "Cookie" [BS.pack cookie]
+    $ setRequestHeader "Content-Type" ["application/json"]
+    $ setRequestBodyJSON payload req
+  assertStatusCode "Checklist update should succeed" 200 resp
+  pure (getResponseBody resp)
+
+updateChecklistExpectMessage :: String -> Value -> Int -> String -> IO ()
+updateChecklistExpectMessage cookie payload expectedStatus expectedMessage = do
+  req <- parseRequest "PUT http://localhost:8081/api/checklist"
+  resp <- httpJSON
+    $ setRequestMethod "PUT"
+    $ setRequestHeader "Cookie" [BS.pack cookie]
+    $ setRequestHeader "Content-Type" ["application/json"]
+    $ setRequestBodyJSON payload req
+  assertStatusCode "Checklist update should return expected status" expectedStatus resp
+  assertMessageResponse expectedMessage resp
+
+deleteChecklist :: String -> String -> IO ()
+deleteChecklist cookie checklistId = deleteChecklistExpectStatus cookie checklistId 200
+
+deleteChecklistExpectStatus :: String -> String -> Int -> IO ()
+deleteChecklistExpectStatus cookie checklistId expectedStatus = do
+  req <- parseRequest ("DELETE http://localhost:8081/api/checklist/" ++ checklistId)
+  resp <- httpJSON
+    $ setRequestMethod "DELETE"
+    $ setRequestHeader "Cookie" [BS.pack cookie] req
+  assertStatusCode "Checklist delete should return expected status" expectedStatus (resp :: Response Value)
+  assertEqual "Expected empty JSON response body" (object []) (getResponseBody resp)
 
 getAgendaItems :: String -> IO [Value]
 getAgendaItems cookie = do
@@ -801,6 +1062,30 @@ extractCalendarItemId value =
             else pure itemId
         Nothing -> assertFailure "Expected calendar item response with id field" >> pure ""
     _ -> assertFailure "Expected calendar item JSON object" >> pure ""
+
+extractStorageIdId :: Value -> IO String
+extractStorageIdId value =
+  case value of
+    Object v ->
+      case parseMaybe (.: "id") v of
+        Just itemId ->
+          if null (itemId :: String)
+            then assertFailure "Expected non-empty storage id" >> pure ""
+            else pure itemId
+        Nothing -> assertFailure "Expected storage id response with id field" >> pure ""
+    _ -> assertFailure "Expected storage id JSON object" >> pure ""
+
+extractStorageIdVersion :: Value -> IO String
+extractStorageIdVersion value =
+  case value of
+    Object v ->
+      case parseMaybe (.: "version") v of
+        Just itemVersion ->
+          if null (itemVersion :: String)
+            then assertFailure "Expected non-empty storage version" >> pure ""
+            else pure itemVersion
+        Nothing -> assertFailure "Expected storage id response with version field" >> pure ""
+    _ -> assertFailure "Expected storage id JSON object" >> pure ""
 
 mkLegacyContent :: String -> String -> String -> String -> Value
 mkLegacyContent title windowStart windowEnd status =
@@ -1372,6 +1657,18 @@ tripSharingUpMigration = "db/migrations/trip-sharing/0001_trip_sharing_schema.up
 
 tripSharingDownMigration :: FilePath
 tripSharingDownMigration = "db/migrations/trip-sharing/0001_trip_sharing_schema.down.sql"
+
+noteUpMigration :: FilePath
+noteUpMigration = "db/migrations/note/0001_note_schema.up.sql"
+
+noteDownMigration :: FilePath
+noteDownMigration = "db/migrations/note/0001_note_schema.down.sql"
+
+checklistUpMigration :: FilePath
+checklistUpMigration = "db/migrations/checklist/0001_checklist_schema.up.sql"
+
+checklistDownMigration :: FilePath
+checklistDownMigration = "db/migrations/checklist/0001_checklist_schema.down.sql"
 
 testPassword :: String
 testPassword = "averystrongpass"

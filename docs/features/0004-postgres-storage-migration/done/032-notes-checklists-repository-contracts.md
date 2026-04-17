@@ -27,3 +27,17 @@ Out of scope:
 1. Contract behavior for notes/checklists CRUD is explicit and testable.
 2. Optimistic version conflict semantics are preserved at contract level.
 3. No HTTP contract drift is introduced by contract extraction.
+
+## Implementation Decisions
+
+- A shared contract module was introduced for notes/checklists repositories with domain aliases:
+  - `NoteRepository`
+  - `ChecklistRepository`
+- The contract surface is explicit and backend-agnostic:
+  - create item
+  - list items
+  - delete by id
+  - update if current version
+- Filesystem-backed adapters are provided as the baseline implementation in this story, preserving current semantics.
+- List operations preserve current tolerant behavior by ignoring malformed stored entries instead of failing the entire request.
+- Controllers now depend on explicit repository contracts for note/checklist operations while preserving route, payload, and status/message behavior.

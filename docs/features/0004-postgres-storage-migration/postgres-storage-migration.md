@@ -57,12 +57,12 @@ Move persistence to Postgres incrementally, with per-domain cutover control, and
 - [029 Calendar And Trip Sharing Postgres Adapter Implementation](done/029-calendar-tripsharing-postgres-adapter-implementation.md)
 - [030 Calendar And Trip Sharing Postgres Parity Verification](done/030-calendar-tripsharing-postgres-parity-verification.md)
 - [031 Calendar And Trip Sharing Startup Import](done/031-calendar-tripsharing-startup-import.md)
+- [032 Notes And Checklists Repository Contracts](done/032-notes-checklists-repository-contracts.md)
 
 ### To Refine
 
 - [004 Domain Switching And Bootstrap Import](to-refine/004-domain-switching-and-bootstrap-import.md)
 - [005 Remove Filesystem Backend Per Migrated Domain](to-refine/005-remove-fs-backend-per-domain.md)
-- [032 Notes And Checklists Repository Contracts](to-refine/032-notes-checklists-repository-contracts.md)
 - [033 Notes And Checklists Backend Selection And Wiring](to-refine/033-notes-checklists-backend-selection-and-wiring.md)
 - [034 Notes And Checklists Filesystem Adapter Parity](to-refine/034-notes-checklists-filesystem-adapter-parity.md)
 - [035 Notes And Checklists Postgres Schema And Migrations](to-refine/035-notes-checklists-postgres-schema-and-migrations.md)

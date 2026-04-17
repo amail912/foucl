@@ -30,6 +30,7 @@ import AgendaStorage
 import TripSharingStorage
 import CalendarRepository
 import TripSharingRepository
+import NotesChecklistRepository
 import Auth
 import AuthRepository (AuthRepository(..), PersistedUser(..))
 import Repository (RepositoryError(..))
@@ -65,7 +66,7 @@ import qualified Data.ByteString.Lazy as BL
 import System.FilePath ((</>))
 
 runUnitTests :: IO ()
-runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, agendaStorageTests, tripSharingStorageTests, calendarRepositoryTests, tripSharingRepositoryTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionBackendConfigTests, calendarBackendConfigTests, tripSharingBackendConfigTests, postgresMigrationTests, sessionTests, sessionFilesystemAdapterTests, sessionPostgresRepositoryTests, calendarPostgresRepositoryTests, tripSharingPostgresRepositoryTests]
+runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, notesChecklistRepositoryContractTests, agendaStorageTests, tripSharingStorageTests, calendarRepositoryTests, tripSharingRepositoryTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionBackendConfigTests, calendarBackendConfigTests, tripSharingBackendConfigTests, postgresMigrationTests, sessionTests, sessionFilesystemAdapterTests, sessionPostgresRepositoryTests, calendarPostgresRepositoryTests, tripSharingPostgresRepositoryTests]
 
 runTestTTAndExit tests = do
   c <- runTestTT tests
@@ -92,6 +93,15 @@ checklistServiceTests = test [ "Creating a checklist should create a new file in
                              , "Modifying an non-existing checklist should give back a NotFoundError" ~: withEmptyDir checklistServiceConfig modifyANonExistingNote
                              , "Modifying an existing checklist but with wrong current version should give back a NotCurrentVersion error" ~: withEmptyDir checklistServiceConfig modifyWrongCurrentVersion
                              ]
+
+notesChecklistRepositoryContractTests = test
+  [ "Note repository contract: create/list/delete lifecycle" ~: noteRepositoryContractLifecycle
+  , "Checklist repository contract: create/list/delete lifecycle" ~: checklistRepositoryContractLifecycle
+  , "Note repository contract: update wrong version returns NotCurrentVersion" ~: noteRepositoryContractWrongVersion
+  , "Checklist repository contract: update wrong version returns NotCurrentVersion" ~: checklistRepositoryContractWrongVersion
+  , "Note repository contract: list ignores malformed entries" ~: noteRepositoryContractIgnoresMalformed
+  , "Checklist repository contract: list ignores malformed entries" ~: checklistRepositoryContractIgnoresMalformed
+  ]
 
 agendaStorageTests = test [ "Creating an agenda item should persist it and return an id" ~: agendaCreateAndList
                           , "Creating a trip item should persist it and round-trip through storage" ~: agendaTripCreateAndList
@@ -208,6 +218,72 @@ modifyWrongCurrentVersion config = do
         wrongVersionItemUpdate creationStorageId =
             Identifiable (wrongVersionStorageId creationStorageId) (generateExample config 20)
 
+noteRepositoryContractLifecycle :: IO ()
+noteRepositoryContractLifecycle = withEmptyStoragePath (getStorageDirectoryPath noteServiceConfig) $ do
+    let repo = filesystemNoteRepository noteServiceConfig
+        content = generateExample noteServiceConfig 1
+    Right createdStorageId <- runExceptT (repoCreateItem repo content)
+    Right listedAfterCreate <- runExceptT (repoListItems repo)
+    assertEqual "Expected note repository list to contain created note" 1 (length listedAfterCreate)
+    assertEqual "Expected created note id to be preserved in repository list"
+      [createdStorageId]
+      (map storageId listedAfterCreate)
+    Right () <- runExceptT (repoDeleteItemById repo (id createdStorageId))
+    Right listedAfterDelete <- runExceptT (repoListItems repo)
+    assertEqual "Expected note repository to be empty after delete" [] listedAfterDelete
+
+checklistRepositoryContractLifecycle :: IO ()
+checklistRepositoryContractLifecycle = withEmptyStoragePath (getStorageDirectoryPath checklistServiceConfig) $ do
+    let repo = filesystemChecklistRepository checklistServiceConfig
+        content = generateExample checklistServiceConfig 1
+    Right createdStorageId <- runExceptT (repoCreateItem repo content)
+    Right listedAfterCreate <- runExceptT (repoListItems repo)
+    assertEqual "Expected checklist repository list to contain created checklist" 1 (length listedAfterCreate)
+    assertEqual "Expected created checklist id to be preserved in repository list"
+      [createdStorageId]
+      (map storageId listedAfterCreate)
+    Right () <- runExceptT (repoDeleteItemById repo (id createdStorageId))
+    Right listedAfterDelete <- runExceptT (repoListItems repo)
+    assertEqual "Expected checklist repository to be empty after delete" [] listedAfterDelete
+
+noteRepositoryContractWrongVersion :: IO ()
+noteRepositoryContractWrongVersion = withEmptyStoragePath (getStorageDirectoryPath noteServiceConfig) $ do
+    let repo = filesystemNoteRepository noteServiceConfig
+    Right createdStorageId <- runExceptT (repoCreateItem repo (generateExample noteServiceConfig 1))
+    let wrongStorageId = createdStorageId { version = version createdStorageId ++ "wrong" }
+        update = Identifiable wrongStorageId (generateExample noteServiceConfig 2)
+    Left err <- runExceptT (repoUpdateItem repo update)
+    assertEqual "Expected note repository wrong-version update to return NotCurrentVersion"
+      (NotCurrentVersion wrongStorageId)
+      err
+
+checklistRepositoryContractWrongVersion :: IO ()
+checklistRepositoryContractWrongVersion = withEmptyStoragePath (getStorageDirectoryPath checklistServiceConfig) $ do
+    let repo = filesystemChecklistRepository checklistServiceConfig
+    Right createdStorageId <- runExceptT (repoCreateItem repo (generateExample checklistServiceConfig 1))
+    let wrongStorageId = createdStorageId { version = version createdStorageId ++ "wrong" }
+        update = Identifiable wrongStorageId (generateExample checklistServiceConfig 2)
+    Left err <- runExceptT (repoUpdateItem repo update)
+    assertEqual "Expected checklist repository wrong-version update to return NotCurrentVersion"
+      (NotCurrentVersion wrongStorageId)
+      err
+
+noteRepositoryContractIgnoresMalformed :: IO ()
+noteRepositoryContractIgnoresMalformed = withEmptyStoragePath (getStorageDirectoryPath noteServiceConfig) $ do
+    let repo = filesystemNoteRepository noteServiceConfig
+        malformedPath = getStorageDirectoryPath noteServiceConfig ++ "malformed.txt"
+    BL.writeFile malformedPath (BL8.pack "{not-valid-json")
+    Right listed <- runExceptT (repoListItems repo)
+    assertEqual "Expected note repository list to ignore malformed entries" [] listed
+
+checklistRepositoryContractIgnoresMalformed :: IO ()
+checklistRepositoryContractIgnoresMalformed = withEmptyStoragePath (getStorageDirectoryPath checklistServiceConfig) $ do
+    let repo = filesystemChecklistRepository checklistServiceConfig
+        malformedPath = getStorageDirectoryPath checklistServiceConfig ++ "malformed.txt"
+    BL.writeFile malformedPath (BL8.pack "{not-valid-json")
+    Right listed <- runExceptT (repoListItems repo)
+    assertEqual "Expected checklist repository list to ignore malformed entries" [] listed
+
 assertEqualWithoutOrder :: (Show a, Eq a) => String -> [a] -> [a] -> IO ()
 assertEqualWithoutOrder s as bs = do
     assertBool (s ++ "\n\t" ++ show as ++ " should be equal in " ++ show bs) (null (as \\ bs))
@@ -249,6 +325,13 @@ withEmptyDir config _test = do
         else do
             _test config
     where dirPath = getStorageDirectoryPath config
+
+withEmptyStoragePath :: FilePath -> IO a -> IO a
+withEmptyStoragePath dirPath action = do
+    exists <- doesDirectoryExist dirPath
+    when exists (removeDirectoryRecursive dirPath)
+    createDirectoryIfMissing True dirPath
+    action
 
 getStorageDirectoryPath :: CRUDEngine crudConfig a => crudConfig -> String
 getStorageDirectoryPath config = "target/.foucl/data/" ++ crudTypeDenomination config ++ "/"

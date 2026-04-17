@@ -53,6 +53,11 @@ import CrudStorage (createItem, getAllItems, deleteItem, modifyItem)
 import Crud
 import NoteCrud (NoteServiceConfig(..), defaultNoteServiceConfig)
 import ChecklistCrud (ChecklistServiceConfig(..), defaultChecklistServiceConfig)
+import NotesChecklistRepository
+  ( NotesChecklistRepository(..)
+  , defaultChecklistRepository
+  , defaultNoteRepository
+  )
 import System.Directory (doesFileExist, doesDirectoryExist, listDirectory, getCurrentDirectory, canonicalizePath, getTemporaryDirectory)
 import System.FilePath ((</>), pathSeparator, takeBaseName, takeExtension)
 import System.IO (hFlush, stdout)
@@ -1647,20 +1652,78 @@ requireApprovedAdmin authRepo AppContext { sessionPrincipal = SessionPrincipal {
 
 
 noteController :: AppContext -> ServerPartT IO Response
-noteController _ = dir "note" noteHandlers
-    where
-        noteHandlers = msum $ defaultNoteServiceConfig <%> [ crudGet
-                                                           , crudPost
-                                                           , crudDelete
-                                                           , crudPut
-                                                           ]
+noteController _ = dir "note" (notesChecklistHandlers "note" defaultNoteRepository)
+
 checklistController :: AppContext -> ServerPartT IO Response
-checklistController _ = dir "checklist" $
-  msum $ defaultChecklistServiceConfig <%> [ crudGet
-                                           , crudPost
-                                           , crudDelete
-                                           , crudPut
-                                           ]
+checklistController _ = dir "checklist" (notesChecklistHandlers "checklist" defaultChecklistRepository)
+
+notesChecklistHandlers :: Content a => String -> NotesChecklistRepository a -> ServerPartT IO Response
+notesChecklistHandlers crudTypeName repo =
+  msum
+    [ notesChecklistGet crudTypeName repo
+    , notesChecklistPost crudTypeName repo
+    , notesChecklistDelete crudTypeName repo
+    , notesChecklistPut crudTypeName repo
+    ]
+
+notesChecklistGet :: Content a => String -> NotesChecklistRepository a -> ServerPartT IO Response
+notesChecklistGet crudTypeName repo = do
+  nullDir
+  method GET
+  log ("crud GET on " ++ crudTypeName)
+  recover
+    (\err -> genericInternalError ("Unexpected problem during retrieving all " ++ crudTypeName ++ "s:\n\t" ++ show err))
+    (ok . jsonResponse)
+    (repoListItems repo)
+
+notesChecklistPost :: Content a => String -> NotesChecklistRepository a -> ServerPartT IO Response
+notesChecklistPost crudTypeName repo = do
+  nullDir
+  method POST
+  log ("crud POST on " ++ crudTypeName)
+  body <- askRq >>= takeRequestBody
+  let
+    handleBody :: RqBody -> ServerPartT IO Response
+    handleBody rqBody = do
+      let bodyBS = unBody rqBody
+          content = decode bodyBS
+      log ("Getting body bytestrings: " ++ show bodyBS)
+      log ("Getting deserialized content: " ++ show content)
+      fmap (createNotesChecklistContent crudTypeName repo) content `orElse` genericInternalError "Unexpected problem during note creation"
+  fmap handleBody body `orElse` ok emptyResponse
+
+createNotesChecklistContent :: String -> NotesChecklistRepository a -> a -> ServerPartT IO Response
+createNotesChecklistContent crudTypeName repo content = do
+  recover (logThenGenericInternalErrorName crudTypeName) (ok . jsonResponse) $ repoCreateItem repo content
+
+notesChecklistDelete :: String -> NotesChecklistRepository a -> ServerPartT IO Response
+notesChecklistDelete crudTypeName repo = do
+  method DELETE
+  log ("crud DELETE on " ++ crudTypeName)
+  path $ \pathId -> do
+    nullDir
+    recover (handleDeletionError pathId) (\() -> ok emptyResponse) $ repoDeleteItemById repo pathId
+
+notesChecklistPut :: Content a => String -> NotesChecklistRepository a -> ServerPartT IO Response
+notesChecklistPut crudTypeName repo = do
+  nullDir
+  method PUT
+  log ("crud PUT on " ++ crudTypeName)
+  body <- askRq >>= takeRequestBody
+  let
+    handleBody :: RqBody -> ServerPartT IO Response
+    handleBody rqBody = do
+      let bodyBS = unBody rqBody
+          update = decode bodyBS
+      log ("Getting body bytestrings: " ++ show bodyBS)
+      log ("Getting deserialized content: " ++ show update)
+      fmap (handleUpdateByRepository repo) update `orElse` genericInternalError "Unable to parse body as a NoteUpdate"
+  fmap handleBody body `orElse` ok emptyResponse
+
+handleUpdateByRepository :: Content a => NotesChecklistRepository a -> Identifiable a -> ServerPartT IO Response
+handleUpdateByRepository repo update =
+  recoverWith (const . notFound $ jsonMessage "Unable to find storage dir")
+              (ok . jsonResponse <$> repoUpdateItem repo update)
 
 tripPlacesController :: AppContext -> ServerPartT IO Response
 tripPlacesController _ = dir "v1" $ dir "trip-places" $ do
@@ -1962,6 +2025,11 @@ createNoteContent crudConfig noteContent = do
 logThenGenericInternalError :: (Show e, CRUDEngine crudType a) => crudType -> e -> ServerPartT IO Response
 logThenGenericInternalError crudConfig e = do
     log ("Unexpected error during creation of " ++ crudTypeDenomination crudConfig ++ ": " ++ show e)
+    emptyInternalError
+
+logThenGenericInternalErrorName :: Show e => String -> e -> ServerPartT IO Response
+logThenGenericInternalErrorName crudTypeName e = do
+    log ("Unexpected error during creation of " ++ crudTypeName ++ ": " ++ show e)
     emptyInternalError
 
 crudDelete :: CRUDEngine crudType a => crudType -> ServerPartT IO Response

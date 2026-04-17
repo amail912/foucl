@@ -23,6 +23,7 @@ library
       , Crud
       , NoteCrud
       , ChecklistCrud
+      , NotesChecklistRepository
       , AgendaModel
       , AgendaStorage
       , TripSharingStorage

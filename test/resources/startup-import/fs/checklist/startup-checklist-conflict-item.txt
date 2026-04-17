@@ -1,0 +1,15 @@
+{
+  "storageId": {
+    "id": "startup-checklist-conflict-item",
+    "version": "startup-checklist-fs-conflict-version"
+  },
+  "content": {
+    "name": "filesystem-checklist-conflict-name",
+    "items": [
+      {
+        "label": "filesystem-checklist-conflict-item",
+        "checked": false
+      }
+    ]
+  }
+}

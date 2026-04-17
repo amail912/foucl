@@ -1,0 +1,15 @@
+{
+  "storageId": {
+    "id": "startup-checklist-fs-only-item",
+    "version": "startup-checklist-fs-only-version"
+  },
+  "content": {
+    "name": "filesystem-checklist-only-name",
+    "items": [
+      {
+        "label": "filesystem-checklist-only-item",
+        "checked": false
+      }
+    ]
+  }
+}

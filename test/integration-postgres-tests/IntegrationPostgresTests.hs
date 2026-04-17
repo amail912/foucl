@@ -14,7 +14,7 @@ import Data.Password.Argon2 (hashPassword, mkPassword, unPasswordHash)
 import Data.Text (pack, unpack)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Network.HTTP.Simple
-import System.Directory (doesFileExist)
+import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getCurrentDirectory, listDirectory, removePathForcibly)
 import System.Exit (ExitCode(..))
 import System.Process (readProcessWithExitCode)
 import Test.Hspec
@@ -24,10 +24,13 @@ import Text.Read (readMaybe)
 runIntegrationPostgresTests :: IO ()
 runIntegrationPostgresTests = do
   assertPostgresReachable
+  prepareStartupImportFixtures
   hspec $ do
     describe "Auth startup import" $ do
       it "imports filesystem-only users and preserves postgres-conflicting users" $ do
-        fsOnlyExists <- authUserExists "startup-fs-only-user"
+        restartPostgresSandboxServer
+
+        fsOnlyExists <- authUserExists "startup-auth-fs-only-user"
         assertBool "Expected filesystem-only startup user to be imported into Postgres" fsOnlyExists
 
         conflictHash <- fetchAuthUserPasswordHash "startup-conflict-user"
@@ -37,6 +40,8 @@ runIntegrationPostgresTests = do
         assertBool "Expected existing Postgres-only startup user to be preserved" postgresOnlyExists
 
       it "emits startup overlap/conflict warnings in server log" $ do
+        restartPostgresSandboxServer
+
         logContent <- readStartupLog
         assertBool
           "Expected overlap warning log entry for auth startup import"
@@ -51,7 +56,7 @@ runIntegrationPostgresTests = do
         countAfter <- fetchAuthUserCount
         assertEqual "Expected startup import to remain idempotent after restart" countBefore countAfter
 
-        fsOnlyCount <- fetchAuthUserCountByUsername "startup-fs-only-user"
+        fsOnlyCount <- fetchAuthUserCountByUsername "startup-auth-fs-only-user"
         assertEqual "Expected exactly one imported filesystem-only startup user" 1 fsOnlyCount
 
         conflictHash <- fetchAuthUserPasswordHash "startup-conflict-user"
@@ -764,6 +769,66 @@ assertPostgresReachable = do
   case result of
     Left err -> assertFailure ("Expected reachable Postgres test database at " ++ postgresConn ++ ": " ++ err)
     Right () -> pure ()
+
+prepareStartupImportFixtures :: IO ()
+prepareStartupImportFixtures = do
+  resetPostgresSchema
+  seedResult <- runPsqlFile startupImportSeedSql
+  case seedResult of
+    Left err -> assertFailure ("Startup import Postgres seed failed: " ++ err)
+    Right () -> pure ()
+  ensureStartupAuthSeedInvariant
+  copyStartupFilesystemFixtures
+  restartPostgresSandboxServer
+
+ensureStartupAuthSeedInvariant :: IO ()
+ensureStartupAuthSeedInvariant = do
+  _ <- runPsqlCommand ("DELETE FROM auth_users WHERE username = " ++ quoteSql "startup-auth-fs-only-user")
+  _ <- runPsqlCommand
+    ( "INSERT INTO auth_users (username, password_hash, role, approved) VALUES ("
+        ++ quoteSql "startup-conflict-user"
+        ++ ", "
+        ++ quoteSql "postgres-conflict-hash"
+        ++ ", 'admin'::auth_user_role, true) ON CONFLICT (username) DO NOTHING"
+    )
+  _ <- runPsqlCommand
+    ( "INSERT INTO auth_users (username, password_hash, role, approved) VALUES ("
+        ++ quoteSql "startup-postgres-only-user"
+        ++ ", "
+        ++ quoteSql "postgres-only-hash"
+        ++ ", 'member'::auth_user_role, false) ON CONFLICT (username) DO NOTHING"
+    )
+  pure ()
+
+copyStartupFilesystemFixtures :: IO ()
+copyStartupFilesystemFixtures = do
+  removeIfExists startupSandboxDataDir
+  createDirectoryIfMissing True startupSandboxDataDir
+  copyDirectoryRecursive startupImportFsFixturesDir startupSandboxDataDir
+
+removeIfExists :: FilePath -> IO ()
+removeIfExists target = do
+  exists <- doesDirectoryExist target
+  if exists
+    then removePathForcibly target
+    else pure ()
+
+copyDirectoryRecursive :: FilePath -> FilePath -> IO ()
+copyDirectoryRecursive src dst = do
+  createDirectoryIfMissing True dst
+  children <- listDirectory src
+  mapM_ (copyNode src dst) children
+  where
+    copyNode srcRoot dstRoot child = do
+      let srcPath = pathJoin srcRoot child
+          dstPath = pathJoin dstRoot child
+      isDir <- doesDirectoryExist srcPath
+      if isDir
+        then copyDirectoryRecursive srcPath dstPath
+        else copyFile srcPath dstPath
+
+pathJoin :: FilePath -> FilePath -> FilePath
+pathJoin left right = left ++ "/" ++ right
 
 resetPostgresSchema :: IO ()
 resetPostgresSchema = do
@@ -1635,13 +1700,18 @@ readStartupLog = do
 
 restartPostgresSandboxServer :: IO ()
 restartPostgresSandboxServer = do
+  repoRoot <- getCurrentDirectory
+  let sandboxDir = repoRoot ++ "/dist-newstyle/sandbox/foucl"
+      daemonPath = repoRoot ++ "/scripts/daemon/foucld"
   let cmd =
-        "FOUCL_SESSION_SECRET=dev-only-session-secret "
-          ++ "FOUCL_CONFIG_FILE=dist-newstyle/sandbox/foucl/config/app-config.auth-postgres.json "
+        "cd " ++ sandboxDir ++ " && "
+          ++ "FOUCL_SESSION_SECRET=dev-only-session-secret "
+          ++ "FOUCL_CONFIG_FILE=config/app-config.auth-postgres.json "
           ++ "FOUCL_SESSION_COOKIE_SECURE=false "
-          ++ "scripts/daemon/foucld restart "
-          ++ "--bin dist-newstyle/sandbox/foucl/foucl "
-          ++ "--pidfile dist-newstyle/sandbox/foucl/.foucl/foucl.pid"
+          ++ daemonPath
+          ++ " restart "
+          ++ "--bin ./foucl "
+          ++ "--pidfile .foucl/foucl.pid"
   (exitCode, _out, err) <- readProcessWithExitCode "/bin/bash" ["-lc", cmd] ""
   case exitCode of
     ExitSuccess -> waitForServerReady
@@ -1780,6 +1850,15 @@ uniqueSuffix = show . round . (* 1000000) <$> getPOSIXTime
 
 postgresConn :: String
 postgresConn = "host=127.0.0.1 port=5432 dbname=foucl user=foucl password=foucl"
+
+startupImportSeedSql :: FilePath
+startupImportSeedSql = "test/resources/startup-import/postgres/seed.sql"
+
+startupImportFsFixturesDir :: FilePath
+startupImportFsFixturesDir = "test/resources/startup-import/fs"
+
+startupSandboxDataDir :: FilePath
+startupSandboxDataDir = "dist-newstyle/sandbox/foucl/data"
 
 authUpMigration :: FilePath
 authUpMigration = "db/migrations/auth/0001_auth_schema.up.sql"

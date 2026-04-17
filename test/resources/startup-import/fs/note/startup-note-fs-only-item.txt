@@ -1,0 +1,10 @@
+{
+  "storageId": {
+    "id": "startup-note-fs-only-item",
+    "version": "startup-note-fs-only-version"
+  },
+  "content": {
+    "title": "filesystem-note-only-title",
+    "noteContent": "filesystem-note-only-body"
+  }
+}

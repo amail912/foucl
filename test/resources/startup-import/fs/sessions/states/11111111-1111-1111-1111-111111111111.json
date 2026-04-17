@@ -1,0 +1,8 @@
+{
+  "stateId": "11111111-1111-1111-1111-111111111111",
+  "stateUserId": "startup-fs-conflicting-user",
+  "stateCreatedAt": "2025-01-02T00:00:00Z",
+  "stateExpiresAt": "2030-01-02T00:00:00Z",
+  "stateIdleExpiresAt": "2030-01-02T01:00:00Z",
+  "stateRevokedAt": null
+}

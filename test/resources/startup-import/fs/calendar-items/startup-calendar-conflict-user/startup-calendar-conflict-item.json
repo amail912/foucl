@@ -1,0 +1,8 @@
+{
+  "id": "startup-calendar-conflict-item",
+  "type": "INTENTION",
+  "titre": "filesystem-calendar-conflict-title",
+  "fenetre_debut": "2025-01-04T08:00",
+  "fenetre_fin": "2025-01-04T09:00",
+  "statut": "TODO"
+}

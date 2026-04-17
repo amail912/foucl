@@ -1,0 +1,6 @@
+{
+  "uname": "startup-auth-fs-only-user",
+  "passwordHash": "fs-only-hash",
+  "role": "member",
+  "approvalStatus": "pending"
+}

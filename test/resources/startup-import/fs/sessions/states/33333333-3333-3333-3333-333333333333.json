@@ -1,0 +1,8 @@
+{
+  "stateId": "33333333-3333-3333-3333-333333333333",
+  "stateUserId": "startup-fs-only-session-user",
+  "stateCreatedAt": "2025-01-02T00:00:00Z",
+  "stateExpiresAt": "2030-01-02T00:00:00Z",
+  "stateIdleExpiresAt": "2030-01-02T01:00:00Z",
+  "stateRevokedAt": null
+}

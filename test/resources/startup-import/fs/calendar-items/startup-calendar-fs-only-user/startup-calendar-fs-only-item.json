@@ -1,0 +1,8 @@
+{
+  "id": "startup-calendar-fs-only-item",
+  "type": "INTENTION",
+  "titre": "filesystem-calendar-only-title",
+  "fenetre_debut": "2025-01-03T08:00",
+  "fenetre_fin": "2025-01-03T09:00",
+  "statut": "TODO"
+}

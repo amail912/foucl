@@ -1,0 +1,10 @@
+{
+  "storageId": {
+    "id": "startup-note-conflict-item",
+    "version": "startup-note-fs-conflict-version"
+  },
+  "content": {
+    "title": "filesystem-note-conflict-title",
+    "noteContent": "filesystem-note-conflict-body"
+  }
+}

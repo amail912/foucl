@@ -54,18 +54,21 @@ Move persistence to Postgres incrementally, with per-domain cutover control, and
 - [026 Calendar And Trip Sharing Backend Selection And Wiring](done/026-calendar-tripsharing-backend-selection-and-wiring.md)
 - [027 Calendar And Trip Sharing Filesystem Adapter Parity](done/027-calendar-tripsharing-filesystem-adapter-parity.md)
 - [028 Calendar And Trip Sharing Postgres Schema And Migrations](done/028-calendar-tripsharing-postgres-schema-and-migrations.md)
-
-### Ready
-
-- [029 Calendar And Trip Sharing Postgres Adapter Implementation](ready/029-calendar-tripsharing-postgres-adapter-implementation.md)
-- [030 Calendar And Trip Sharing Postgres Parity Verification](ready/030-calendar-tripsharing-postgres-parity-verification.md)
-- [031 Calendar And Trip Sharing Startup Import](ready/031-calendar-tripsharing-startup-import.md)
+- [029 Calendar And Trip Sharing Postgres Adapter Implementation](done/029-calendar-tripsharing-postgres-adapter-implementation.md)
+- [030 Calendar And Trip Sharing Postgres Parity Verification](done/030-calendar-tripsharing-postgres-parity-verification.md)
+- [031 Calendar And Trip Sharing Startup Import](done/031-calendar-tripsharing-startup-import.md)
 
 ### To Refine
 
-- [003 Notes And Checklists Postgres Cutover](to-refine/003-notes-checklists-postgres-cutover.md)
 - [004 Domain Switching And Bootstrap Import](to-refine/004-domain-switching-and-bootstrap-import.md)
 - [005 Remove Filesystem Backend Per Migrated Domain](to-refine/005-remove-fs-backend-per-domain.md)
+- [032 Notes And Checklists Repository Contracts](to-refine/032-notes-checklists-repository-contracts.md)
+- [033 Notes And Checklists Backend Selection And Wiring](to-refine/033-notes-checklists-backend-selection-and-wiring.md)
+- [034 Notes And Checklists Filesystem Adapter Parity](to-refine/034-notes-checklists-filesystem-adapter-parity.md)
+- [035 Notes And Checklists Postgres Schema And Migrations](to-refine/035-notes-checklists-postgres-schema-and-migrations.md)
+- [036 Notes And Checklists Postgres Adapter Implementation](to-refine/036-notes-checklists-postgres-adapter-implementation.md)
+- [037 Notes And Checklists Postgres Parity Verification](to-refine/037-notes-checklists-postgres-parity-verification.md)
+- [038 Notes And Checklists Startup Import](to-refine/038-notes-checklists-startup-import.md)
 
 ### Canceled
 
@@ -76,3 +79,4 @@ Move persistence to Postgres incrementally, with per-domain cutover control, and
 - [009 Session Postgres Implementation And Parity](canceled/009-session-postgres-implementation-and-parity.md) - Canceled because it mixed Postgres adapter implementation and parity verification; replaced by 022, 020, and 021.
 - [010 Auth Session Startup Import](canceled/010-auth-session-startup-import.md) - Canceled because it mixed auth and session startup import execution/verification; replaced by 023 and 024.
 - [002 Calendar And Trip Sharing Postgres Cutover](canceled/002-calendar-tripsharing-postgres-cutover.md) - Canceled because it mixed contracts, wiring, schema, adapters, parity, and startup import into one oversized story; replaced by 025, 026, 027, 028, 029, 030, and 031.
+- [003 Notes And Checklists Postgres Cutover](canceled/003-notes-checklists-postgres-cutover.md) - Canceled because it mixed contracts, wiring, filesystem parity, schema, adapters, parity, and startup import into one oversized story; replaced by 032, 033, 034, 035, 036, 037, and 038.

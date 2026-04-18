@@ -49,7 +49,7 @@ import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Lazy.Char8 as BL8
 import qualified Control.Exception as Ex
-import Happstack.Server (FilterMonad, Response, ServerPartT, RqBody, takeRequestBody, unBody, rqBody, decodeBody, askRq, defaultBodyPolicy, nullDir, path, serveFileFrom, guessContentTypeM, mimeTypes, uriRest, nullConf, simpleHTTP, toResponse, method, ok, internalServerError, notFound, dir, Method(GET, POST, DELETE, PUT), Conf(..), addCookie, mkCookie, CookieLife(Session, Expired), getHeaderM, unauthorized, requestEntityTooLarge, look, setResponseCode)
+import Happstack.Server (FilterMonad, Response, ServerPartT, RqBody, takeRequestBody, unBody, rqBody, decodeBody, askRq, rqPaths, defaultBodyPolicy, nullDir, path, serveFileFrom, guessContentTypeM, mimeTypes, uriRest, nullConf, simpleHTTP, toResponse, method, ok, internalServerError, notFound, dir, Method(GET, POST, DELETE, PUT), Conf(..), addCookie, mkCookie, CookieLife(Session, Expired), getHeaderM, unauthorized, requestEntityTooLarge, look, setResponseCode)
 import qualified Happstack.Server as HServer
 import Happstack.Server.Internal.Cookie (Cookie(..), SameSite(..))
 import Happstack.Server.Internal.MessageWrap (bodyInput, BodyPolicy)
@@ -78,10 +78,11 @@ import System.FilePath ((</>), pathSeparator, takeBaseName, takeExtension)
 import System.IO (hFlush, stdout)
 import System.Environment (lookupEnv)
 import System.Exit (exitFailure)
-import Data.Time.Clock (UTCTime, getCurrentTime, addUTCTime)
+import Data.Time.Clock (UTCTime, getCurrentTime, addUTCTime, diffUTCTime)
 import Data.Time.LocalTime (LocalTime)
 import Data.Time.Format (defaultTimeLocale, parseTimeM)
 import Data.Time.Format.ISO8601 (iso8601ParseM)
+import Text.Printf (printf)
 import GHC.Generics (Generic)
 import Data.ByteString.Lazy.Char8 (writeFile)
 import Filesystem.Path.CurrentOS    (commonPrefix, encodeString, decodeString, collapse, append)
@@ -705,12 +706,21 @@ runApp = do
                                                 exitFailure
                                               Right () ->
                                                 simpleHTTP nullConf { port = 8081 } $ do
-                                                    log "Incoming request" >> log "=========================END REQUEST====================\n"
-                                                    msum [ homePage
-                                                         , apiController authRepo calendarRepo tripSharingRepo noteRepo checklistRepo signupRateLimitState tmpDir appConfig sessionStore
-                                                         , serveStaticResource
-                                                         , mzero
-                                                         ]
+                                                    log "Incoming request"
+                                                    rq <- askRq
+                                                    let requestPath = "/" ++ intercalate "/" (rqPaths rq)
+                                                    startedAt <- liftIO getCurrentTime
+                                                    response <- msum [ homePage
+                                                                     , apiController authRepo calendarRepo tripSharingRepo noteRepo checklistRepo signupRateLimitState tmpDir appConfig sessionStore
+                                                                     , serveStaticResource
+                                                                     , mzero
+                                                                     ]
+                                                    endedAt <- liftIO getCurrentTime
+                                                    let elapsedMs :: Double
+                                                        elapsedMs = realToFrac (diffUTCTime endedAt startedAt) * 1000
+                                                    log ("[request-timing] path=" ++ requestPath ++ " duration_ms=" ++ printf "%.3f" elapsedMs)
+                                                    log "=========================END REQUEST====================\n"
+                                                    pure response
 
 startupMigrationDomainsForBackends
   :: AuthBackend

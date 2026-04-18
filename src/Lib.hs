@@ -28,11 +28,12 @@ module Lib
 
 import Prelude hiding (log, writeFile)
 import Data.Aeson (ToJSON(toJSON), FromJSON(parseJSON), decode, encode, decode', eitherDecodeFileStrict', (.:), (.:?), (.=), withObject, object)
+import Data.Bifunctor (second)
 import Data.Function ((&))
 import Data.Functor ((<$>))
 import Data.Maybe (Maybe(..), fromMaybe, mapMaybe, catMaybes)
 import Data.Int (Int64)
-import Data.List (intercalate)
+import Data.List (intercalate, isPrefixOf, nub, sort, sortOn)
 import Control.Monad (msum, mzero, join, foldM, when, mplus)
 import Control.Monad.Except (catchError, throwError)
 import Control.Monad.Trans.Class (lift, MonadTrans)
@@ -41,7 +42,6 @@ import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import Control.Monad.IO.Class (liftIO, MonadIO)
 import Data.Either (either)
 import Data.ByteString.Char8 (unpack)
-import Data.List (isPrefixOf, nub, sort, sortOn)
 import Data.Char (toLower)
 import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
 import qualified Data.Set as Set
@@ -54,7 +54,7 @@ import qualified Happstack.Server as HServer
 import Happstack.Server.Internal.Cookie (Cookie(..), SameSite(..))
 import Happstack.Server.Internal.MessageWrap (bodyInput, BodyPolicy)
 import Model (NoteContent, ChecklistContent, Content, Identifiable(..))
-import qualified Model as Model
+import qualified Model
 import qualified AgendaModel as Agenda
 import CalendarRepository (CalendarRepository(..), defaultCalendarRepository, postgresCalendarRepository, verifyPostgresCalendarStorage)
 import TripSharingRepository (TripSharingRepository(..), defaultTripSharingRepository, postgresTripSharingRepository, verifyPostgresTripSharingStorage)
@@ -86,7 +86,7 @@ import GHC.Generics (Generic)
 import Data.ByteString.Lazy.Char8 (writeFile)
 import Filesystem.Path.CurrentOS    (commonPrefix, encodeString, decodeString, collapse, append)
 import Auth (AuthRequest(..), AuthRequestError(..), AuthError(..), AuthenticatedProfile(..), AuthRepository, defaultAuthRepository, createUserWithBootstrapAdmin, loadAuthenticatedProfile, signinUser, userExists, isApprovedAdmin, listPendingUsers, listApprovedUsers, approveUser, deletePendingUser, deleteApprovedUser)
-import qualified AuthRepository as AuthRepository
+import qualified AuthRepository
 import Session (SessionConfig(..), SessionPrincipal(..), SessionStore(..), SessionState(..), SessionHandle(..), UserStateBinding(..), SessionRepository(..), defaultSessionConfig, mkFileSessionStore, mkPostgresSessionRepository, mkSessionStore, signSessionId, verifyPostgresSessionStorage, verifyAndExtractSessionId)
 import Repository (RepositoryError(..))
 import Database.PostgreSQL.Simple (Connection, Only(..), SqlError(..), close, connectPostgreSQL, execute, query, query_)
@@ -721,12 +721,12 @@ startupMigrationDomainsForBackends
   -> [String]
 startupMigrationDomainsForBackends authMode sessionMode calendarMode tripSharingMode noteMode checklistMode =
   concat
-    [ if authMode == AuthBackendPostgres then ["auth"] else []
-    , if sessionMode == SessionBackendPostgres then ["session"] else []
-    , if calendarMode == CalendarBackendPostgres then ["calendar"] else []
-    , if tripSharingMode == TripSharingBackendPostgres then ["trip-sharing"] else []
-    , if noteMode == NoteBackendPostgres then ["note"] else []
-    , if checklistMode == ChecklistBackendPostgres then ["checklist"] else []
+    [ ["auth" | authMode == AuthBackendPostgres]
+    , ["session" | sessionMode == SessionBackendPostgres]
+    , ["calendar" | calendarMode == CalendarBackendPostgres]
+    , ["trip-sharing" | tripSharingMode == TripSharingBackendPostgres]
+    , ["note" | noteMode == NoteBackendPostgres]
+    , ["checklist" | checklistMode == ChecklistBackendPostgres]
     ]
 
 runStartupMigrationsIfNeeded
@@ -1099,10 +1099,10 @@ loadPostgresSessionImportSnapshot connectionString = do
                 Left err -> pure (Left ("Session startup import failed while reading Postgres user bindings: " ++ show (err :: Ex.SomeException)))
                 Right bindingRows ->
                   pure
-                    ( Right
+                        ( Right
                         ( map (\(sid, uid, createdAt, expiresAt, idleExpiresAt, revokedAt) -> SessionState sid uid createdAt expiresAt idleExpiresAt revokedAt) stateRows
                         , map (\(sessionId, stId, issuedAt, revokedAt) -> SessionHandle sessionId stId issuedAt revokedAt) handleRows
-                        , map (\(userId, stId) -> (userId, UserStateBinding stId)) bindingRows
+                        , map (second UserStateBinding) bindingRows
                         )
                     )
 
@@ -1725,7 +1725,7 @@ loadSingleOwnerUserPairs rootDir relationLabel (Right acc) fileName
           pure (Left ("Trip-sharing startup import failed while reading filesystem " ++ relationLabel ++ " for owner_user_id=" ++ ownerUserId ++ ": invalid JSON in " ++ fullPath))
         Just usernames ->
           let normalized = sort (nub (usernames :: [String]))
-              pairs = map (\username -> (ownerUserId, username)) normalized
+              pairs = [(ownerUserId, username) | username <- normalized]
            in pure (Right (pairs ++ acc))
 
 isUniqueViolation :: SqlError -> Bool
@@ -1926,8 +1926,7 @@ validateDatabaseConfig DatabaseConfigFile {databaseHostFile, databasePortFile, d
 
 renderPostgresConnectionString :: DatabaseConfig -> String
 renderPostgresConnectionString cfg =
-  intercalate
-    " "
+  unwords
     [ "host=" ++ pgQuote (databaseHost cfg)
     , "port=" ++ show (databasePort cfg)
     , "dbname=" ++ pgQuote (databaseName cfg)

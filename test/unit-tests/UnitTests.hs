@@ -2946,7 +2946,7 @@ pgNoteRepoRoundTripLifecycle =
               case listedAfterCreate of
                 Left err -> assertFailure ("Expected note list success, got " ++ show err)
                 Right [createdItem] -> do
-                  assertEqual "Expected listed note id to match created id" (id createdStorageId) (id (storageId createdItem))
+                  assertEqual "Expected listed note id to match created id" createdStorageId (storageId createdItem)
                   assertEqual "Expected listed note content to match create payload" createdContent (content createdItem)
                 Right listed -> assertFailure ("Expected one note item after create, got " ++ show (length listed))
 
@@ -2954,14 +2954,14 @@ pgNoteRepoRoundTripLifecycle =
               case updateResult of
                 Left err -> assertFailure ("Expected note update success, got " ++ show err)
                 Right updatedStorageId -> do
-                  assertEqual "Expected note id to stay stable after update" (id createdStorageId) (id updatedStorageId)
+                  assertEqual "Expected note id to stay stable after update" createdStorageId updatedStorageId
                   assertBool "Expected note version to change after update" (version createdStorageId /= version updatedStorageId)
 
                   listedAfterUpdate <- runExceptT $ repoListItems repo
                   case listedAfterUpdate of
                     Left err -> assertFailure ("Expected note list after update success, got " ++ show err)
                     Right [updatedItem] -> do
-                      assertEqual "Expected listed updated note id to match created id" (id createdStorageId) (id (storageId updatedItem))
+                      assertEqual "Expected listed updated note id to match created id" createdStorageId (storageId updatedItem)
                       assertEqual "Expected listed updated note content to match update payload" updatedContent (content updatedItem)
                     Right listed -> assertFailure ("Expected one note item after update, got " ++ show (length listed))
 
@@ -3032,7 +3032,7 @@ pgChecklistRepoRoundTripLifecycle =
               case listedAfterCreate of
                 Left err -> assertFailure ("Expected checklist list success, got " ++ show err)
                 Right [createdItem] -> do
-                  assertEqual "Expected listed checklist id to match created id" (id createdStorageId) (id (storageId createdItem))
+                  assertEqual "Expected listed checklist id to match created id" createdStorageId (storageId createdItem)
                   assertEqual "Expected listed checklist content to match create payload" createdContent (content createdItem)
                 Right listed -> assertFailure ("Expected one checklist item after create, got " ++ show (length listed))
 
@@ -3040,14 +3040,14 @@ pgChecklistRepoRoundTripLifecycle =
               case updateResult of
                 Left err -> assertFailure ("Expected checklist update success, got " ++ show err)
                 Right updatedStorageId -> do
-                  assertEqual "Expected checklist id to stay stable after update" (id createdStorageId) (id updatedStorageId)
+                  assertEqual "Expected checklist id to stay stable after update" createdStorageId updatedStorageId
                   assertBool "Expected checklist version to change after update" (version createdStorageId /= version updatedStorageId)
 
                   listedAfterUpdate <- runExceptT $ repoListItems repo
                   case listedAfterUpdate of
                     Left err -> assertFailure ("Expected checklist list after update success, got " ++ show err)
                     Right [updatedItem] -> do
-                      assertEqual "Expected listed updated checklist id to match created id" (id createdStorageId) (id (storageId updatedItem))
+                      assertEqual "Expected listed updated checklist id to match created id" createdStorageId (storageId updatedItem)
                       assertEqual "Expected listed updated checklist content to match update payload" updatedContent (content updatedItem)
                     Right listed -> assertFailure ("Expected one checklist item after update, got " ++ show (length listed))
 

@@ -10,6 +10,7 @@ import Data.CaseInsensitive (original)
 import Data.Char (toLower)
 import Data.Foldable (toList)
 import Data.List (isInfixOf)
+import Control.Monad (when)
 import Data.Password.Argon2 (hashPassword, mkPassword, unPasswordHash)
 import Data.Text (pack, unpack)
 import Data.Time.Clock.POSIX (getPOSIXTime)
@@ -310,8 +311,8 @@ runIntegrationPostgresTests = do
             (\i -> performSignupRaw ("pg-rate-limit-" ++ suffix ++ "-" ++ show i) testPassword)
             [1..6]
           let statusCodes = map getResponseStatusCode responses
-          assertBool "Expected at least one allowed signup before rate-limit saturation" (any (== 200) statusCodes)
-          assertBool "Expected signup rate-limiter to block after saturation" (any (== 400) statusCodes)
+          assertBool "Expected at least one allowed signup before rate-limit saturation" (200 `elem` statusCodes)
+          assertBool "Expected signup rate-limiter to block after saturation" (400 `elem` statusCodes)
 
         it "keeps signin success, invalid credentials, and pending approval semantics" $ do
           adminSignin <- signinAsAdmin
@@ -841,9 +842,7 @@ copyStartupFilesystemFixtures = do
 removeIfExists :: FilePath -> IO ()
 removeIfExists target = do
   exists <- doesDirectoryExist target
-  if exists
-    then removePathForcibly target
-    else pure ()
+  when exists $ removePathForcibly target
 
 copyDirectoryRecursive :: FilePath -> FilePath -> IO ()
 copyDirectoryRecursive src dst = do

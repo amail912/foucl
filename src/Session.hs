@@ -22,6 +22,7 @@ module Session
 
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
 import Control.Monad.IO.Class (liftIO)
+import Control.Monad (when)
 import Data.Aeson (FromJSON(..), ToJSON(..), (.:), (.=), encode, decode, object, withObject)
 import Data.ByteString.Char8 (pack, unpack)
 import Data.ByteArray (constEq)
@@ -454,9 +455,7 @@ fsDeleteAllUserStateBindingsForUser :: FilePath -> String -> ExceptT RepositoryE
 fsDeleteAllUserStateBindingsForUser baseDir userId = do
   let path = userBindingPath baseDir userId
   exists <- ioOr ReadFailure (doesFileExist path)
-  if exists
-    then deleteFileOrNotFound path
-    else pure ()
+  when exists $ deleteFileOrNotFound path
 
 handlePath :: FilePath -> String -> FilePath
 handlePath baseDir sid = baseDir </> "handles" </> sid ++ ".json"
@@ -557,7 +556,7 @@ pgUpdateSessionHandle connectionString SessionHandle {handleSessionId, handleSta
       :: IO (Either Ex.SomeException Int64))
     case writeResult of
       Left err -> throwError (mapWriteException err)
-      Right affected -> if affected == 0 then throwError NotFound else pure ()
+      Right affected -> when (affected == 0) $ throwError NotFound
 
 pgDeleteSessionHandleBySessionId :: String -> String -> ExceptT RepositoryError IO ()
 pgDeleteSessionHandleBySessionId connectionString sid =
@@ -567,7 +566,7 @@ pgDeleteSessionHandleBySessionId connectionString sid =
       :: IO (Either Ex.SomeException Int64))
     case writeResult of
       Left err -> throwError (mapWriteException err)
-      Right affected -> if affected == 0 then throwError NotFound else pure ()
+      Right affected -> when (affected == 0) $ throwError NotFound
 
 pgCreateSessionState :: String -> SessionState -> ExceptT RepositoryError IO ()
 pgCreateSessionState connectionString SessionState {stateId, stateUserId, stateCreatedAt, stateExpiresAt, stateIdleExpiresAt, stateRevokedAt} =
@@ -615,7 +614,7 @@ pgUpdateSessionState connectionString SessionState {stateId, stateUserId, stateC
       :: IO (Either Ex.SomeException Int64))
     case writeResult of
       Left err -> throwError (mapWriteException err)
-      Right affected -> if affected == 0 then throwError NotFound else pure ()
+      Right affected -> when (affected == 0) $ throwError NotFound
 
 pgDeleteSessionStateByStateId :: String -> String -> ExceptT RepositoryError IO ()
 pgDeleteSessionStateByStateId connectionString stId =
@@ -625,7 +624,7 @@ pgDeleteSessionStateByStateId connectionString stId =
       :: IO (Either Ex.SomeException Int64))
     case writeResult of
       Left err -> throwError (mapWriteException err)
-      Right affected -> if affected == 0 then throwError NotFound else pure ()
+      Right affected -> when (affected == 0) $ throwError NotFound
 
 pgCreateUserStateBinding :: String -> String -> UserStateBinding -> ExceptT RepositoryError IO ()
 pgCreateUserStateBinding connectionString userId UserStateBinding {boundStateId} =
@@ -662,7 +661,7 @@ pgDeleteUserStateBindingByUserId connectionString userId =
       :: IO (Either Ex.SomeException Int64))
     case writeResult of
       Left err -> throwError (mapWriteException err)
-      Right affected -> if affected == 0 then throwError NotFound else pure ()
+      Right affected -> when (affected == 0) $ throwError NotFound
 
 pgDeleteAllUserStateBindingsForUser :: String -> String -> ExceptT RepositoryError IO ()
 pgDeleteAllUserStateBindingsForUser connectionString userId =

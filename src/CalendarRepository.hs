@@ -276,7 +276,7 @@ pgDeleteCalendarItemById connectionString userId itemId =
       :: IO (Either Ex.SomeException Int64))
     case writeResult of
       Left err -> throwError (mapWriteException err)
-      Right affected -> if affected == 0 then throwError NotFound else pure ()
+      Right affected -> when (affected == 0) $ throwError NotFound
 
 data CalendarDbRow = CalendarDbRow
   { dbItemKind :: String

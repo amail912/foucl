@@ -17,6 +17,7 @@ module PostgresMigrations
 
 import Control.Monad (unless, when)
 import Data.List (isInfixOf)
+import Data.Maybe (isJust)
 import System.Directory (findExecutable)
 import System.Exit (ExitCode(..))
 import System.Process (readProcessWithExitCode)
@@ -109,7 +110,7 @@ runMigrationsAtPath domain basePath connectionUrl direction migrations = do
 psqlAvailable :: IO Bool
 psqlAvailable = do
   mPath <- findExecutable "psql"
-  pure (maybe False (const True) mPath)
+  pure (isJust mPath)
 
 authMigrations :: [SqlMigration]
 authMigrations =

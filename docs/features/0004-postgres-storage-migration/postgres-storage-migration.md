@@ -28,7 +28,14 @@ Move persistence to Postgres incrementally, with per-domain cutover control, and
 - Backend activation is controlled per domain through configuration.
 - Session business/controller call sites stay on `SessionStore`; repository extraction (017) is internal to session composition.
 - Postgres connection is configured through a top-level split `database` object (`host`, `port`, `name`, `user`, `password`).
+- Runtime startup order for Postgres-enabled domains is:
+  1. startup migration orchestration,
+  2. storage wiring/verification,
+  3. startup import,
+  4. HTTP serving.
+- Startup migration and startup import are fail-fast; startup errors abort before HTTP serve.
 - Import routines must be idempotent and safe to run at each startup.
+- Startup-import fixture payloads are owned by test harness/resources (`test/resources/startup-import` + integration test setup code), not `Makefile`-embedded data payloads.
 - Migration system documentation: [Postgres Migration System](migration-system.md).
 - Parity certification stories use real Postgres integration tests (no mocked signoff).
 - Auth parity (016) uses fixed local test DB endpoint `127.0.0.1:5432/foucl` with `foucl/foucl` credentials and fails hard when unavailable.
@@ -68,12 +75,12 @@ Move persistence to Postgres incrementally, with per-domain cutover control, and
 - [039 Startup Migration Orchestrator](done/039-startup-migration-orchestrator.md)
 - [040 Startup Migration Observability And Failure Contract](done/040-startup-migration-observability-and-failure-contract.md)
 - [041 Startup Migration Integration Verification](done/041-startup-migration-integration-verification.md)
+- [042 Runtime Docs Alignment For Startup Migrations](done/042-runtime-docs-alignment-for-startup-migrations.md)
 
 ### To Refine
 
 - [004 Domain Switching And Bootstrap Import](to-refine/004-domain-switching-and-bootstrap-import.md)
 - [005 Remove Filesystem Backend Per Migrated Domain](to-refine/005-remove-fs-backend-per-domain.md)
-- [042 Runtime Docs Alignment For Startup Migrations](to-refine/042-runtime-docs-alignment-for-startup-migrations.md)
 
 ### Canceled
 

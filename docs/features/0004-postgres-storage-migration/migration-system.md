@@ -37,6 +37,24 @@ Session migrations follow the same structure under `db/migrations/session/` and 
   - Execute down SQL and remove id from metadata table.
 - Each run is wrapped in a single DB transaction.
 
+## Runtime Startup Behavior
+
+- Startup runs automatic `MigrateUp` for every domain configured with backend `postgres` (`auth`, `session`, `calendar`, `trip-sharing`, `note`, `checklist`).
+- Domains configured with backend `filesystem` are skipped by startup migration orchestration.
+- Runtime startup sequence for Postgres-enabled domains is:
+  1. startup migration orchestration (`MigrateUp`),
+  2. Postgres storage wiring/verification,
+  3. filesystem-to-Postgres startup import,
+  4. HTTP serving.
+- Startup migration is fail-fast: if any selected domain migration fails, startup exits and HTTP is not served.
+- Startup migration idempotency relies on `schema_migrations`; already-applied migration ids are skipped.
+
+## Operational Expectations
+
+- Local/dev/test/prod runtime behavior is consistent: the server owns startup auto-migration for Postgres-enabled domains.
+- External migration pre-application is optional for operational workflows, but it is not required for startup correctness.
+- Teams should still review SQL migration files as deploy-time artifacts; startup auto-migrate does not change SQL review requirements.
+
 ## Auth Schema (0001)
 
 Auth migration `0001_auth_schema` defines:
@@ -52,7 +70,10 @@ Auth migration `0001_auth_schema` defines:
 
 ## Testing and Validation
 
-Migration integration tests are env-gated and run only when `FOUCL_TEST_POSTGRES_URL` is set.
+Migration and startup-migration behavior is validated by two complementary test paths:
+
+- Unit-level migration tests are env-gated (`FOUCL_TEST_POSTGRES_URL`) and verify direct migration runner behavior.
+- Postgres integration tests (`make integration-test-postgres` / `cabal test foucl-integration-postgres-tests`) verify startup migration orchestration on real startup flows.
 
 Validated scenarios:
 
@@ -60,6 +81,9 @@ Validated scenarios:
 2. Down migration from latest state.
 3. Re-apply up after down.
 4. Schema assertions for table/columns/enum/boolean/uniqueness semantics.
+5. Startup migration clean-DB bootstrap.
+6. Startup migration no-op stability on pre-migrated DB.
+7. Startup migration failure aborts startup before HTTP serving.
 
 ## Conventions for New Migrations
 

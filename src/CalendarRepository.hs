@@ -86,7 +86,7 @@ verifyPostgresCalendarStorage connectionString = do
       pingResult <- Ex.try (query_ conn "SELECT 1" :: IO [Only Int]) :: IO (Either Ex.SomeException [Only Int])
       schemaResult <- Ex.try
         (query_ conn
-          "SELECT user_id, item_id, item_kind, legacy_item_type, legacy_title, legacy_window_start, legacy_window_end, legacy_status, legacy_source_item_id, legacy_actual_duration_minutes, legacy_category, legacy_recurrence_rule_type, legacy_recurrence_interval_days, legacy_recurrence_exception_dates, trip_window_start, trip_window_end, trip_departure_place_id, trip_arrival_place_id FROM calendar_items LIMIT 0"
+          "SELECT user_id, item_id, item_kind, item_type, title, window_start, window_end, status, source_item_id, actual_duration_minutes, category, recurrence_rule_type, recurrence_interval_days, recurrence_exception_dates, trip_window_start, trip_window_end, trip_departure_place_id, trip_arrival_place_id FROM calendar_items LIMIT 0"
           :: IO [(String, String, String, Maybe String, Maybe String, Maybe String, Maybe String, Maybe String, Maybe String, Maybe Int, Maybe String, Maybe String, Maybe Int, PGArray String, Maybe String, Maybe String, Maybe String, Maybe String)])
         :: IO (Either Ex.SomeException [(String, String, String, Maybe String, Maybe String, Maybe String, Maybe String, Maybe String, Maybe String, Maybe Int, Maybe String, Maybe String, Maybe Int, PGArray String, Maybe String, Maybe String, Maybe String, Maybe String)])
       _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
@@ -162,7 +162,7 @@ pgCreateCalendarItem connectionString userId content =
     let row = contentToDbRow content
     writeResult <- liftIO (Ex.try
       (execute conn
-        "INSERT INTO calendar_items (user_id, item_id, item_kind, legacy_item_type, legacy_title, legacy_window_start, legacy_window_end, legacy_status, legacy_source_item_id, legacy_actual_duration_minutes, legacy_category, legacy_recurrence_rule_type, legacy_recurrence_interval_days, legacy_recurrence_exception_dates, trip_window_start, trip_window_end, trip_departure_place_id, trip_arrival_place_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO calendar_items (user_id, item_id, item_kind, item_type, title, window_start, window_end, status, source_item_id, actual_duration_minutes, category, recurrence_rule_type, recurrence_interval_days, recurrence_exception_dates, trip_window_start, trip_window_end, trip_departure_place_id, trip_arrival_place_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         ( userId
         , itemId
         , dbItemKind row
@@ -192,7 +192,7 @@ pgLoadCalendarItemById connectionString userId itemId =
   withPgConnection connectionString StorageFailure $ \conn -> do
     readResult <- liftIO (Ex.try
       (query conn
-        "SELECT user_id, item_id, item_kind, legacy_item_type, legacy_title, legacy_window_start, legacy_window_end, legacy_status, legacy_source_item_id, legacy_actual_duration_minutes, legacy_category, legacy_recurrence_rule_type, legacy_recurrence_interval_days, legacy_recurrence_exception_dates, trip_window_start, trip_window_end, trip_departure_place_id, trip_arrival_place_id FROM calendar_items WHERE user_id = ? AND item_id = ?"
+        "SELECT user_id, item_id, item_kind, item_type, title, window_start, window_end, status, source_item_id, actual_duration_minutes, category, recurrence_rule_type, recurrence_interval_days, recurrence_exception_dates, trip_window_start, trip_window_end, trip_departure_place_id, trip_arrival_place_id FROM calendar_items WHERE user_id = ? AND item_id = ?"
         (userId, itemId))
       :: IO (Either Ex.SomeException [CalendarDbRowRaw]))
     case readResult of
@@ -208,7 +208,7 @@ pgListCalendarItemsForUser connectionString userId =
   withPgConnection connectionString StorageFailure $ \conn -> do
     readResult <- liftIO (Ex.try
       (query conn
-        "SELECT user_id, item_id, item_kind, legacy_item_type, legacy_title, legacy_window_start, legacy_window_end, legacy_status, legacy_source_item_id, legacy_actual_duration_minutes, legacy_category, legacy_recurrence_rule_type, legacy_recurrence_interval_days, legacy_recurrence_exception_dates, trip_window_start, trip_window_end, trip_departure_place_id, trip_arrival_place_id FROM calendar_items WHERE user_id = ? ORDER BY item_id"
+        "SELECT user_id, item_id, item_kind, item_type, title, window_start, window_end, status, source_item_id, actual_duration_minutes, category, recurrence_rule_type, recurrence_interval_days, recurrence_exception_dates, trip_window_start, trip_window_end, trip_departure_place_id, trip_arrival_place_id FROM calendar_items WHERE user_id = ? ORDER BY item_id"
         (Only userId))
       :: IO (Either Ex.SomeException [CalendarDbRowRaw]))
     case readResult of
@@ -224,7 +224,7 @@ pgUpdateCalendarItem connectionString userId itemId content =
     let row = contentToDbRow content
     writeResult <- liftIO (Ex.try
       (execute conn
-        "UPDATE calendar_items SET item_kind = ?, legacy_item_type = ?, legacy_title = ?, legacy_window_start = ?, legacy_window_end = ?, legacy_status = ?, legacy_source_item_id = ?, legacy_actual_duration_minutes = ?, legacy_category = ?, legacy_recurrence_rule_type = ?, legacy_recurrence_interval_days = ?, legacy_recurrence_exception_dates = ?, trip_window_start = ?, trip_window_end = ?, trip_departure_place_id = ?, trip_arrival_place_id = ? WHERE user_id = ? AND item_id = ?"
+        "UPDATE calendar_items SET item_kind = ?, item_type = ?, title = ?, window_start = ?, window_end = ?, status = ?, source_item_id = ?, actual_duration_minutes = ?, category = ?, recurrence_rule_type = ?, recurrence_interval_days = ?, recurrence_exception_dates = ?, trip_window_start = ?, trip_window_end = ?, trip_departure_place_id = ?, trip_arrival_place_id = ? WHERE user_id = ? AND item_id = ?"
         ( dbItemKind row
         , dbLegacyItemType row
         , dbLegacyTitle row
@@ -259,7 +259,7 @@ pgUpdateCalendarItemDuration connectionString userId itemId minutes = do
       withPgConnection connectionString StorageFailure $ \conn -> do
         writeResult <- liftIO (Ex.try
           (execute conn
-            "UPDATE calendar_items SET legacy_actual_duration_minutes = ? WHERE user_id = ? AND item_id = ?"
+            "UPDATE calendar_items SET actual_duration_minutes = ? WHERE user_id = ? AND item_id = ?"
             (minutes, userId, itemId))
           :: IO (Either Ex.SomeException Int64))
         case writeResult of
@@ -334,7 +334,7 @@ contentToDbRow content =
       , Agenda.recurrenceExceptionDates
       } ->
         CalendarDbRow
-          { dbItemKind = "legacy"
+          { dbItemKind = "task"
           , dbLegacyItemType = Just (itemTypeToDb itemType)
           , dbLegacyTitle = Just title
           , dbLegacyWindowStart = Just windowStart
@@ -375,7 +375,7 @@ rowToCalendarItem :: CalendarDbRowRaw -> Maybe Agenda.CalendarItem
 rowToCalendarItem (_userId, itemId, itemKind, legacyItemType, legacyTitle, legacyWindowStart, legacyWindowEnd, legacyStatus, legacySourceItemId, legacyActualDurationMinutes, legacyCategory, legacyRecurrenceRuleType, legacyRecurrenceIntervalDays, PGArray legacyRecurrenceExceptionDates, tripWindowStart, tripWindowEnd, tripDeparturePlaceId, tripArrivalPlaceId) = do
   content <-
     case itemKind of
-      "legacy" -> do
+      "task" -> do
         itemTypeRaw <- legacyItemType
         title <- legacyTitle
         windowStart <- legacyWindowStart

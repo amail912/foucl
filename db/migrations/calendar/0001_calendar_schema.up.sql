@@ -3,17 +3,17 @@ CREATE TABLE calendar_items (
   item_id text NOT NULL,
   item_kind text NOT NULL,
 
-  legacy_item_type text,
-  legacy_title text,
-  legacy_window_start text,
-  legacy_window_end text,
-  legacy_status text,
-  legacy_source_item_id text,
-  legacy_actual_duration_minutes integer,
-  legacy_category text,
-  legacy_recurrence_rule_type text,
-  legacy_recurrence_interval_days integer,
-  legacy_recurrence_exception_dates text[] NOT NULL DEFAULT '{}',
+  item_type text,
+  title text,
+  window_start text,
+  window_end text,
+  status text,
+  source_item_id text,
+  actual_duration_minutes integer,
+  category text,
+  recurrence_rule_type text,
+  recurrence_interval_days integer,
+  recurrence_exception_dates text[] NOT NULL DEFAULT '{}',
 
   trip_window_start text,
   trip_window_end text,
@@ -22,14 +22,14 @@ CREATE TABLE calendar_items (
 
   PRIMARY KEY (user_id, item_id),
 
-  CHECK (item_kind IN ('legacy', 'trip')),
+  CHECK (item_kind IN ('task', 'trip')),
   CHECK (
-    item_kind <> 'legacy' OR (
-      legacy_item_type IN ('INTENTION', 'BLOC_PLANIFIE')
-      AND legacy_title IS NOT NULL
-      AND legacy_window_start IS NOT NULL
-      AND legacy_window_end IS NOT NULL
-      AND legacy_status IN ('TODO', 'EN_COURS', 'FAIT', 'ANNULE')
+    item_kind <> 'task' OR (
+      item_type IN ('INTENTION', 'BLOC_PLANIFIE')
+      AND title IS NOT NULL
+      AND window_start IS NOT NULL
+      AND window_end IS NOT NULL
+      AND status IN ('TODO', 'EN_COURS', 'FAIT', 'ANNULE')
       AND trip_window_start IS NULL
       AND trip_window_end IS NULL
       AND trip_departure_place_id IS NULL
@@ -42,35 +42,35 @@ CREATE TABLE calendar_items (
       AND trip_window_end IS NOT NULL
       AND trip_departure_place_id IS NOT NULL
       AND trip_arrival_place_id IS NOT NULL
-      AND legacy_item_type IS NULL
-      AND legacy_title IS NULL
-      AND legacy_window_start IS NULL
-      AND legacy_window_end IS NULL
-      AND legacy_status IS NULL
-      AND legacy_source_item_id IS NULL
-      AND legacy_actual_duration_minutes IS NULL
-      AND legacy_category IS NULL
-      AND legacy_recurrence_rule_type IS NULL
-      AND legacy_recurrence_interval_days IS NULL
-      AND legacy_recurrence_exception_dates = '{}'
+      AND item_type IS NULL
+      AND title IS NULL
+      AND window_start IS NULL
+      AND window_end IS NULL
+      AND status IS NULL
+      AND source_item_id IS NULL
+      AND actual_duration_minutes IS NULL
+      AND category IS NULL
+      AND recurrence_rule_type IS NULL
+      AND recurrence_interval_days IS NULL
+      AND recurrence_exception_dates = '{}'
     )
   ),
-  CHECK (legacy_actual_duration_minutes IS NULL OR legacy_actual_duration_minutes >= 0),
+  CHECK (actual_duration_minutes IS NULL OR actual_duration_minutes >= 0),
   CHECK (
-    legacy_recurrence_rule_type IS NULL
-    OR legacy_recurrence_rule_type IN ('DAILY', 'WEEKLY', 'MONTHLY', 'YEARLY', 'EVERY_X_DAYS')
+    recurrence_rule_type IS NULL
+    OR recurrence_rule_type IN ('DAILY', 'WEEKLY', 'MONTHLY', 'YEARLY', 'EVERY_X_DAYS')
   ),
   CHECK (
-    legacy_recurrence_rule_type <> 'EVERY_X_DAYS'
-    OR legacy_recurrence_interval_days IS NOT NULL
+    recurrence_rule_type <> 'EVERY_X_DAYS'
+    OR recurrence_interval_days IS NOT NULL
   ),
   CHECK (
-    legacy_recurrence_rule_type = 'EVERY_X_DAYS'
-    OR legacy_recurrence_interval_days IS NULL
+    recurrence_rule_type = 'EVERY_X_DAYS'
+    OR recurrence_interval_days IS NULL
   ),
   CHECK (
-    legacy_recurrence_interval_days IS NULL
-    OR legacy_recurrence_interval_days > 0
+    recurrence_interval_days IS NULL
+    OR recurrence_interval_days > 0
   )
 );
 

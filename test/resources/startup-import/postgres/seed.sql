@@ -18,10 +18,10 @@ VALUES
   ('startup-binding-conflict-user', '11111111-1111-1111-1111-111111111111'::uuid),
   ('startup-pg-only-user', '22222222-2222-2222-2222-222222222222'::uuid);
 
-INSERT INTO calendar_items (user_id, item_id, item_kind, legacy_item_type, legacy_title, legacy_window_start, legacy_window_end, legacy_status)
+INSERT INTO calendar_items (user_id, item_id, item_kind, item_type, title, window_start, window_end, status)
 VALUES
-  ('startup-calendar-conflict-user', 'startup-calendar-conflict-item', 'legacy', 'INTENTION', 'postgres-calendar-conflict-title', '2025-01-01T08:00', '2025-01-01T09:00', 'TODO'),
-  ('startup-calendar-postgres-only-user', 'startup-calendar-postgres-only-item', 'legacy', 'INTENTION', 'postgres-calendar-only-title', '2025-01-02T08:00', '2025-01-02T09:00', 'TODO');
+  ('startup-calendar-conflict-user', 'startup-calendar-conflict-item', 'task', 'INTENTION', 'postgres-calendar-conflict-title', '2025-01-01T08:00', '2025-01-01T09:00', 'TODO'),
+  ('startup-calendar-postgres-only-user', 'startup-calendar-postgres-only-item', 'task', 'INTENTION', 'postgres-calendar-only-title', '2025-01-02T08:00', '2025-01-02T09:00', 'TODO');
 
 INSERT INTO trip_shares (owner_user_id, target_username)
 VALUES

@@ -184,7 +184,7 @@ pgDeleteItem connectionString tableName itemId =
       Right _ -> pure ()
 
 pgUpdateItem :: Content a => String -> String -> Identifiable a -> ExceptT CrudModificationException IO StorageId
-pgUpdateItem connectionString tableName (Identifiable targetStorageId newContent) =
+pgUpdateItem connectionString tableName (Identifiable targetStorageId@StorageId {id = targetId, version = targetVersion} newContent) =
   withPgConnection connectionString mapConnectionError $ \conn -> do
     let newVersion = hash newContent
     writeResult <- liftIO (Ex.try
@@ -192,8 +192,8 @@ pgUpdateItem connectionString tableName (Identifiable targetStorageId newContent
         (buildUpdateQuery tableName)
         ( newVersion
         , BL8.unpack (encode newContent)
-        , id targetStorageId
-        , version targetStorageId
+        , targetId
+        , targetVersion
         ))
       :: IO (Either Ex.SomeException Int64))
     case writeResult of
@@ -202,7 +202,7 @@ pgUpdateItem connectionString tableName (Identifiable targetStorageId newContent
         | affected > 0 -> pure targetStorageId {version = newVersion}
         | otherwise -> do
             latestResult <- liftIO (Ex.try
-              (query conn (buildLookupVersionQuery tableName) (Only (id targetStorageId)) :: IO [Only String])
+              (query conn (buildLookupVersionQuery tableName) (Only targetId) :: IO [Only String])
               :: IO (Either Ex.SomeException [Only String]))
             case latestResult of
               Left err -> throwError (CrudModificationReadingException (mapReadException err))

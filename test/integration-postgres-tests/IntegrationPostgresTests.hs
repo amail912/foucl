@@ -159,7 +159,7 @@ runIntegrationPostgresTests = do
         fsOnlyExists <- calendarItemExists "startup-calendar-fs-only-user" "startup-calendar-fs-only-item"
         assertBool "Expected filesystem-only startup calendar item to be imported into Postgres" fsOnlyExists
 
-        conflictTitle <- fetchCalendarItemLegacyTitle "startup-calendar-conflict-user" "startup-calendar-conflict-item"
+        conflictTitle <- fetchCalendarItemTitle "startup-calendar-conflict-user" "startup-calendar-conflict-item"
         assertEqual "Expected conflicting startup calendar item to keep Postgres value" "postgres-calendar-conflict-title" conflictTitle
 
         postgresOnlyExists <- calendarItemExists "startup-calendar-postgres-only-user" "startup-calendar-postgres-only-item"
@@ -183,7 +183,7 @@ runIntegrationPostgresTests = do
         fsOnlyCount <- fetchCalendarItemCountByKey "startup-calendar-fs-only-user" "startup-calendar-fs-only-item"
         assertEqual "Expected exactly one imported filesystem-only startup calendar item" 1 fsOnlyCount
 
-        conflictTitle <- fetchCalendarItemLegacyTitle "startup-calendar-conflict-user" "startup-calendar-conflict-item"
+        conflictTitle <- fetchCalendarItemTitle "startup-calendar-conflict-user" "startup-calendar-conflict-item"
         assertEqual "Expected conflicting startup calendar item to remain Postgres-authored after restart" "postgres-calendar-conflict-title" conflictTitle
 
     describe "Trip-sharing startup import" $ before_ prepareStartupImportFixtures $ do
@@ -884,7 +884,6 @@ resetPostgresSchema = do
   case calendarUpResult of
     Left err -> assertFailure ("Calendar up migration failed: " ++ err)
     Right () -> pure ()
-
   tripSharingUpResult <- runPsqlFile tripSharingUpMigration
   case tripSharingUpResult of
     Left err -> assertFailure ("Trip-sharing up migration failed: " ++ err)
@@ -1586,20 +1585,20 @@ calendarItemExists userId itemId = do
         "f" -> pure False
         value -> assertFailure ("Unexpected calendar EXISTS value for user_id=" ++ userId ++ " item_id=" ++ itemId ++ ": " ++ value) >> pure False
 
-fetchCalendarItemLegacyTitle :: String -> String -> IO String
-fetchCalendarItemLegacyTitle userId itemId = do
+fetchCalendarItemTitle :: String -> String -> IO String
+fetchCalendarItemTitle userId itemId = do
   scalarResult <- runPsqlScalar
-    ( "SELECT legacy_title FROM calendar_items WHERE user_id = "
+    ( "SELECT title FROM calendar_items WHERE user_id = "
         ++ quoteSql userId
         ++ " AND item_id = "
         ++ quoteSql itemId
     )
   case scalarResult of
-    Left err -> assertFailure ("Unable to query calendar legacy_title for user_id=" ++ userId ++ " item_id=" ++ itemId ++ ": " ++ err) >> pure ""
+    Left err -> assertFailure ("Unable to query calendar title for user_id=" ++ userId ++ " item_id=" ++ itemId ++ ": " ++ err) >> pure ""
     Right raw ->
       let value = trimTrailingNewline raw
        in if null value
-            then assertFailure ("Expected non-empty calendar legacy_title for user_id=" ++ userId ++ " item_id=" ++ itemId) >> pure ""
+            then assertFailure ("Expected non-empty calendar title for user_id=" ++ userId ++ " item_id=" ++ itemId) >> pure ""
             else pure value
 
 fetchCalendarItemsCount :: IO Int

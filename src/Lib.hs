@@ -1481,7 +1481,7 @@ importSingleCalendarItem conn (Right (importedCount, skippedCount, knownKeys)) (
       let row = calendarContentToDbRow content
       writeResult <- Ex.try
         (execute conn
-          "INSERT INTO calendar_items (user_id, item_id, item_kind, legacy_item_type, legacy_title, legacy_window_start, legacy_window_end, legacy_status, legacy_source_item_id, legacy_actual_duration_minutes, legacy_category, legacy_recurrence_rule_type, legacy_recurrence_interval_days, legacy_recurrence_exception_dates, trip_window_start, trip_window_end, trip_departure_place_id, trip_arrival_place_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+          "INSERT INTO calendar_items (user_id, item_id, item_kind, item_type, title, window_start, window_end, status, source_item_id, actual_duration_minutes, category, recurrence_rule_type, recurrence_interval_days, recurrence_exception_dates, trip_window_start, trip_window_end, trip_departure_place_id, trip_arrival_place_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
           ( userId
           , itemId
           , dbCalendarItemKind row
@@ -1766,7 +1766,7 @@ calendarContentToDbRow content =
       , Agenda.recurrenceExceptionDates
       } ->
         CalendarImportDbRow
-          { dbCalendarItemKind = "legacy"
+          { dbCalendarItemKind = "task"
           , dbCalendarLegacyItemType = Just (calendarItemTypeToDb itemType)
           , dbCalendarLegacyTitle = Just title
           , dbCalendarLegacyWindowStart = Just windowStart

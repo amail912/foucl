@@ -1,10 +1,23 @@
 {
   "auth": {
-    "bootstrapAdminUsername": "admin"
+    "bootstrapAdminUsername": "admin",
+    "authBackend": "postgres"
   },
   "session": {
     "cookieName": "foucl_session",
     "absoluteTtlSeconds": 604800,
-    "idleTtlSeconds": 86400
+    "idleTtlSeconds": 86400,
+    "sessionBackend": "postgres"
+  },
+  "calendarBackend": "postgres",
+  "tripSharingBackend": "postgres",
+  "noteBackend": "postgres",
+  "checklistBackend": "postgres",
+  "database": {
+    "host": "127.0.0.1",
+    "port": 5432,
+    "name": "foucl",
+    "user": "foucl",
+    "password": "foucl"
   }
 }

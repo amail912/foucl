@@ -44,6 +44,7 @@ import Database.PostgreSQL.Simple
   , query_
   )
 import Repository (RepositoryError(..))
+import SqlTiming (timedTry)
 import System.Directory
   ( canonicalizePath
   , createDirectory
@@ -146,9 +147,9 @@ verifyPostgresAuthStorage connectionString = do
   case connResult of
     Left err -> pure (Left ("Unable to connect to Postgres: " ++ show err))
     Right conn -> do
-      pingResult <- Ex.try (query_ conn "SELECT 1" :: IO [Only Int]) :: IO (Either Ex.SomeException [Only Int])
-      tableResult <- Ex.try (query_ conn "SELECT username, password_hash, role::text, approved FROM auth_users LIMIT 0" :: IO [(String, Text, Text, Bool)]) :: IO (Either Ex.SomeException [(String, Text, Text, Bool)])
-      enumResult <- Ex.try (query conn "SELECT EXISTS(SELECT 1 FROM pg_type WHERE typname = ?)" (Only ("auth_user_role" :: String)) :: IO [Only Bool]) :: IO (Either Ex.SomeException [Only Bool])
+      pingResult <- timedTry "SELECT ping-auth" (query_ conn "SELECT 1" :: IO [Only Int]) :: IO (Either Ex.SomeException [Only Int])
+      tableResult <- timedTry "SELECT auth-schema-check" (query_ conn "SELECT username, password_hash, role::text, approved FROM auth_users LIMIT 0" :: IO [(String, Text, Text, Bool)]) :: IO (Either Ex.SomeException [(String, Text, Text, Bool)])
+      enumResult <- timedTry "SELECT auth-enum-check" (query conn "SELECT EXISTS(SELECT 1 FROM pg_type WHERE typname = ?)" (Only ("auth_user_role" :: String)) :: IO [Only Bool]) :: IO (Either Ex.SomeException [Only Bool])
       close conn
       case pingResult of
         Left err -> pure (Left ("Postgres ping query failed: " ++ show err))
@@ -291,7 +292,7 @@ pgCreateUser connectionString persistedUser =
   withPgConnection connectionString StorageFailure $ \conn -> do
     let roleValue = userRoleToDb (userRole persistedUser)
         approvedValue = approvalStatusToDb (approvalStatus persistedUser)
-    writeResult <- liftIO (Ex.try
+    writeResult <- liftIO (timedTry "INSERT auth-user"
       (execute
         conn
         "INSERT INTO auth_users (username, password_hash, role, approved) VALUES (?, ?, ?::auth_user_role, ?)"
@@ -304,7 +305,7 @@ pgCreateUser connectionString persistedUser =
 pgLoadUserByUsername :: String -> String -> ExceptT RepositoryError IO PersistedUser
 pgLoadUserByUsername connectionString username =
   withPgConnection connectionString StorageFailure $ \conn -> do
-    readResult <- liftIO (Ex.try
+    readResult <- liftIO (timedTry "SELECT auth-user-by-username"
       (query
         conn
         "SELECT username, password_hash, role::text, approved FROM auth_users WHERE username = ?"
@@ -329,7 +330,7 @@ pgUpdateUser connectionString persistedUser =
   withPgConnection connectionString StorageFailure $ \conn -> do
     let roleValue = userRoleToDb (userRole persistedUser)
         approvedValue = approvalStatusToDb (approvalStatus persistedUser)
-    writeResult <- liftIO (Ex.try
+    writeResult <- liftIO (timedTry "UPDATE auth-user"
       (execute
         conn
         "UPDATE auth_users SET password_hash = ?, role = ?::auth_user_role, approved = ? WHERE username = ?"
@@ -342,7 +343,7 @@ pgUpdateUser connectionString persistedUser =
 pgDeleteUserByUsername :: String -> String -> ExceptT RepositoryError IO ()
 pgDeleteUserByUsername connectionString username =
   withPgConnection connectionString StorageFailure $ \conn -> do
-    writeResult <- liftIO (Ex.try
+    writeResult <- liftIO (timedTry "DELETE auth-user"
       (execute conn "DELETE FROM auth_users WHERE username = ?" (Only username))
       :: IO (Either Ex.SomeException Int64))
     case writeResult of
@@ -352,7 +353,7 @@ pgDeleteUserByUsername connectionString username =
 pgListUsers :: String -> ExceptT RepositoryError IO [PersistedUser]
 pgListUsers connectionString =
   withPgConnection connectionString StorageFailure $ \conn -> do
-    readResult <- liftIO (Ex.try
+    readResult <- liftIO (timedTry "SELECT auth-users"
       (query_ conn "SELECT username, password_hash, role::text, approved FROM auth_users ORDER BY username" :: IO [(String, Text, Text, Bool)])
       :: IO (Either Ex.SomeException [(String, Text, Text, Bool)]))
     case readResult of

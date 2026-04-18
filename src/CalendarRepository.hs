@@ -39,6 +39,7 @@ import Database.PostgreSQL.Simple
   )
 import Database.PostgreSQL.Simple.Types (PGArray(..))
 import Repository (RepositoryError(..))
+import SqlTiming (timedTry)
 import qualified Control.Exception as Ex
 import Data.Int (Int64)
 
@@ -83,8 +84,8 @@ verifyPostgresCalendarStorage connectionString = do
   case connResult of
     Left err -> pure (Left ("Unable to connect to Postgres: " ++ show err))
     Right conn -> do
-      pingResult <- Ex.try (query_ conn "SELECT 1" :: IO [Only Int]) :: IO (Either Ex.SomeException [Only Int])
-      schemaResult <- Ex.try
+      pingResult <- timedTry "SELECT ping-calendar" (query_ conn "SELECT 1" :: IO [Only Int]) :: IO (Either Ex.SomeException [Only Int])
+      schemaResult <- timedTry "SELECT calendar-schema-check"
         (query_ conn
           "SELECT user_id, item_id, item_kind, item_type, title, window_start, window_end, status, source_item_id, actual_duration_minutes, category, recurrence_rule_type, recurrence_interval_days, recurrence_exception_dates, trip_window_start, trip_window_end, trip_departure_place_id, trip_arrival_place_id FROM calendar_items LIMIT 0"
           :: IO [(String, String, String, Maybe String, Maybe String, Maybe String, Maybe String, Maybe String, Maybe String, Maybe Int, Maybe String, Maybe String, Maybe Int, PGArray String, Maybe String, Maybe String, Maybe String, Maybe String)])
@@ -160,7 +161,7 @@ pgCreateCalendarItem connectionString userId content =
   withPgConnection connectionString StorageFailure $ \conn -> do
     itemId <- liftIO (toString <$> nextRandom)
     let row = contentToDbRow content
-    writeResult <- liftIO (Ex.try
+    writeResult <- liftIO (timedTry "INSERT calendar-item"
       (execute conn
         "INSERT INTO calendar_items (user_id, item_id, item_kind, item_type, title, window_start, window_end, status, source_item_id, actual_duration_minutes, category, recurrence_rule_type, recurrence_interval_days, recurrence_exception_dates, trip_window_start, trip_window_end, trip_departure_place_id, trip_arrival_place_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         ( userId
@@ -190,7 +191,7 @@ pgCreateCalendarItem connectionString userId content =
 pgLoadCalendarItemById :: String -> String -> String -> ExceptT RepositoryError IO Agenda.CalendarItem
 pgLoadCalendarItemById connectionString userId itemId =
   withPgConnection connectionString StorageFailure $ \conn -> do
-    readResult <- liftIO (Ex.try
+    readResult <- liftIO (timedTry "SELECT calendar-item-by-id"
       (query conn
         "SELECT user_id, item_id, item_kind, item_type, title, window_start, window_end, status, source_item_id, actual_duration_minutes, category, recurrence_rule_type, recurrence_interval_days, recurrence_exception_dates, trip_window_start, trip_window_end, trip_departure_place_id, trip_arrival_place_id FROM calendar_items WHERE user_id = ? AND item_id = ?"
         (userId, itemId))
@@ -206,7 +207,7 @@ pgLoadCalendarItemById connectionString userId itemId =
 pgListCalendarItemsForUser :: String -> String -> ExceptT RepositoryError IO [Agenda.CalendarItem]
 pgListCalendarItemsForUser connectionString userId =
   withPgConnection connectionString StorageFailure $ \conn -> do
-    readResult <- liftIO (Ex.try
+    readResult <- liftIO (timedTry "SELECT calendar-items-by-user"
       (query conn
         "SELECT user_id, item_id, item_kind, item_type, title, window_start, window_end, status, source_item_id, actual_duration_minutes, category, recurrence_rule_type, recurrence_interval_days, recurrence_exception_dates, trip_window_start, trip_window_end, trip_departure_place_id, trip_arrival_place_id FROM calendar_items WHERE user_id = ? ORDER BY item_id"
         (Only userId))
@@ -222,7 +223,7 @@ pgUpdateCalendarItem :: String -> String -> String -> Agenda.CalendarItemContent
 pgUpdateCalendarItem connectionString userId itemId content =
   withPgConnection connectionString StorageFailure $ \conn -> do
     let row = contentToDbRow content
-    writeResult <- liftIO (Ex.try
+    writeResult <- liftIO (timedTry "UPDATE calendar-item"
       (execute conn
         "UPDATE calendar_items SET item_kind = ?, item_type = ?, title = ?, window_start = ?, window_end = ?, status = ?, source_item_id = ?, actual_duration_minutes = ?, category = ?, recurrence_rule_type = ?, recurrence_interval_days = ?, recurrence_exception_dates = ?, trip_window_start = ?, trip_window_end = ?, trip_departure_place_id = ?, trip_arrival_place_id = ? WHERE user_id = ? AND item_id = ?"
         ( dbItemKind row
@@ -257,7 +258,7 @@ pgUpdateCalendarItemDuration connectionString userId itemId minutes = do
   case loaded of
     Agenda.ServerCalendarItem {Agenda.content = Agenda.CalendarItemContent {}} -> do
       withPgConnection connectionString StorageFailure $ \conn -> do
-        writeResult <- liftIO (Ex.try
+        writeResult <- liftIO (timedTry "UPDATE calendar-item-duration"
           (execute conn
             "UPDATE calendar_items SET actual_duration_minutes = ? WHERE user_id = ? AND item_id = ?"
             (minutes, userId, itemId))
@@ -271,7 +272,7 @@ pgUpdateCalendarItemDuration connectionString userId itemId minutes = do
 pgDeleteCalendarItemById :: String -> String -> String -> ExceptT RepositoryError IO ()
 pgDeleteCalendarItemById connectionString userId itemId =
   withPgConnection connectionString StorageFailure $ \conn -> do
-    writeResult <- liftIO (Ex.try
+    writeResult <- liftIO (timedTry "DELETE calendar-item"
       (execute conn "DELETE FROM calendar_items WHERE user_id = ? AND item_id = ?" (userId, itemId))
       :: IO (Either Ex.SomeException Int64))
     case writeResult of

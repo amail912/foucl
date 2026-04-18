@@ -47,6 +47,7 @@ import Database.PostgreSQL.Simple
 import CrudStorage (createItem, deleteItem, getAllItems, modifyItem)
 import Model (ChecklistContent, Content, Identifiable(..), NoteContent, StorageId(..), hash)
 import NoteCrud (NoteServiceConfig, defaultNoteServiceConfig)
+import SqlTiming (timedTry)
 import qualified Control.Exception as Ex
 
 data NotesChecklistRepository a = NotesChecklistRepository
@@ -126,8 +127,8 @@ verifyPostgresStorageTable connectionString tableName = do
   case connResult of
     Left err -> pure (Left ("Unable to connect to Postgres: " ++ show err))
     Right conn -> do
-      pingResult <- Ex.try (query_ conn "SELECT 1" :: IO [Only Int]) :: IO (Either Ex.SomeException [Only Int])
-      schemaResult <- Ex.try
+      pingResult <- timedTry ("SELECT ping-" ++ tableName) (query_ conn "SELECT 1" :: IO [Only Int]) :: IO (Either Ex.SomeException [Only Int])
+      schemaResult <- timedTry ("SELECT schema-check-" ++ tableName)
         (query_ conn (buildSchemaCheckQuery tableName) :: IO [(String, String, String)])
         :: IO (Either Ex.SomeException [(String, String, String)])
       _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
@@ -143,7 +144,7 @@ pgCreateItem connectionString tableName content =
   withPgConnection connectionString IOWriteException $ \conn -> do
     itemId <- liftIO (toString <$> nextRandom)
     let storeId = mkStorageId itemId content
-    writeResult <- liftIO (Ex.try
+    writeResult <- liftIO (timedTry ("INSERT " ++ tableName)
       (execute conn
         (buildInsertQuery tableName)
         ( itemId
@@ -158,7 +159,7 @@ pgCreateItem connectionString tableName content =
 pgListItems :: Content a => String -> String -> ExceptT CrudReadException IO [Identifiable a]
 pgListItems connectionString tableName =
   withPgConnection connectionString IOReadException $ \conn -> do
-    readResult <- liftIO (Ex.try
+    readResult <- liftIO (timedTry ("SELECT " ++ tableName)
       (query_ conn (buildListQuery tableName) :: IO [(String, String, String)])
       :: IO (Either Ex.SomeException [(String, String, String)]))
     case readResult of
@@ -176,7 +177,7 @@ pgListItems connectionString tableName =
 pgDeleteItem :: String -> String -> String -> ExceptT CrudWriteException IO ()
 pgDeleteItem connectionString tableName itemId =
   withPgConnection connectionString IOWriteException $ \conn -> do
-    writeResult <- liftIO (Ex.try
+    writeResult <- liftIO (timedTry ("DELETE " ++ tableName)
       (execute conn (buildDeleteQuery tableName) (Only itemId))
       :: IO (Either Ex.SomeException Int64))
     case writeResult of
@@ -187,7 +188,7 @@ pgUpdateItem :: Content a => String -> String -> Identifiable a -> ExceptT CrudM
 pgUpdateItem connectionString tableName (Identifiable targetStorageId@StorageId {id = targetId, version = targetVersion} newContent) =
   withPgConnection connectionString mapConnectionError $ \conn -> do
     let newVersion = hash newContent
-    writeResult <- liftIO (Ex.try
+    writeResult <- liftIO (timedTry ("UPDATE " ++ tableName)
       (execute conn
         (buildUpdateQuery tableName)
         ( newVersion
@@ -201,7 +202,7 @@ pgUpdateItem connectionString tableName (Identifiable targetStorageId@StorageId 
       Right affected
         | affected > 0 -> pure targetStorageId {version = newVersion}
         | otherwise -> do
-            latestResult <- liftIO (Ex.try
+            latestResult <- liftIO (timedTry ("SELECT latest-version-" ++ tableName)
               (query conn (buildLookupVersionQuery tableName) (Only targetId) :: IO [Only String])
               :: IO (Either Ex.SomeException [Only String]))
             case latestResult of

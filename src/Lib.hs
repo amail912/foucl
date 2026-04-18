@@ -88,6 +88,7 @@ import Filesystem.Path.CurrentOS    (commonPrefix, encodeString, decodeString, c
 import Auth (AuthRequest(..), AuthRequestError(..), AuthError(..), AuthenticatedProfile(..), AuthRepository, defaultAuthRepository, createUserWithBootstrapAdmin, loadAuthenticatedProfile, signinUser, userExists, isApprovedAdmin, listPendingUsers, listApprovedUsers, approveUser, deletePendingUser, deleteApprovedUser)
 import qualified AuthRepository
 import Session (SessionConfig(..), SessionPrincipal(..), SessionStore(..), SessionState(..), SessionHandle(..), UserStateBinding(..), SessionRepository(..), defaultSessionConfig, mkFileSessionStore, mkPostgresSessionRepository, mkSessionStore, signSessionId, verifyPostgresSessionStorage, verifyAndExtractSessionId)
+import SqlTiming (timedTry)
 import Repository (RepositoryError(..))
 import Database.PostgreSQL.Simple (Connection, Only(..), SqlError(..), close, connectPostgreSQL, execute, query, query_)
 import Database.PostgreSQL.Simple.Types (PGArray(..))
@@ -1085,9 +1086,9 @@ loadPostgresSessionImportSnapshot connectionString = do
   case connResult of
     Left err -> pure (Left ("Session startup import failed while connecting to Postgres: " ++ show err))
     Right conn -> do
-      statesResult <- Ex.try (query_ conn "SELECT state_id::text, user_id, created_at, expires_at, idle_expires_at, revoked_at FROM session_states" :: IO [(String, String, UTCTime, UTCTime, UTCTime, Maybe UTCTime)])
-      handlesResult <- Ex.try (query_ conn "SELECT session_id::text, state_id::text, issued_at, revoked_at FROM session_handles" :: IO [(String, String, UTCTime, Maybe UTCTime)])
-      bindingsResult <- Ex.try (query_ conn "SELECT user_id, state_id::text FROM session_user_bindings" :: IO [(String, String)])
+      statesResult <- timedTry "SELECT session_states-for-startup-import" (query_ conn "SELECT state_id::text, user_id, created_at, expires_at, idle_expires_at, revoked_at FROM session_states" :: IO [(String, String, UTCTime, UTCTime, UTCTime, Maybe UTCTime)])
+      handlesResult <- timedTry "SELECT session_handles-for-startup-import" (query_ conn "SELECT session_id::text, state_id::text, issued_at, revoked_at FROM session_handles" :: IO [(String, String, UTCTime, Maybe UTCTime)])
+      bindingsResult <- timedTry "SELECT session_user_bindings-for-startup-import" (query_ conn "SELECT user_id, state_id::text FROM session_user_bindings" :: IO [(String, String)])
       _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
       case statesResult of
         Left err -> pure (Left ("Session startup import failed while reading Postgres states: " ++ show (err :: Ex.SomeException)))
@@ -1210,7 +1211,7 @@ runNoteStartupImport connectionString cd = do
       case connResult of
         Left err -> pure (Left ("Note startup import failed while connecting to Postgres: " ++ show err))
         Right conn -> do
-          snapshotResult <- Ex.try (query_ conn "SELECT item_id FROM note_items" :: IO [Only String]) :: IO (Either Ex.SomeException [Only String])
+          snapshotResult <- timedTry "SELECT note_items-for-startup-import" (query_ conn "SELECT item_id FROM note_items" :: IO [Only String]) :: IO (Either Ex.SomeException [Only String])
           case snapshotResult of
             Left err -> do
               _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
@@ -1256,7 +1257,7 @@ runChecklistStartupImport connectionString cd = do
       case connResult of
         Left err -> pure (Left ("Checklist startup import failed while connecting to Postgres: " ++ show err))
         Right conn -> do
-          snapshotResult <- Ex.try (query_ conn "SELECT item_id FROM checklist_items" :: IO [Only String]) :: IO (Either Ex.SomeException [Only String])
+          snapshotResult <- timedTry "SELECT checklist_items-for-startup-import" (query_ conn "SELECT item_id FROM checklist_items" :: IO [Only String]) :: IO (Either Ex.SomeException [Only String])
           case snapshotResult of
             Left err -> do
               _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
@@ -1303,7 +1304,7 @@ importSingleNoteItem conn (Right (importedCount, skippedCount, knownIds)) (itemI
       putStrLn ("[startup][note-import][warning] skipping conflicting item_id=" ++ itemId ++ " policy=postgres-wins")
       pure (Right (importedCount, skippedCount + 1, knownIds))
     else do
-      writeResult <- Ex.try
+      writeResult <- timedTry "INSERT note_item-for-startup-import"
         (execute conn
           "INSERT INTO note_items (item_id, item_version, item_content) VALUES (?, ?, ?::jsonb)"
           (itemId, itemVersion, BL8.unpack (encode noteContent)))
@@ -1332,7 +1333,7 @@ importSingleChecklistItem conn (Right (importedCount, skippedCount, knownIds)) (
       putStrLn ("[startup][checklist-import][warning] skipping conflicting item_id=" ++ itemId ++ " policy=postgres-wins")
       pure (Right (importedCount, skippedCount + 1, knownIds))
     else do
-      writeResult <- Ex.try
+      writeResult <- timedTry "INSERT checklist_item-for-startup-import"
         (execute conn
           "INSERT INTO checklist_items (item_id, item_version, item_content) VALUES (?, ?, ?::jsonb)"
           (itemId, itemVersion, BL8.unpack (encode checklistContent)))
@@ -1430,7 +1431,7 @@ runCalendarStartupImport connectionString cd = do
       case connResult of
         Left err -> pure (Left ("Calendar startup import failed while connecting to Postgres: " ++ show err))
         Right conn -> do
-          snapshotResult <- Ex.try (query_ conn "SELECT user_id, item_id FROM calendar_items" :: IO [(String, String)]) :: IO (Either Ex.SomeException [(String, String)])
+          snapshotResult <- timedTry "SELECT calendar_items-for-startup-import" (query_ conn "SELECT user_id, item_id FROM calendar_items" :: IO [(String, String)]) :: IO (Either Ex.SomeException [(String, String)])
           case snapshotResult of
             Left err -> do
               _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
@@ -1479,7 +1480,7 @@ importSingleCalendarItem conn (Right (importedCount, skippedCount, knownKeys)) (
       pure (Right (importedCount, skippedCount + 1, knownKeys))
     else do
       let row = calendarContentToDbRow content
-      writeResult <- Ex.try
+      writeResult <- timedTry "INSERT calendar_item-for-startup-import"
         (execute conn
           "INSERT INTO calendar_items (user_id, item_id, item_kind, item_type, title, window_start, window_end, status, source_item_id, actual_duration_minutes, category, recurrence_rule_type, recurrence_interval_days, recurrence_exception_dates, trip_window_start, trip_window_end, trip_departure_place_id, trip_arrival_place_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
           ( userId
@@ -1575,8 +1576,8 @@ runTripSharingStartupImport connectionString cd = do
           case connResult of
             Left err -> pure (Left ("Trip-sharing startup import failed while connecting to Postgres: " ++ show err))
             Right conn -> do
-              pgSharesResult <- Ex.try (query_ conn "SELECT owner_user_id, target_username FROM trip_shares" :: IO [(String, String)]) :: IO (Either Ex.SomeException [(String, String)])
-              pgSubscriptionsResult <- Ex.try (query_ conn "SELECT owner_user_id, target_username FROM trip_subscriptions" :: IO [(String, String)]) :: IO (Either Ex.SomeException [(String, String)])
+              pgSharesResult <- timedTry "SELECT trip_shares-for-startup-import" (query_ conn "SELECT owner_user_id, target_username FROM trip_shares" :: IO [(String, String)]) :: IO (Either Ex.SomeException [(String, String)])
+              pgSubscriptionsResult <- timedTry "SELECT trip_subscriptions-for-startup-import" (query_ conn "SELECT owner_user_id, target_username FROM trip_subscriptions" :: IO [(String, String)]) :: IO (Either Ex.SomeException [(String, String)])
               case pgSharesResult of
                 Left err -> do
                   _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
@@ -1650,7 +1651,7 @@ importSingleTripShare conn (Right (importedCount, skippedCount, knownKeys)) (own
       putStrLn ("[startup][trip-sharing-import][warning] skipping conflicting share owner_user_id=" ++ ownerUserId ++ " target_username=" ++ targetUsername ++ " policy=postgres-wins")
       pure (Right (importedCount, skippedCount + 1, knownKeys))
     else do
-      writeResult <- Ex.try
+      writeResult <- timedTry "INSERT trip_share-for-startup-import"
         (execute conn
           "INSERT INTO trip_shares (owner_user_id, target_username) VALUES (?, ?)"
           (ownerUserId, targetUsername))
@@ -1679,7 +1680,7 @@ importSingleTripSubscription conn (Right (importedCount, skippedCount, knownKeys
       putStrLn ("[startup][trip-sharing-import][warning] skipping conflicting subscription owner_user_id=" ++ ownerUserId ++ " target_username=" ++ targetUsername ++ " policy=postgres-wins")
       pure (Right (importedCount, skippedCount + 1, knownKeys))
     else do
-      writeResult <- Ex.try
+      writeResult <- timedTry "INSERT trip_subscription-for-startup-import"
         (execute conn
           "INSERT INTO trip_subscriptions (owner_user_id, target_username) VALUES (?, ?)"
           (ownerUserId, targetUsername))

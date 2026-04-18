@@ -36,6 +36,7 @@ library
       , Session
   other-modules:
       Paths_foucl
+      , SqlTiming
   hs-source-dirs:
       src
   build-depends:

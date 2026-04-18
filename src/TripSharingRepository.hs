@@ -24,6 +24,7 @@ import Database.PostgreSQL.Simple
   , query_
   )
 import Repository (RepositoryError(..))
+import SqlTiming (timedTry)
 import TripSharingStorage
   ( TripShareStorageError(..)
   , TripShareStorageConfig
@@ -79,9 +80,9 @@ verifyPostgresTripSharingStorage connectionString = do
   case connResult of
     Left err -> pure (Left ("Unable to connect to Postgres: " ++ show err))
     Right conn -> do
-      pingResult <- Ex.try (query_ conn "SELECT 1" :: IO [Only Int]) :: IO (Either Ex.SomeException [Only Int])
-      sharesResult <- Ex.try (query_ conn "SELECT owner_user_id, target_username FROM trip_shares LIMIT 0" :: IO [(String, String)]) :: IO (Either Ex.SomeException [(String, String)])
-      subscriptionsResult <- Ex.try (query_ conn "SELECT owner_user_id, target_username FROM trip_subscriptions LIMIT 0" :: IO [(String, String)]) :: IO (Either Ex.SomeException [(String, String)])
+      pingResult <- timedTry "SELECT ping-trip-sharing" (query_ conn "SELECT 1" :: IO [Only Int]) :: IO (Either Ex.SomeException [Only Int])
+      sharesResult <- timedTry "SELECT trip-shares-schema-check" (query_ conn "SELECT owner_user_id, target_username FROM trip_shares LIMIT 0" :: IO [(String, String)]) :: IO (Either Ex.SomeException [(String, String)])
+      subscriptionsResult <- timedTry "SELECT trip-subscriptions-schema-check" (query_ conn "SELECT owner_user_id, target_username FROM trip_subscriptions LIMIT 0" :: IO [(String, String)]) :: IO (Either Ex.SomeException [(String, String)])
       _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
       case pingResult of
         Left err -> pure (Left ("Postgres ping query failed: " ++ show err))
@@ -142,7 +143,7 @@ mapTripSharingError TripShareWriteFailure = WriteFailure
 pgListSharedUsers :: String -> String -> ExceptT RepositoryError IO [String]
 pgListSharedUsers connectionString ownerUserId =
   withPgConnection connectionString StorageFailure $ \conn -> do
-    readResult <- liftIO (Ex.try
+    readResult <- liftIO (timedTry "SELECT trip-shares-by-owner"
       (query conn "SELECT target_username FROM trip_shares WHERE owner_user_id = ? ORDER BY target_username" (Only ownerUserId))
       :: IO (Either Ex.SomeException [Only String]))
     case readResult of
@@ -152,7 +153,7 @@ pgListSharedUsers connectionString ownerUserId =
 pgAddSharedUser :: String -> String -> String -> ExceptT RepositoryError IO ()
 pgAddSharedUser connectionString ownerUserId targetUsername =
   withPgConnection connectionString StorageFailure $ \conn -> do
-    writeResult <- liftIO (Ex.try
+    writeResult <- liftIO (timedTry "INSERT trip-share"
       (execute conn
         "INSERT INTO trip_shares (owner_user_id, target_username) VALUES (?, ?) ON CONFLICT (owner_user_id, target_username) DO NOTHING"
         (ownerUserId, targetUsername))
@@ -164,7 +165,7 @@ pgAddSharedUser connectionString ownerUserId targetUsername =
 pgDeleteSharedUser :: String -> String -> String -> ExceptT RepositoryError IO ()
 pgDeleteSharedUser connectionString ownerUserId targetUsername =
   withPgConnection connectionString StorageFailure $ \conn -> do
-    writeResult <- liftIO (Ex.try
+    writeResult <- liftIO (timedTry "DELETE trip-share"
       (execute conn "DELETE FROM trip_shares WHERE owner_user_id = ? AND target_username = ?" (ownerUserId, targetUsername))
       :: IO (Either Ex.SomeException Int64))
     case writeResult of
@@ -174,7 +175,7 @@ pgDeleteSharedUser connectionString ownerUserId targetUsername =
 pgListSubscribedUsers :: String -> String -> ExceptT RepositoryError IO [String]
 pgListSubscribedUsers connectionString ownerUserId =
   withPgConnection connectionString StorageFailure $ \conn -> do
-    readResult <- liftIO (Ex.try
+    readResult <- liftIO (timedTry "SELECT trip-subscriptions-by-owner"
       (query conn "SELECT target_username FROM trip_subscriptions WHERE owner_user_id = ? ORDER BY target_username" (Only ownerUserId))
       :: IO (Either Ex.SomeException [Only String]))
     case readResult of
@@ -184,7 +185,7 @@ pgListSubscribedUsers connectionString ownerUserId =
 pgAddSubscribedUser :: String -> String -> String -> ExceptT RepositoryError IO ()
 pgAddSubscribedUser connectionString ownerUserId targetUsername =
   withPgConnection connectionString StorageFailure $ \conn -> do
-    writeResult <- liftIO (Ex.try
+    writeResult <- liftIO (timedTry "INSERT trip-subscription"
       (execute conn
         "INSERT INTO trip_subscriptions (owner_user_id, target_username) VALUES (?, ?) ON CONFLICT (owner_user_id, target_username) DO NOTHING"
         (ownerUserId, targetUsername))
@@ -196,7 +197,7 @@ pgAddSubscribedUser connectionString ownerUserId targetUsername =
 pgDeleteSubscribedUser :: String -> String -> String -> ExceptT RepositoryError IO ()
 pgDeleteSubscribedUser connectionString ownerUserId targetUsername =
   withPgConnection connectionString StorageFailure $ \conn -> do
-    writeResult <- liftIO (Ex.try
+    writeResult <- liftIO (timedTry "DELETE trip-subscription"
       (execute conn "DELETE FROM trip_subscriptions WHERE owner_user_id = ? AND target_username = ?" (ownerUserId, targetUsername))
       :: IO (Either Ex.SomeException Int64))
     case writeResult of

@@ -48,6 +48,7 @@ import Database.PostgreSQL.Simple
   , query_
   )
 import Repository (RepositoryError(..))
+import SqlTiming (timedTry)
 import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile, renameFile)
 import System.FilePath ((</>), takeDirectory)
 import System.IO (openTempFile, hClose)
@@ -220,10 +221,10 @@ verifyPostgresSessionStorage connectionString = do
   case connResult of
     Left err -> pure (Left ("Unable to connect to Postgres: " ++ show err))
     Right conn -> do
-      pingResult <- Ex.try (query_ conn "SELECT 1" :: IO [Only Int]) :: IO (Either Ex.SomeException [Only Int])
-      statesResult <- Ex.try (query_ conn "SELECT state_id::text, user_id, created_at, expires_at, idle_expires_at, revoked_at FROM session_states LIMIT 0" :: IO [(String, String, UTCTime, UTCTime, UTCTime, Maybe UTCTime)]) :: IO (Either Ex.SomeException [(String, String, UTCTime, UTCTime, UTCTime, Maybe UTCTime)])
-      handlesResult <- Ex.try (query_ conn "SELECT session_id::text, state_id::text, issued_at, revoked_at FROM session_handles LIMIT 0" :: IO [(String, String, UTCTime, Maybe UTCTime)]) :: IO (Either Ex.SomeException [(String, String, UTCTime, Maybe UTCTime)])
-      bindingsResult <- Ex.try (query_ conn "SELECT user_id, state_id::text FROM session_user_bindings LIMIT 0" :: IO [(String, String)]) :: IO (Either Ex.SomeException [(String, String)])
+      pingResult <- timedTry "SELECT ping-session" (query_ conn "SELECT 1" :: IO [Only Int]) :: IO (Either Ex.SomeException [Only Int])
+      statesResult <- timedTry "SELECT session-states-schema-check" (query_ conn "SELECT state_id::text, user_id, created_at, expires_at, idle_expires_at, revoked_at FROM session_states LIMIT 0" :: IO [(String, String, UTCTime, UTCTime, UTCTime, Maybe UTCTime)]) :: IO (Either Ex.SomeException [(String, String, UTCTime, UTCTime, UTCTime, Maybe UTCTime)])
+      handlesResult <- timedTry "SELECT session-handles-schema-check" (query_ conn "SELECT session_id::text, state_id::text, issued_at, revoked_at FROM session_handles LIMIT 0" :: IO [(String, String, UTCTime, Maybe UTCTime)]) :: IO (Either Ex.SomeException [(String, String, UTCTime, Maybe UTCTime)])
+      bindingsResult <- timedTry "SELECT session-bindings-schema-check" (query_ conn "SELECT user_id, state_id::text FROM session_user_bindings LIMIT 0" :: IO [(String, String)]) :: IO (Either Ex.SomeException [(String, String)])
       close conn
       case pingResult of
         Left err -> pure (Left ("Postgres ping query failed: " ++ show err))
@@ -515,7 +516,7 @@ withPgConnection connectionString connectionError action = do
 pgCreateSessionHandle :: String -> SessionHandle -> ExceptT RepositoryError IO ()
 pgCreateSessionHandle connectionString SessionHandle {handleSessionId, handleStateId, handleIssuedAt, handleRevokedAt} =
   withPgConnection connectionString StorageFailure $ \conn -> do
-    writeResult <- liftIO (Ex.try
+    writeResult <- liftIO (timedTry "INSERT session-handle"
       (execute
         conn
         "INSERT INTO session_handles (session_id, state_id, issued_at, revoked_at) VALUES (?::uuid, ?::uuid, ?, ?)"
@@ -528,7 +529,7 @@ pgCreateSessionHandle connectionString SessionHandle {handleSessionId, handleSta
 pgLoadSessionHandleBySessionId :: String -> String -> ExceptT RepositoryError IO SessionHandle
 pgLoadSessionHandleBySessionId connectionString sid =
   withPgConnection connectionString StorageFailure $ \conn -> do
-    readResult <- liftIO (Ex.try
+    readResult <- liftIO (timedTry "SELECT session-handle-by-id"
       (query
         conn
         "SELECT session_id::text, state_id::text, issued_at, revoked_at FROM session_handles WHERE session_id = ?::uuid"
@@ -548,7 +549,7 @@ pgLoadSessionHandleBySessionId connectionString sid =
 pgUpdateSessionHandle :: String -> SessionHandle -> ExceptT RepositoryError IO ()
 pgUpdateSessionHandle connectionString SessionHandle {handleSessionId, handleStateId, handleIssuedAt, handleRevokedAt} =
   withPgConnection connectionString StorageFailure $ \conn -> do
-    writeResult <- liftIO (Ex.try
+    writeResult <- liftIO (timedTry "UPDATE session-handle"
       (execute
         conn
         "UPDATE session_handles SET state_id = ?::uuid, issued_at = ?, revoked_at = ? WHERE session_id = ?::uuid"
@@ -561,7 +562,7 @@ pgUpdateSessionHandle connectionString SessionHandle {handleSessionId, handleSta
 pgDeleteSessionHandleBySessionId :: String -> String -> ExceptT RepositoryError IO ()
 pgDeleteSessionHandleBySessionId connectionString sid =
   withPgConnection connectionString StorageFailure $ \conn -> do
-    writeResult <- liftIO (Ex.try
+    writeResult <- liftIO (timedTry "DELETE session-handle"
       (execute conn "DELETE FROM session_handles WHERE session_id = ?::uuid" (Only sid))
       :: IO (Either Ex.SomeException Int64))
     case writeResult of
@@ -571,7 +572,7 @@ pgDeleteSessionHandleBySessionId connectionString sid =
 pgCreateSessionState :: String -> SessionState -> ExceptT RepositoryError IO ()
 pgCreateSessionState connectionString SessionState {stateId, stateUserId, stateCreatedAt, stateExpiresAt, stateIdleExpiresAt, stateRevokedAt} =
   withPgConnection connectionString StorageFailure $ \conn -> do
-    writeResult <- liftIO (Ex.try
+    writeResult <- liftIO (timedTry "INSERT session-state"
       (execute
         conn
         "INSERT INTO session_states (state_id, user_id, created_at, expires_at, idle_expires_at, revoked_at) VALUES (?::uuid, ?, ?, ?, ?, ?)"
@@ -584,7 +585,7 @@ pgCreateSessionState connectionString SessionState {stateId, stateUserId, stateC
 pgLoadSessionStateByStateId :: String -> String -> ExceptT RepositoryError IO SessionState
 pgLoadSessionStateByStateId connectionString stId =
   withPgConnection connectionString StorageFailure $ \conn -> do
-    readResult <- liftIO (Ex.try
+    readResult <- liftIO (timedTry "SELECT session-state-by-id"
       (query
         conn
         "SELECT state_id::text, user_id, created_at, expires_at, idle_expires_at, revoked_at FROM session_states WHERE state_id = ?::uuid"
@@ -606,7 +607,7 @@ pgLoadSessionStateByStateId connectionString stId =
 pgUpdateSessionState :: String -> SessionState -> ExceptT RepositoryError IO ()
 pgUpdateSessionState connectionString SessionState {stateId, stateUserId, stateCreatedAt, stateExpiresAt, stateIdleExpiresAt, stateRevokedAt} =
   withPgConnection connectionString StorageFailure $ \conn -> do
-    writeResult <- liftIO (Ex.try
+    writeResult <- liftIO (timedTry "UPDATE session-state"
       (execute
         conn
         "UPDATE session_states SET user_id = ?, created_at = ?, expires_at = ?, idle_expires_at = ?, revoked_at = ? WHERE state_id = ?::uuid"
@@ -619,7 +620,7 @@ pgUpdateSessionState connectionString SessionState {stateId, stateUserId, stateC
 pgDeleteSessionStateByStateId :: String -> String -> ExceptT RepositoryError IO ()
 pgDeleteSessionStateByStateId connectionString stId =
   withPgConnection connectionString StorageFailure $ \conn -> do
-    writeResult <- liftIO (Ex.try
+    writeResult <- liftIO (timedTry "DELETE session-state"
       (execute conn "DELETE FROM session_states WHERE state_id = ?::uuid" (Only stId))
       :: IO (Either Ex.SomeException Int64))
     case writeResult of
@@ -629,7 +630,7 @@ pgDeleteSessionStateByStateId connectionString stId =
 pgCreateUserStateBinding :: String -> String -> UserStateBinding -> ExceptT RepositoryError IO ()
 pgCreateUserStateBinding connectionString userId UserStateBinding {boundStateId} =
   withPgConnection connectionString StorageFailure $ \conn -> do
-    writeResult <- liftIO (Ex.try
+    writeResult <- liftIO (timedTry "INSERT session-user-binding"
       (execute
         conn
         "INSERT INTO session_user_bindings (user_id, state_id) VALUES (?, ?::uuid)"
@@ -642,7 +643,7 @@ pgCreateUserStateBinding connectionString userId UserStateBinding {boundStateId}
 pgLoadUserStateBindingByUserId :: String -> String -> ExceptT RepositoryError IO UserStateBinding
 pgLoadUserStateBindingByUserId connectionString userId =
   withPgConnection connectionString StorageFailure $ \conn -> do
-    readResult <- liftIO (Ex.try
+    readResult <- liftIO (timedTry "SELECT session-user-binding-by-user"
       (query
         conn
         "SELECT state_id::text FROM session_user_bindings WHERE user_id = ?"
@@ -656,7 +657,7 @@ pgLoadUserStateBindingByUserId connectionString userId =
 pgDeleteUserStateBindingByUserId :: String -> String -> ExceptT RepositoryError IO ()
 pgDeleteUserStateBindingByUserId connectionString userId =
   withPgConnection connectionString StorageFailure $ \conn -> do
-    writeResult <- liftIO (Ex.try
+    writeResult <- liftIO (timedTry "DELETE session-user-binding"
       (execute conn "DELETE FROM session_user_bindings WHERE user_id = ?" (Only userId))
       :: IO (Either Ex.SomeException Int64))
     case writeResult of
@@ -666,7 +667,7 @@ pgDeleteUserStateBindingByUserId connectionString userId =
 pgDeleteAllUserStateBindingsForUser :: String -> String -> ExceptT RepositoryError IO ()
 pgDeleteAllUserStateBindingsForUser connectionString userId =
   withPgConnection connectionString StorageFailure $ \conn -> do
-    writeResult <- liftIO (Ex.try
+    writeResult <- liftIO (timedTry "DELETE session-user-bindings-for-user"
       (execute conn "DELETE FROM session_user_bindings WHERE user_id = ?" (Only userId))
       :: IO (Either Ex.SomeException Int64))
     case writeResult of

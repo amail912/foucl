@@ -67,12 +67,12 @@ Move persistence to Postgres incrementally, with per-domain cutover control, and
 - [038 Notes And Checklists Startup Import](done/038-notes-checklists-startup-import.md)
 - [039 Startup Migration Orchestrator](done/039-startup-migration-orchestrator.md)
 - [040 Startup Migration Observability And Failure Contract](done/040-startup-migration-observability-and-failure-contract.md)
+- [041 Startup Migration Integration Verification](done/041-startup-migration-integration-verification.md)
 
 ### To Refine
 
 - [004 Domain Switching And Bootstrap Import](to-refine/004-domain-switching-and-bootstrap-import.md)
 - [005 Remove Filesystem Backend Per Migrated Domain](to-refine/005-remove-fs-backend-per-domain.md)
-- [041 Startup Migration Integration Verification](to-refine/041-startup-migration-integration-verification.md)
 - [042 Runtime Docs Alignment For Startup Migrations](to-refine/042-runtime-docs-alignment-for-startup-migrations.md)
 
 ### Canceled

@@ -24,9 +24,41 @@ import Text.Read (readMaybe)
 runIntegrationPostgresTests :: IO ()
 runIntegrationPostgresTests = do
   assertPostgresReachable
-  prepareStartupImportFixtures
   hspec $ do
-    describe "Auth startup import" $ do
+    describe "Startup migrations" $ do
+      it "bootstraps schema on startup from a clean database" $ do
+        resetPostgresToUnmigrated
+        restartPostgresSandboxServer
+
+        assertSchemaBootstrapped
+
+      it "keeps startup stable as a no-op when already migrated" $ do
+        resetPostgresToUnmigrated
+        restartPostgresSandboxServer
+        countBefore <- fetchSchemaMigrationCount
+
+        restartPostgresSandboxServer
+
+        countAfter <- fetchSchemaMigrationCount
+        assertEqual "Expected schema migration count to remain stable after no-op startup" countBefore countAfter
+        assertEqual "Expected all domain migrations to be applied" 6 countAfter
+
+      it "aborts startup before serving when a migration fails" $ do
+        resetPostgresToUnmigrated
+        createAuthMigrationConflict
+
+        restartPostgresSandboxServerExpectFailure
+        assertServerNotReady
+
+        logContent <- readStartupLog
+        assertBool
+          "Expected migration failure summary in startup log"
+          ("[startup][migrations] failed" `isInfixOf` logContent)
+        assertBool
+          "Expected failing migration domain context in startup log"
+          ("domain=auth" `isInfixOf` logContent)
+
+    describe "Auth startup import" $ before_ prepareStartupImportFixtures $ do
       it "imports filesystem-only users and preserves postgres-conflicting users" $ do
         restartPostgresSandboxServer
 
@@ -62,7 +94,7 @@ runIntegrationPostgresTests = do
         conflictHash <- fetchAuthUserPasswordHash "startup-conflict-user"
         assertEqual "Expected conflicting startup user to remain Postgres-authored after restart" "postgres-conflict-hash" conflictHash
 
-    describe "Session startup import" $ do
+    describe "Session startup import" $ before_ prepareStartupImportFixtures $ do
       it "imports filesystem-only session records and preserves postgres-conflicting records" $ do
         fsOnlyStateUser <- fetchSessionStateUserId "33333333-3333-3333-3333-333333333333"
         assertEqual "Expected filesystem-only session state to be imported into Postgres" "startup-fs-only-session-user" fsOnlyStateUser
@@ -121,7 +153,7 @@ runIntegrationPostgresTests = do
         fsOnlyBindingCount <- fetchSessionBindingCountByUserId "startup-fs-only-session-user"
         assertEqual "Expected exactly one imported filesystem-only startup binding" 1 fsOnlyBindingCount
 
-    describe "Calendar startup import" $ do
+    describe "Calendar startup import" $ before_ prepareStartupImportFixtures $ do
       it "imports filesystem-only items and preserves postgres-conflicting items" $ do
         fsOnlyExists <- calendarItemExists "startup-calendar-fs-only-user" "startup-calendar-fs-only-item"
         assertBool "Expected filesystem-only startup calendar item to be imported into Postgres" fsOnlyExists
@@ -153,7 +185,7 @@ runIntegrationPostgresTests = do
         conflictTitle <- fetchCalendarItemLegacyTitle "startup-calendar-conflict-user" "startup-calendar-conflict-item"
         assertEqual "Expected conflicting startup calendar item to remain Postgres-authored after restart" "postgres-calendar-conflict-title" conflictTitle
 
-    describe "Trip-sharing startup import" $ do
+    describe "Trip-sharing startup import" $ before_ prepareStartupImportFixtures $ do
       it "imports filesystem-only relations and preserves postgres-conflicting relations" $ do
         fsOnlyShareExists <- tripShareExists "startup-trip-sharing-owner" "startup-trip-sharing-fs-only-target"
         assertBool "Expected filesystem-only startup trip share to be imported into Postgres" fsOnlyShareExists
@@ -201,7 +233,7 @@ runIntegrationPostgresTests = do
         fsOnlySubscriptionCount <- fetchTripSubscriptionCountByKey "startup-trip-sharing-owner" "startup-trip-sharing-fs-only-target"
         assertEqual "Expected exactly one imported filesystem-only startup trip subscription" 1 fsOnlySubscriptionCount
 
-    describe "Notes and checklists startup import" $ do
+    describe "Notes and checklists startup import" $ before_ prepareStartupImportFixtures $ do
       it "imports filesystem-only items and preserves postgres-conflicting items" $ do
         noteFsOnlyExists <- noteItemExists "startup-note-fs-only-item"
         assertBool "Expected filesystem-only startup note to be imported into Postgres" noteFsOnlyExists
@@ -869,10 +901,88 @@ resetPostgresSchema = do
     Left err -> assertFailure ("Checklist up migration failed: " ++ err)
     Right () -> pure ()
 
+  ensureSchemaMigrationsSeeded
+
   truncateResult <- runPsqlCommand "TRUNCATE TABLE auth_users, session_handles, session_user_bindings, session_states, calendar_items, trip_shares, trip_subscriptions, note_items, checklist_items"
   case truncateResult of
     Left err -> assertFailure ("Postgres table cleanup failed: " ++ err)
     Right () -> pure ()
+
+ensureSchemaMigrationsSeeded :: IO ()
+ensureSchemaMigrationsSeeded = do
+  ensureTableResult <- runPsqlCommand "CREATE TABLE IF NOT EXISTS schema_migrations (migration_id TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
+  case ensureTableResult of
+    Left err -> assertFailure ("Unable to ensure schema_migrations table during test setup: " ++ err)
+    Right () -> pure ()
+
+  let migrationIds =
+        [ "0001_auth_schema"
+        , "0001_session_schema"
+        , "0001_calendar_schema"
+        , "0001_trip_sharing_schema"
+        , "0001_note_schema"
+        , "0001_checklist_schema"
+        ]
+  mapM_ seedMigrationId migrationIds
+  where
+    seedMigrationId migrationId = do
+      result <- runPsqlCommand ("INSERT INTO schema_migrations (migration_id, applied_at) VALUES (" ++ quoteSql migrationId ++ ", NOW()) ON CONFLICT (migration_id) DO NOTHING")
+      case result of
+        Left err -> assertFailure ("Unable to seed schema_migrations row for " ++ migrationId ++ ": " ++ err)
+        Right () -> pure ()
+
+resetPostgresToUnmigrated :: IO ()
+resetPostgresToUnmigrated = do
+  _ <- runPsqlFile checklistDownMigration
+  _ <- runPsqlFile noteDownMigration
+  _ <- runPsqlFile tripSharingDownMigration
+  _ <- runPsqlFile calendarDownMigration
+  _ <- runPsqlFile sessionDownMigration
+  _ <- runPsqlFile authDownMigration
+  dropMigrationsResult <- runPsqlCommand "DROP TABLE IF EXISTS schema_migrations"
+  case dropMigrationsResult of
+    Left err -> assertFailure ("Unable to drop schema_migrations for unmigrated startup test: " ++ err)
+    Right () -> pure ()
+
+createAuthMigrationConflict :: IO ()
+createAuthMigrationConflict = do
+  createResult <- runPsqlCommand "CREATE TABLE auth_users (username text PRIMARY KEY)"
+  case createResult of
+    Left err -> assertFailure ("Unable to create auth migration conflict fixture: " ++ err)
+    Right () -> pure ()
+
+assertSchemaBootstrapped :: IO ()
+assertSchemaBootstrapped = do
+  assertTableExists "auth_users"
+  assertTableExists "session_states"
+  assertTableExists "session_handles"
+  assertTableExists "session_user_bindings"
+  assertTableExists "calendar_items"
+  assertTableExists "trip_shares"
+  assertTableExists "trip_subscriptions"
+  assertTableExists "note_items"
+  assertTableExists "checklist_items"
+  migrationCount <- fetchSchemaMigrationCount
+  assertEqual "Expected all startup migrations to be recorded in schema_migrations" 6 migrationCount
+
+assertTableExists :: String -> IO ()
+assertTableExists tableName = do
+  scalarResult <- runPsqlScalar ("SELECT to_regclass('public." ++ tableName ++ "') IS NOT NULL")
+  case scalarResult of
+    Left err -> assertFailure ("Unable to verify table existence for " ++ tableName ++ ": " ++ err)
+    Right raw ->
+      let existsFlag = trimTrailingNewline raw
+       in assertBool ("Expected table to exist after startup migration: " ++ tableName) (existsFlag == "t")
+
+fetchSchemaMigrationCount :: IO Int
+fetchSchemaMigrationCount = do
+  scalarResult <- runPsqlScalar "SELECT COUNT(*) FROM schema_migrations"
+  case scalarResult of
+    Left err -> assertFailure ("Unable to query schema_migrations count: " ++ err) >> pure 0
+    Right raw ->
+      case readMaybe (trimTrailingNewline raw) of
+        Nothing -> assertFailure ("Unable to parse schema_migrations count from value: " ++ raw) >> pure 0
+        Just value -> pure value
 
 signinAsAdmin :: IO (Response Value)
 signinAsAdmin =
@@ -1700,6 +1810,35 @@ readStartupLog = do
 
 restartPostgresSandboxServer :: IO ()
 restartPostgresSandboxServer = do
+  stopPostgresSandboxServer
+  waitForServerStopped
+  startPostgresSandboxServer
+  waitForServerReady
+
+restartPostgresSandboxServerExpectFailure :: IO ()
+restartPostgresSandboxServerExpectFailure = do
+  stopPostgresSandboxServer
+  waitForServerStopped
+  startPostgresSandboxServer
+  assertServerNotReady
+
+stopPostgresSandboxServer :: IO ()
+stopPostgresSandboxServer = do
+  repoRoot <- getCurrentDirectory
+  let sandboxDir = repoRoot ++ "/dist-newstyle/sandbox/foucl"
+      daemonPath = repoRoot ++ "/scripts/daemon/foucld"
+  let cmd =
+        "cd " ++ sandboxDir ++ " && "
+          ++ daemonPath
+          ++ " stop "
+          ++ "--pidfile .foucl/foucl.pid"
+  (exitCode, _out, err) <- readProcessWithExitCode "/bin/bash" ["-lc", cmd] ""
+  case exitCode of
+    ExitSuccess -> pure ()
+    ExitFailure _ -> assertFailure ("Failed to stop sandbox server: " ++ err)
+
+startPostgresSandboxServer :: IO ()
+startPostgresSandboxServer = do
   repoRoot <- getCurrentDirectory
   let sandboxDir = repoRoot ++ "/dist-newstyle/sandbox/foucl"
       daemonPath = repoRoot ++ "/scripts/daemon/foucld"
@@ -1712,10 +1851,10 @@ restartPostgresSandboxServer = do
           ++ " restart "
           ++ "--bin ./foucl "
           ++ "--pidfile .foucl/foucl.pid"
-  (exitCode, _out, err) <- readProcessWithExitCode "/bin/bash" ["-lc", cmd] ""
+  (exitCode, _out, _err) <- readProcessWithExitCode "/bin/bash" ["-lc", cmd] ""
   case exitCode of
-    ExitSuccess -> waitForServerReady
-    ExitFailure _ -> assertFailure ("Failed to restart sandbox server for startup import idempotency check: " ++ err)
+    ExitSuccess -> pure ()
+    ExitFailure _ -> assertFailure "Failed to start sandbox server"
 
 waitForServerReady :: IO ()
 waitForServerReady = do
@@ -1729,6 +1868,31 @@ waitForServerReady = do
   case exitCode of
     ExitSuccess -> pure ()
     ExitFailure _ -> assertFailure ("Sandbox server did not become ready after restart: " ++ err)
+
+waitForServerStopped :: IO ()
+waitForServerStopped = do
+  let cmd =
+        "for i in $(seq 1 40); do "
+          ++ "if curl --silent --show-error --output /dev/null --max-time 1 http://127.0.0.1:8081/; then sleep 0.25; else exit 0; fi; "
+          ++ "done; "
+          ++ "exit 1"
+  (exitCode, _out, err) <- readProcessWithExitCode "/bin/bash" ["-lc", cmd] ""
+  case exitCode of
+    ExitSuccess -> pure ()
+    ExitFailure _ -> assertFailure ("Sandbox server did not stop in time: " ++ err)
+
+assertServerNotReady :: IO ()
+assertServerNotReady = do
+  let cmd =
+        "for i in $(seq 1 20); do "
+          ++ "if curl --silent --show-error --output /dev/null --max-time 1 http://127.0.0.1:8081/; then exit 1; fi; "
+          ++ "sleep 0.25; "
+          ++ "done; "
+          ++ "exit 0"
+  (exitCode, _out, err) <- readProcessWithExitCode "/bin/bash" ["-lc", cmd] ""
+  case exitCode of
+    ExitSuccess -> pure ()
+    ExitFailure _ -> assertFailure ("Expected sandbox server to remain unavailable after failed startup migration: " ++ err)
 
 runPsqlFile :: FilePath -> IO (Either String ())
 runPsqlFile filePath = do

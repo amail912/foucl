@@ -1966,13 +1966,16 @@ apiController authRepo calendarRepo tripSharingRepo noteRepo checklistRepo signu
   in dir "api" $ msum [ signupController authRepo signupRateLimitState tmpDir bootstrapAdmin
                       , signinController authRepo sessionCfg sessionStore
                       , signoutController sessionCfg sessionStore
-                      , requireAuth sessionCfg sessionStore (authController authRepo)
-                      , requireAuth sessionCfg sessionStore (`noteController` noteRepo)
-                      , requireAuth sessionCfg sessionStore (`checklistController` checklistRepo)
-                      , requireAuth sessionCfg sessionStore tripPlacesController
-                      , requireAuth sessionCfg sessionStore (tripSharingController authRepo tripSharingRepo calendarRepo)
-                      , requireAuth sessionCfg sessionStore (agendaController calendarRepo)
-                      , requireAuth sessionCfg sessionStore (adminController authRepo bootstrapAdmin)
+                      , dir "auth" $ requireAuth sessionCfg sessionStore (authController authRepo)
+                      , dir "note" $ requireAuth sessionCfg sessionStore (`noteController` noteRepo)
+                      , dir "checklist" $ requireAuth sessionCfg sessionStore (`checklistController` checklistRepo)
+                      , dir "v1" $
+                          msum
+                            [ dir "trip-places" $ requireAuth sessionCfg sessionStore tripPlacesController
+                            , dir "trip-sharing" $ requireAuth sessionCfg sessionStore (tripSharingController authRepo tripSharingRepo calendarRepo)
+                            , dir "calendar-items" $ requireAuth sessionCfg sessionStore (agendaController calendarRepo)
+                            , dir "admin" $ requireAuth sessionCfg sessionStore (adminController authRepo bootstrapAdmin)
+                            ]
                       ]
 
 homePage :: ServerPartT IO Response
@@ -2047,14 +2050,13 @@ signoutController sessionConfig sessionStore = dir "signout" $ do
 
 authController :: AuthRepository -> AppContext -> ServerPartT IO Response
 authController authRepo AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
-  dir "auth" $
-    dir "profile" $ do
-      nullDir
-      method GET
-      profileResult <- liftIO $ runExceptT $ loadAuthenticatedProfile authRepo principalUserId
-      either toServerResponse
-             (ok . jsonResponse)
-             profileResult
+  dir "profile" $ do
+    nullDir
+    method GET
+    profileResult <- liftIO $ runExceptT $ loadAuthenticatedProfile authRepo principalUserId
+    either toServerResponse
+           (ok . jsonResponse)
+           profileResult
 
 
 
@@ -2177,10 +2179,10 @@ requireApprovedAdmin authRepo AppContext { sessionPrincipal = SessionPrincipal {
 
 
 noteController :: AppContext -> NoteRepository -> ServerPartT IO Response
-noteController _ noteRepo = dir "note" (notesChecklistHandlers "note" noteRepo)
+noteController _ = notesChecklistHandlers "note"
 
 checklistController :: AppContext -> ChecklistRepository -> ServerPartT IO Response
-checklistController _ checklistRepo = dir "checklist" (notesChecklistHandlers "checklist" checklistRepo)
+checklistController _ = notesChecklistHandlers "checklist"
 
 notesChecklistHandlers :: Content a => String -> NotesChecklistRepository a -> ServerPartT IO Response
 notesChecklistHandlers crudTypeName repo =
@@ -2251,25 +2253,24 @@ handleUpdateByRepository repo update =
               (ok . jsonResponse <$> repoUpdateItem repo update)
 
 tripPlacesController :: AppContext -> ServerPartT IO Response
-tripPlacesController _ = dir "v1" $ dir "trip-places" $ do
+tripPlacesController _ = do
   nullDir
   method GET
   ok (jsonResponse tripPlacesCatalog)
 
 adminController :: AuthRepository -> String -> AppContext -> ServerPartT IO Response
 adminController authRepo bootstrapAdminUsername appContext@AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
-  dir "v1" $ dir "admin" $
-    requireApprovedAdmin authRepo appContext $
-      msum [ dir "pending-signups" $
-               msum [ pendingSignupsList
-                    , pendingSignupApprove
-                    , pendingSignupDelete
-                    ]
-           , dir "users" $
-               msum [ approvedUsersList
-                    , approvedUserDelete
-                    ]
-           ]
+  requireApprovedAdmin authRepo appContext $
+    msum [ dir "pending-signups" $
+             msum [ pendingSignupsList
+                  , pendingSignupApprove
+                  , pendingSignupDelete
+                  ]
+         , dir "users" $
+             msum [ approvedUsersList
+                  , approvedUserDelete
+                  ]
+         ]
   where
     pendingSignupsList = do
       nullDir
@@ -2326,16 +2327,16 @@ adminController authRepo bootstrapAdminUsername appContext@AppContext { sessionP
 
 tripSharingController :: AuthRepository -> TripSharingRepository -> CalendarRepository -> AppContext -> ServerPartT IO Response
 tripSharingController authRepo tripSharingRepo calendarRepo AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
-  dir "v1" $ dir "trip-sharing" $ msum [ dir "shares" $ msum [ sharesList
-                                                             , sharesAdd
-                                                             , sharesDelete
-                                                             ]
-                                      , dir "subscriptions" $ msum [ subscriptionsList
-                                                                   , subscriptionsAdd
-                                                                   , subscriptionsDelete
-                                                                   ]
-                                      , dir "period-trips" periodTripsList
-                                      ]
+  msum [ dir "shares" $ msum [ sharesList
+                             , sharesAdd
+                             , sharesDelete
+                             ]
+       , dir "subscriptions" $ msum [ subscriptionsList
+                                    , subscriptionsAdd
+                                    , subscriptionsDelete
+                                    ]
+       , dir "period-trips" periodTripsList
+       ]
   where
     periodTripsList = do
       nullDir
@@ -2436,10 +2437,10 @@ tripSharingController authRepo tripSharingRepo calendarRepo AppContext { session
 
 agendaController :: CalendarRepository -> AppContext -> ServerPartT IO Response
 agendaController calendarRepo AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
-  dir "v1" $ dir "calendar-items" $ msum [ agendaList
-                                         , agendaCreate
-                                         , agendaDelete
-                                         ]
+  msum [ agendaList
+       , agendaCreate
+       , agendaDelete
+       ]
   where
     agendaList = do
       nullDir

@@ -338,6 +338,11 @@ runIntegrationPostgresTests = do
           assertStatusCode "Auth profile should succeed" 200 profileResp
           assertSigninProfileResponse "admin" ["admin"] True profileResp
 
+        it "returns not found for unknown unauthenticated api paths" $ do
+          req <- parseRequest "GET http://localhost:8081/api/does-not-exist"
+          resp <- httpBS $ setRequestMethod "GET" req
+          assertStatusCode "Unknown api route should return 404" 404 resp
+
         it "keeps admin pending moderation semantics" $ do
           adminCookie <- signinOnly "admin" testPassword
 

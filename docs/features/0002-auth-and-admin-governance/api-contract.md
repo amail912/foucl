@@ -79,6 +79,10 @@ Minimum meanings:
 - `409` conflict when the request is well-formed but cannot be completed because of current resource state
 - `5xx` server failure
 
+Routing rule:
+- unknown `/api/...` paths return `404` even when unauthenticated (path mismatch is handled before auth guards)
+- known protected paths without a valid session return `401`
+
 Recommended auth-specific behavior:
 - invalid signin credentials remain `401`
 - pending-but-authentic signin remains `403`

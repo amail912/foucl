@@ -108,6 +108,11 @@ runIntegrationTests = do
         assertStatusCode "Auth profile should require auth" 401 resp
         assertMessageResponse "Not authenticated" resp
 
+      it "should return not found for unknown unauthenticated api paths" $ do
+        req <- parseRequest "GET http://localhost:8081/api/does-not-exist"
+        resp <- httpBS $ setRequestMethod "GET" req
+        assertStatusCode "Unknown api route should return not found" 404 resp
+
       it "should enforce signup rate limiting" $ do
         uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
 

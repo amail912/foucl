@@ -47,6 +47,11 @@ Le secret n'est **pas** lu depuis le fichier: il est lu depuis la variable d'env
   3. résout la session dans le store,
   4. injecte un `AppContext` avec `SessionPrincipal` vers le handler.
 
+Dans le routage API, le matching du préfixe de route protégée est fait avant `requireAuth`
+(`auth`, `note`, `checklist`, `v1/...`).  
+Conséquence: une requête protégée ne déclenche qu'une seule résolution de session, au lieu
+de répéter `requireAuth` pour plusieurs branches `msum` non correspondantes.
+
 ## Logout
 
 `POST /api/signout`

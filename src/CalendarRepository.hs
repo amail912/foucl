@@ -24,6 +24,7 @@ import Control.Monad (when)
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
 import Control.Monad.IO.Class (liftIO)
 import Data.List (sortOn)
+import Data.Pool (Pool)
 import Data.UUID (toString)
 import Data.UUID.V4 (nextRandom)
 import qualified Data.ByteString.Char8 as BS8
@@ -67,8 +68,8 @@ filesystemCalendarRepository config =
     , repoDeleteCalendarItemById = fsDeleteCalendarItemById config
     }
 
-postgresCalendarRepository :: String -> CalendarRepository
-postgresCalendarRepository connectionString =
+postgresCalendarRepository :: Pool Connection -> String -> CalendarRepository
+postgresCalendarRepository _ connectionString =
   CalendarRepository
     { repoCreateCalendarItem = pgCreateCalendarItem connectionString
     , repoLoadCalendarItemById = pgLoadCalendarItemById connectionString

@@ -63,6 +63,7 @@ library
     , containers
     , process
     , postgresql-simple
+    , resource-pool
   default-language: Haskell2010
 
 executable foucl
@@ -98,6 +99,8 @@ test-suite foucl-unit-tests
     , bytestring
     , password
     , process
+    , postgresql-simple
+    , resource-pool
   default-language: Haskell2010
 
 test-suite foucl-integration-tests

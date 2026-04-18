@@ -33,6 +33,7 @@ import Data.Password.Argon2 (Argon2, PasswordHash(..))
 import Data.Int (Int64)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Pool (Pool)
 import Database.PostgreSQL.Simple
   ( Connection
   , SqlError(..)
@@ -131,8 +132,8 @@ defaultAuthRepository =
     , repoListUsers = fsListUsers
     }
 
-postgresAuthRepository :: String -> AuthRepository
-postgresAuthRepository connectionString =
+postgresAuthRepository :: Pool Connection -> String -> AuthRepository
+postgresAuthRepository _ connectionString =
   AuthRepository
     { repoCreateUser = pgCreateUser connectionString
     , repoLoadUserByUsername = pgLoadUserByUsername connectionString

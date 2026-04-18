@@ -36,6 +36,7 @@ import Data.Time.Clock (UTCTime, NominalDiffTime, addUTCTime, getCurrentTime)
 import Data.UUID (toString)
 import Data.UUID.V4 (nextRandom)
 import Data.Int (Int64)
+import Data.Pool (Pool)
 import qualified Data.ByteString.Char8 as BS8
 import Database.PostgreSQL.Simple
   ( Connection
@@ -198,8 +199,8 @@ mkFilesystemSessionRepository baseDir =
     , repoDeleteAllUserStateBindingsForUser = fsDeleteAllUserStateBindingsForUser baseDir
     }
 
-mkPostgresSessionRepository :: String -> SessionRepository
-mkPostgresSessionRepository connectionString =
+mkPostgresSessionRepository :: Pool Connection -> String -> SessionRepository
+mkPostgresSessionRepository _ connectionString =
   SessionRepository
     { repoCreateSessionHandle = pgCreateSessionHandle connectionString
     , repoLoadSessionHandleBySessionId = pgLoadSessionHandleBySessionId connectionString

@@ -49,6 +49,7 @@ import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Lazy.Char8 as BL8
 import qualified Control.Exception as Ex
+import Data.Pool (Pool, createPool)
 import Happstack.Server (FilterMonad, Response, ServerPartT, RqBody, takeRequestBody, unBody, rqBody, decodeBody, askRq, rqPaths, defaultBodyPolicy, nullDir, path, serveFileFrom, guessContentTypeM, mimeTypes, uriRest, nullConf, simpleHTTP, toResponse, method, ok, internalServerError, notFound, dir, Method(GET, POST, DELETE, PUT), Conf(..), addCookie, mkCookie, CookieLife(Session, Expired), getHeaderM, unauthorized, requestEntityTooLarge, look, setResponseCode)
 import qualified Happstack.Server as HServer
 import Happstack.Server.Internal.Cookie (Cookie(..), SameSite(..))
@@ -623,104 +624,118 @@ runApp = do
             putStrLn $ "[startup-error] " ++ err
             exitFailure
           Right () -> pure ()
-        sessionStoreResult <- makeSessionStore selectedSessionBackend (databaseConfig appConfig) cd sessionCfg
-        case sessionStoreResult of
+        sharedPoolResult <-
+          makePostgresConnectionPoolIfNeeded
+            selectedAuthBackend
+            selectedSessionBackend
+            selectedCalendarBackend
+            selectedTripSharingBackend
+            selectedNoteBackend
+            selectedChecklistBackend
+            (databaseConfig appConfig)
+        case sharedPoolResult of
           Left err -> do
-            putStrLn ("[startup] session backend wiring failed for: " ++ renderSessionBackend selectedSessionBackend)
             putStrLn $ "[startup-error] " ++ err
             exitFailure
-          Right sessionStore -> do
-            putStrLn ("[startup] session backend wiring ready: " ++ renderSessionBackend selectedSessionBackend)
-            authRepoResult <- makeAuthRepository selectedAuthBackend (databaseConfig appConfig)
-            case authRepoResult of
+          Right sharedPool -> do
+            sessionStoreResult <- makeSessionStore selectedSessionBackend sharedPool (databaseConfig appConfig) cd sessionCfg
+            case sessionStoreResult of
               Left err -> do
-                putStrLn ("[startup] auth backend wiring failed for: " ++ renderAuthBackend selectedAuthBackend)
+                putStrLn ("[startup] session backend wiring failed for: " ++ renderSessionBackend selectedSessionBackend)
                 putStrLn $ "[startup-error] " ++ err
                 exitFailure
-              Right authRepo -> do
-                putStrLn ("[startup] auth backend wiring ready: " ++ renderAuthBackend selectedAuthBackend)
-                authImportResult <- runAuthStartupImportIfNeeded selectedAuthBackend (databaseConfig appConfig)
-                case authImportResult of
+              Right sessionStore -> do
+                putStrLn ("[startup] session backend wiring ready: " ++ renderSessionBackend selectedSessionBackend)
+                authRepoResult <- makeAuthRepository selectedAuthBackend sharedPool (databaseConfig appConfig)
+                case authRepoResult of
                   Left err -> do
+                    putStrLn ("[startup] auth backend wiring failed for: " ++ renderAuthBackend selectedAuthBackend)
                     putStrLn $ "[startup-error] " ++ err
                     exitFailure
-                  Right () -> do
-                    sessionImportResult <- runSessionStartupImportIfNeeded selectedSessionBackend (databaseConfig appConfig) cd
-                    case sessionImportResult of
+                  Right authRepo -> do
+                    putStrLn ("[startup] auth backend wiring ready: " ++ renderAuthBackend selectedAuthBackend)
+                    authImportResult <- runAuthStartupImportIfNeeded selectedAuthBackend sharedPool (databaseConfig appConfig)
+                    case authImportResult of
                       Left err -> do
                         putStrLn $ "[startup-error] " ++ err
                         exitFailure
                       Right () -> do
-                        calendarRepoResult <- makeCalendarRepository selectedCalendarBackend (databaseConfig appConfig)
-                        case calendarRepoResult of
+                        sessionImportResult <- runSessionStartupImportIfNeeded selectedSessionBackend sharedPool (databaseConfig appConfig) cd
+                        case sessionImportResult of
                           Left err -> do
-                            putStrLn ("[startup] calendar backend wiring failed for: " ++ renderCalendarBackend selectedCalendarBackend)
                             putStrLn $ "[startup-error] " ++ err
                             exitFailure
-                          Right calendarRepo -> do
-                            putStrLn ("[startup] calendar backend wiring ready: " ++ renderCalendarBackend selectedCalendarBackend)
-                            tripSharingRepoResult <- makeTripSharingRepository selectedTripSharingBackend (databaseConfig appConfig)
-                            case tripSharingRepoResult of
+                          Right () -> do
+                            calendarRepoResult <- makeCalendarRepository selectedCalendarBackend sharedPool (databaseConfig appConfig)
+                            case calendarRepoResult of
                               Left err -> do
-                                putStrLn ("[startup] trip-sharing backend wiring failed for: " ++ renderTripSharingBackend selectedTripSharingBackend)
+                                putStrLn ("[startup] calendar backend wiring failed for: " ++ renderCalendarBackend selectedCalendarBackend)
                                 putStrLn $ "[startup-error] " ++ err
                                 exitFailure
-                              Right tripSharingRepo -> do
-                                putStrLn ("[startup] trip-sharing backend wiring ready: " ++ renderTripSharingBackend selectedTripSharingBackend)
-                                calendarTripSharingImportResult <-
-                                  runCalendarTripSharingStartupImportIfNeeded
-                                    selectedCalendarBackend
-                                    selectedTripSharingBackend
-                                    (databaseConfig appConfig)
-                                    cd
-                                case calendarTripSharingImportResult of
+                              Right calendarRepo -> do
+                                putStrLn ("[startup] calendar backend wiring ready: " ++ renderCalendarBackend selectedCalendarBackend)
+                                tripSharingRepoResult <- makeTripSharingRepository selectedTripSharingBackend sharedPool (databaseConfig appConfig)
+                                case tripSharingRepoResult of
                                   Left err -> do
+                                    putStrLn ("[startup] trip-sharing backend wiring failed for: " ++ renderTripSharingBackend selectedTripSharingBackend)
                                     putStrLn $ "[startup-error] " ++ err
                                     exitFailure
-                                  Right () -> do
-                                    noteRepoResult <- makeNoteRepository selectedNoteBackend (databaseConfig appConfig)
-                                    case noteRepoResult of
+                                  Right tripSharingRepo -> do
+                                    putStrLn ("[startup] trip-sharing backend wiring ready: " ++ renderTripSharingBackend selectedTripSharingBackend)
+                                    calendarTripSharingImportResult <-
+                                      runCalendarTripSharingStartupImportIfNeeded
+                                        selectedCalendarBackend
+                                        selectedTripSharingBackend
+                                        (databaseConfig appConfig)
+                                        cd
+                                    case calendarTripSharingImportResult of
                                       Left err -> do
-                                        putStrLn ("[startup] note backend wiring failed for: " ++ renderNoteBackend selectedNoteBackend)
                                         putStrLn $ "[startup-error] " ++ err
                                         exitFailure
-                                      Right noteRepo -> do
-                                        putStrLn ("[startup] note backend wiring ready: " ++ renderNoteBackend selectedNoteBackend)
-                                        checklistRepoResult <- makeChecklistRepository selectedChecklistBackend (databaseConfig appConfig)
-                                        case checklistRepoResult of
+                                      Right () -> do
+                                        noteRepoResult <- makeNoteRepository selectedNoteBackend sharedPool (databaseConfig appConfig)
+                                        case noteRepoResult of
                                           Left err -> do
-                                            putStrLn ("[startup] checklist backend wiring failed for: " ++ renderChecklistBackend selectedChecklistBackend)
+                                            putStrLn ("[startup] note backend wiring failed for: " ++ renderNoteBackend selectedNoteBackend)
                                             putStrLn $ "[startup-error] " ++ err
                                             exitFailure
-                                          Right checklistRepo -> do
-                                            putStrLn ("[startup] checklist backend wiring ready: " ++ renderChecklistBackend selectedChecklistBackend)
-                                            notesChecklistImportResult <-
-                                              runNotesChecklistStartupImportIfNeeded
-                                                selectedNoteBackend
-                                                selectedChecklistBackend
-                                                (databaseConfig appConfig)
-                                                cd
-                                            case notesChecklistImportResult of
+                                          Right noteRepo -> do
+                                            putStrLn ("[startup] note backend wiring ready: " ++ renderNoteBackend selectedNoteBackend)
+                                            checklistRepoResult <- makeChecklistRepository selectedChecklistBackend sharedPool (databaseConfig appConfig)
+                                            case checklistRepoResult of
                                               Left err -> do
+                                                putStrLn ("[startup] checklist backend wiring failed for: " ++ renderChecklistBackend selectedChecklistBackend)
                                                 putStrLn $ "[startup-error] " ++ err
                                                 exitFailure
-                                              Right () ->
-                                                simpleHTTP nullConf { port = 8081 } $ do
-                                                    log "Incoming request"
-                                                    rq <- askRq
-                                                    let requestPath = "/" ++ intercalate "/" (rqPaths rq)
-                                                    startedAt <- liftIO getCurrentTime
-                                                    response <- msum [ homePage
-                                                                     , apiController authRepo calendarRepo tripSharingRepo noteRepo checklistRepo signupRateLimitState tmpDir appConfig sessionStore
-                                                                     , serveStaticResource
-                                                                     , mzero
-                                                                     ]
-                                                    endedAt <- liftIO getCurrentTime
-                                                    let elapsedMs :: Double
-                                                        elapsedMs = realToFrac (diffUTCTime endedAt startedAt) * 1000
-                                                    log ("[request-timing] path=" ++ requestPath ++ " duration_ms=" ++ printf "%.3f" elapsedMs)
-                                                    log "=========================END REQUEST====================\n"
-                                                    pure response
+                                              Right checklistRepo -> do
+                                                putStrLn ("[startup] checklist backend wiring ready: " ++ renderChecklistBackend selectedChecklistBackend)
+                                                notesChecklistImportResult <-
+                                                  runNotesChecklistStartupImportIfNeeded
+                                                    selectedNoteBackend
+                                                    selectedChecklistBackend
+                                                    (databaseConfig appConfig)
+                                                    cd
+                                                case notesChecklistImportResult of
+                                                  Left err -> do
+                                                    putStrLn $ "[startup-error] " ++ err
+                                                    exitFailure
+                                                  Right () ->
+                                                    simpleHTTP nullConf { port = 8081 } $ do
+                                                        log "Incoming request"
+                                                        rq <- askRq
+                                                        let requestPath = "/" ++ intercalate "/" (rqPaths rq)
+                                                        startedAt <- liftIO getCurrentTime
+                                                        response <- msum [ homePage
+                                                                         , apiController authRepo calendarRepo tripSharingRepo noteRepo checklistRepo signupRateLimitState tmpDir appConfig sessionStore
+                                                                         , serveStaticResource
+                                                                         , mzero
+                                                                         ]
+                                                        endedAt <- liftIO getCurrentTime
+                                                        let elapsedMs :: Double
+                                                            elapsedMs = realToFrac (diffUTCTime endedAt startedAt) * 1000
+                                                        log ("[request-timing] path=" ++ requestPath ++ " duration_ms=" ++ printf "%.3f" elapsedMs)
+                                                        log "=========================END REQUEST====================\n"
+                                                        pure response
 
 startupMigrationDomainsForBackends
   :: AuthBackend
@@ -853,51 +868,108 @@ runDomainMigration basePath connectionString domain = do
     Left err -> pure (Left ("Startup migrations failed for domain=" ++ domain ++ ": " ++ err))
     Right () -> pure (Right ())
 
-makeAuthRepository :: AuthBackend -> Maybe DatabaseConfig -> IO (Either String AuthRepository)
-makeAuthRepository AuthBackendFilesystem _ = pure (Right defaultAuthRepository)
-makeAuthRepository AuthBackendPostgres mDatabaseCfg =
+makePostgresConnectionPoolIfNeeded
+  :: AuthBackend
+  -> SessionBackend
+  -> CalendarBackend
+  -> TripSharingBackend
+  -> NoteBackend
+  -> ChecklistBackend
+  -> Maybe DatabaseConfig
+  -> IO (Either String (Maybe (Pool Connection)))
+makePostgresConnectionPoolIfNeeded authMode sessionMode calendarMode tripSharingMode noteMode checklistMode mDatabaseCfg
+  | not (backendsRequirePostgresPool authMode sessionMode calendarMode tripSharingMode noteMode checklistMode) =
+      pure (Right Nothing)
+  | otherwise =
+      case mDatabaseCfg of
+        Nothing -> pure (Left "Configuration database is required when any backend uses postgres")
+        Just dbCfg -> do
+          let connectionString = renderPostgresConnectionString dbCfg
+          pool <- createPostgresConnectionPool connectionString
+          pure (Right (Just pool))
+
+backendsRequirePostgresPool
+  :: AuthBackend
+  -> SessionBackend
+  -> CalendarBackend
+  -> TripSharingBackend
+  -> NoteBackend
+  -> ChecklistBackend
+  -> Bool
+backendsRequirePostgresPool authMode sessionMode calendarMode tripSharingMode noteMode checklistMode =
+  authMode == AuthBackendPostgres
+    || sessionMode == SessionBackendPostgres
+    || calendarMode == CalendarBackendPostgres
+    || tripSharingMode == TripSharingBackendPostgres
+    || noteMode == NoteBackendPostgres
+    || checklistMode == ChecklistBackendPostgres
+
+createPostgresConnectionPool :: String -> IO (Pool Connection)
+createPostgresConnectionPool connectionString =
+  createPool
+    (connectPostgreSQL (BS8.pack connectionString))
+    close
+    1
+    60
+    16
+
+requirePostgresPool :: String -> Maybe (Pool Connection) -> Either String (Pool Connection)
+requirePostgresPool backendLabel mPool =
+  case mPool of
+    Just pool -> Right pool
+    Nothing -> Left ("Internal startup wiring error: missing postgres pool for " ++ backendLabel)
+
+makeAuthRepository :: AuthBackend -> Maybe (Pool Connection) -> Maybe DatabaseConfig -> IO (Either String AuthRepository)
+makeAuthRepository AuthBackendFilesystem _ _ = pure (Right defaultAuthRepository)
+makeAuthRepository AuthBackendPostgres mPool mDatabaseCfg =
   case mDatabaseCfg of
     Nothing -> pure (Left "Configuration database is required when auth.authBackend=postgres")
     Just dbCfg -> do
       let connectionString = renderPostgresConnectionString dbCfg
-      validationResult <- AuthRepository.verifyPostgresAuthStorage connectionString
-      case validationResult of
-        Left err -> pure (Left ("Postgres auth storage validation failed: " ++ err))
-        Right () -> pure (Right (AuthRepository.postgresAuthRepository connectionString))
+      case requirePostgresPool "auth backend" mPool of
+        Left err -> pure (Left err)
+        Right pool -> do
+          validationResult <- AuthRepository.verifyPostgresAuthStorage connectionString
+          case validationResult of
+            Left err -> pure (Left ("Postgres auth storage validation failed: " ++ err))
+            Right () -> pure (Right (AuthRepository.postgresAuthRepository pool connectionString))
 
-runAuthStartupImportIfNeeded :: AuthBackend -> Maybe DatabaseConfig -> IO (Either String ())
-runAuthStartupImportIfNeeded AuthBackendFilesystem _ = pure (Right ())
-runAuthStartupImportIfNeeded AuthBackendPostgres Nothing =
+runAuthStartupImportIfNeeded :: AuthBackend -> Maybe (Pool Connection) -> Maybe DatabaseConfig -> IO (Either String ())
+runAuthStartupImportIfNeeded AuthBackendFilesystem _ _ = pure (Right ())
+runAuthStartupImportIfNeeded AuthBackendPostgres _ Nothing =
   pure (Left "Configuration database is required when auth.authBackend=postgres")
-runAuthStartupImportIfNeeded AuthBackendPostgres (Just dbCfg) = do
+runAuthStartupImportIfNeeded AuthBackendPostgres mPool (Just dbCfg) = do
   let connectionString = renderPostgresConnectionString dbCfg
       filesystemRepo = defaultAuthRepository
-      postgresRepo = AuthRepository.postgresAuthRepository connectionString
-  filesystemUsersResult <- runExceptT (AuthRepository.repoListUsers filesystemRepo)
-  filesystemUsers <-
-    case filesystemUsersResult of
-      Right users -> pure (Right users)
-      Left StorageFailure -> do
-        putStrLn "[startup][auth-import] source users directory is missing; treating filesystem auth source as empty"
-        pure (Right [])
-      Left err -> pure (Left ("Auth startup import failed while reading filesystem users: " ++ show err))
-  case filesystemUsers of
+  case requirePostgresPool "auth startup import" mPool of
     Left err -> pure (Left err)
-    Right fsUsers -> do
-      postgresUsersResult <- runExceptT (AuthRepository.repoListUsers postgresRepo)
-      case postgresUsersResult of
-        Left err -> pure (Left ("Auth startup import failed while reading Postgres users: " ++ show err))
-        Right pgUsers -> do
-          let orderedFsUsers = sortOn AuthRepository.uname fsUsers
-              pgUsernames = Set.fromList (map AuthRepository.uname pgUsers)
-          when (not (null orderedFsUsers) && not (null pgUsers)) $
-            putStrLn ("[startup][auth-import][warning] overlap detected: filesystem_count=" ++ show (length orderedFsUsers) ++ " postgres_count=" ++ show (length pgUsers) ++ " conflict_policy=postgres-wins")
-          importResult <- foldM (importSingleAuthUser postgresRepo pgUsernames) (Right (0 :: Int, 0 :: Int)) orderedFsUsers
-          case importResult of
-            Left err -> pure (Left err)
-            Right (importedCount, skippedCount) -> do
-              putStrLn ("[startup][auth-import] completed filesystem_count=" ++ show (length orderedFsUsers) ++ " postgres_count=" ++ show (length pgUsers) ++ " imported=" ++ show importedCount ++ " skipped_conflicts=" ++ show skippedCount)
-              pure (Right ())
+    Right pool -> do
+      let postgresRepo = AuthRepository.postgresAuthRepository pool connectionString
+      filesystemUsersResult <- runExceptT (AuthRepository.repoListUsers filesystemRepo)
+      filesystemUsers <-
+        case filesystemUsersResult of
+          Right users -> pure (Right users)
+          Left StorageFailure -> do
+            putStrLn "[startup][auth-import] source users directory is missing; treating filesystem auth source as empty"
+            pure (Right [])
+          Left err -> pure (Left ("Auth startup import failed while reading filesystem users: " ++ show err))
+      case filesystemUsers of
+        Left err -> pure (Left err)
+        Right fsUsers -> do
+          postgresUsersResult <- runExceptT (AuthRepository.repoListUsers postgresRepo)
+          case postgresUsersResult of
+            Left err -> pure (Left ("Auth startup import failed while reading Postgres users: " ++ show err))
+            Right pgUsers -> do
+              let orderedFsUsers = sortOn AuthRepository.uname fsUsers
+                  pgUsernames = Set.fromList (map AuthRepository.uname pgUsers)
+              when (not (null orderedFsUsers) && not (null pgUsers)) $
+                putStrLn ("[startup][auth-import][warning] overlap detected: filesystem_count=" ++ show (length orderedFsUsers) ++ " postgres_count=" ++ show (length pgUsers) ++ " conflict_policy=postgres-wins")
+              importResult <- foldM (importSingleAuthUser postgresRepo pgUsernames) (Right (0 :: Int, 0 :: Int)) orderedFsUsers
+              case importResult of
+                Left err -> pure (Left err)
+                Right (importedCount, skippedCount) -> do
+                  putStrLn ("[startup][auth-import] completed filesystem_count=" ++ show (length orderedFsUsers) ++ " postgres_count=" ++ show (length pgUsers) ++ " imported=" ++ show importedCount ++ " skipped_conflicts=" ++ show skippedCount)
+                  pure (Right ())
 
 importSingleAuthUser :: AuthRepository -> Set.Set String -> Either String (Int, Int) -> AuthRepository.PersistedUser -> IO (Either String (Int, Int))
 importSingleAuthUser _ _ (Left err) _ = pure (Left err)
@@ -917,87 +989,90 @@ importSingleAuthUser postgresRepo pgUsernames (Right (importedCount, skippedCoun
   where
     username = AuthRepository.uname fsUser
 
-runSessionStartupImportIfNeeded :: SessionBackend -> Maybe DatabaseConfig -> FilePath -> IO (Either String ())
-runSessionStartupImportIfNeeded SessionBackendFilesystem _ _ = pure (Right ())
-runSessionStartupImportIfNeeded SessionBackendPostgres Nothing _ =
+runSessionStartupImportIfNeeded :: SessionBackend -> Maybe (Pool Connection) -> Maybe DatabaseConfig -> FilePath -> IO (Either String ())
+runSessionStartupImportIfNeeded SessionBackendFilesystem _ _ _ = pure (Right ())
+runSessionStartupImportIfNeeded SessionBackendPostgres _ Nothing _ =
   pure (Left "Configuration database is required when session.sessionBackend=postgres")
-runSessionStartupImportIfNeeded SessionBackendPostgres (Just dbCfg) cd = do
+runSessionStartupImportIfNeeded SessionBackendPostgres mPool (Just dbCfg) cd = do
   let connectionString = renderPostgresConnectionString dbCfg
       sessionBaseDir = cd </> "data" </> "sessions"
-      postgresRepo = mkPostgresSessionRepository connectionString
-  filesystemSourceResult <- loadFilesystemSessionImportSource sessionBaseDir
-  case filesystemSourceResult of
+  case requirePostgresPool "session startup import" mPool of
     Left err -> pure (Left err)
-    Right (fsStates, fsHandles, fsBindings) -> do
-      postgresSnapshotResult <- loadPostgresSessionImportSnapshot connectionString
-      case postgresSnapshotResult of
+    Right pool -> do
+      let postgresRepo = mkPostgresSessionRepository pool connectionString
+      filesystemSourceResult <- loadFilesystemSessionImportSource sessionBaseDir
+      case filesystemSourceResult of
         Left err -> pure (Left err)
-        Right (pgStates, pgHandles, pgBindings) -> do
-          let orderedFsStates = sortOn stateId fsStates
-              orderedFsHandles = sortOn handleSessionId fsHandles
-              orderedFsBindings = sortOn fst fsBindings
-              pgStateIds = Set.fromList (map stateId pgStates)
-              pgSessionIds = Set.fromList (map handleSessionId pgHandles)
-              pgBindingUserIds = Set.fromList (map fst pgBindings)
-              filesystemCount = length orderedFsStates + length orderedFsHandles + length orderedFsBindings
-              postgresCount = length pgStates + length pgHandles + length pgBindings
-          when (filesystemCount > 0 && postgresCount > 0) $
-            putStrLn
-              ( "[startup][session-import][warning] overlap detected:"
-                  ++ " filesystem_states="
-                  ++ show (length orderedFsStates)
-                  ++ " filesystem_handles="
-                  ++ show (length orderedFsHandles)
-                  ++ " filesystem_bindings="
-                  ++ show (length orderedFsBindings)
-                  ++ " postgres_states="
-                  ++ show (length pgStates)
-                  ++ " postgres_handles="
-                  ++ show (length pgHandles)
-                  ++ " postgres_bindings="
-                  ++ show (length pgBindings)
-                  ++ " conflict_policy=postgres-wins"
-              )
-          statesImportResult <- foldM (importSingleSessionState postgresRepo) (Right (0 :: Int, 0 :: Int, pgStateIds)) orderedFsStates
-          case statesImportResult of
+        Right (fsStates, fsHandles, fsBindings) -> do
+          postgresSnapshotResult <- loadPostgresSessionImportSnapshot connectionString
+          case postgresSnapshotResult of
             Left err -> pure (Left err)
-            Right (statesImported, statesSkipped, _) -> do
-              handlesImportResult <- foldM (importSingleSessionHandle postgresRepo) (Right (0 :: Int, 0 :: Int, pgSessionIds)) orderedFsHandles
-              case handlesImportResult of
+            Right (pgStates, pgHandles, pgBindings) -> do
+              let orderedFsStates = sortOn stateId fsStates
+                  orderedFsHandles = sortOn handleSessionId fsHandles
+                  orderedFsBindings = sortOn fst fsBindings
+                  pgStateIds = Set.fromList (map stateId pgStates)
+                  pgSessionIds = Set.fromList (map handleSessionId pgHandles)
+                  pgBindingUserIds = Set.fromList (map fst pgBindings)
+                  filesystemCount = length orderedFsStates + length orderedFsHandles + length orderedFsBindings
+                  postgresCount = length pgStates + length pgHandles + length pgBindings
+              when (filesystemCount > 0 && postgresCount > 0) $
+                putStrLn
+                  ( "[startup][session-import][warning] overlap detected:"
+                      ++ " filesystem_states="
+                      ++ show (length orderedFsStates)
+                      ++ " filesystem_handles="
+                      ++ show (length orderedFsHandles)
+                      ++ " filesystem_bindings="
+                      ++ show (length orderedFsBindings)
+                      ++ " postgres_states="
+                      ++ show (length pgStates)
+                      ++ " postgres_handles="
+                      ++ show (length pgHandles)
+                      ++ " postgres_bindings="
+                      ++ show (length pgBindings)
+                      ++ " conflict_policy=postgres-wins"
+                  )
+              statesImportResult <- foldM (importSingleSessionState postgresRepo) (Right (0 :: Int, 0 :: Int, pgStateIds)) orderedFsStates
+              case statesImportResult of
                 Left err -> pure (Left err)
-                Right (handlesImported, handlesSkipped, _) -> do
-                  bindingsImportResult <- foldM (importSingleSessionUserBinding postgresRepo) (Right (0 :: Int, 0 :: Int, pgBindingUserIds)) orderedFsBindings
-                  case bindingsImportResult of
+                Right (statesImported, statesSkipped, _) -> do
+                  handlesImportResult <- foldM (importSingleSessionHandle postgresRepo) (Right (0 :: Int, 0 :: Int, pgSessionIds)) orderedFsHandles
+                  case handlesImportResult of
                     Left err -> pure (Left err)
-                    Right (bindingsImported, bindingsSkipped, _) -> do
-                      putStrLn
-                        ( "[startup][session-import] completed"
-                            ++ " filesystem_states="
-                            ++ show (length orderedFsStates)
-                            ++ " filesystem_handles="
-                            ++ show (length orderedFsHandles)
-                            ++ " filesystem_bindings="
-                            ++ show (length orderedFsBindings)
-                            ++ " postgres_states="
-                            ++ show (length pgStates)
-                            ++ " postgres_handles="
-                            ++ show (length pgHandles)
-                            ++ " postgres_bindings="
-                            ++ show (length pgBindings)
-                            ++ " imported_states="
-                            ++ show statesImported
-                            ++ " imported_handles="
-                            ++ show handlesImported
-                            ++ " imported_bindings="
-                            ++ show bindingsImported
-                            ++ " skipped_state_conflicts="
-                            ++ show statesSkipped
-                            ++ " skipped_handle_conflicts="
-                            ++ show handlesSkipped
-                            ++ " skipped_binding_conflicts="
-                            ++ show bindingsSkipped
-                        )
-                      pure (Right ())
+                    Right (handlesImported, handlesSkipped, _) -> do
+                      bindingsImportResult <- foldM (importSingleSessionUserBinding postgresRepo) (Right (0 :: Int, 0 :: Int, pgBindingUserIds)) orderedFsBindings
+                      case bindingsImportResult of
+                        Left err -> pure (Left err)
+                        Right (bindingsImported, bindingsSkipped, _) -> do
+                          putStrLn
+                            ( "[startup][session-import] completed"
+                                ++ " filesystem_states="
+                                ++ show (length orderedFsStates)
+                                ++ " filesystem_handles="
+                                ++ show (length orderedFsHandles)
+                                ++ " filesystem_bindings="
+                                ++ show (length orderedFsBindings)
+                                ++ " postgres_states="
+                                ++ show (length pgStates)
+                                ++ " postgres_handles="
+                                ++ show (length pgHandles)
+                                ++ " postgres_bindings="
+                                ++ show (length pgBindings)
+                                ++ " imported_states="
+                                ++ show statesImported
+                                ++ " imported_handles="
+                                ++ show handlesImported
+                                ++ " imported_bindings="
+                                ++ show bindingsImported
+                                ++ " skipped_state_conflicts="
+                                ++ show statesSkipped
+                                ++ " skipped_handle_conflicts="
+                                ++ show handlesSkipped
+                                ++ " skipped_binding_conflicts="
+                                ++ show bindingsSkipped
+                            )
+                          pure (Right ())
 
 importSingleSessionState
   :: SessionRepository
@@ -1858,66 +1933,81 @@ renderChecklistBackend :: ChecklistBackend -> String
 renderChecklistBackend ChecklistBackendFilesystem = "filesystem"
 renderChecklistBackend ChecklistBackendPostgres = "postgres"
 
-makeCalendarRepository :: CalendarBackend -> Maybe DatabaseConfig -> IO (Either String CalendarRepository)
-makeCalendarRepository CalendarBackendFilesystem _ = pure (Right defaultCalendarRepository)
-makeCalendarRepository CalendarBackendPostgres mDatabaseCfg =
+makeCalendarRepository :: CalendarBackend -> Maybe (Pool Connection) -> Maybe DatabaseConfig -> IO (Either String CalendarRepository)
+makeCalendarRepository CalendarBackendFilesystem _ _ = pure (Right defaultCalendarRepository)
+makeCalendarRepository CalendarBackendPostgres mPool mDatabaseCfg =
   case mDatabaseCfg of
     Nothing -> pure (Left "Configuration database is required when calendarBackend=postgres")
     Just dbCfg -> do
       let connectionString = renderPostgresConnectionString dbCfg
-      validationResult <- verifyPostgresCalendarStorage connectionString
-      case validationResult of
-        Left err -> pure (Left ("Postgres calendar storage validation failed: " ++ err))
-        Right () -> pure (Right (postgresCalendarRepository connectionString))
+      case requirePostgresPool "calendar backend" mPool of
+        Left err -> pure (Left err)
+        Right pool -> do
+          validationResult <- verifyPostgresCalendarStorage connectionString
+          case validationResult of
+            Left err -> pure (Left ("Postgres calendar storage validation failed: " ++ err))
+            Right () -> pure (Right (postgresCalendarRepository pool connectionString))
 
-makeTripSharingRepository :: TripSharingBackend -> Maybe DatabaseConfig -> IO (Either String TripSharingRepository)
-makeTripSharingRepository TripSharingBackendFilesystem _ = pure (Right defaultTripSharingRepository)
-makeTripSharingRepository TripSharingBackendPostgres mDatabaseCfg =
+makeTripSharingRepository :: TripSharingBackend -> Maybe (Pool Connection) -> Maybe DatabaseConfig -> IO (Either String TripSharingRepository)
+makeTripSharingRepository TripSharingBackendFilesystem _ _ = pure (Right defaultTripSharingRepository)
+makeTripSharingRepository TripSharingBackendPostgres mPool mDatabaseCfg =
   case mDatabaseCfg of
     Nothing -> pure (Left "Configuration database is required when tripSharingBackend=postgres")
     Just dbCfg -> do
       let connectionString = renderPostgresConnectionString dbCfg
-      validationResult <- verifyPostgresTripSharingStorage connectionString
-      case validationResult of
-        Left err -> pure (Left ("Postgres trip-sharing storage validation failed: " ++ err))
-        Right () -> pure (Right (postgresTripSharingRepository connectionString))
+      case requirePostgresPool "trip-sharing backend" mPool of
+        Left err -> pure (Left err)
+        Right pool -> do
+          validationResult <- verifyPostgresTripSharingStorage connectionString
+          case validationResult of
+            Left err -> pure (Left ("Postgres trip-sharing storage validation failed: " ++ err))
+            Right () -> pure (Right (postgresTripSharingRepository pool connectionString))
 
-makeNoteRepository :: NoteBackend -> Maybe DatabaseConfig -> IO (Either String NoteRepository)
-makeNoteRepository NoteBackendFilesystem _ = pure (Right defaultNoteRepository)
-makeNoteRepository NoteBackendPostgres mDatabaseCfg =
+makeNoteRepository :: NoteBackend -> Maybe (Pool Connection) -> Maybe DatabaseConfig -> IO (Either String NoteRepository)
+makeNoteRepository NoteBackendFilesystem _ _ = pure (Right defaultNoteRepository)
+makeNoteRepository NoteBackendPostgres mPool mDatabaseCfg =
   case mDatabaseCfg of
     Nothing -> pure (Left "Configuration database is required when noteBackend=postgres")
     Just dbCfg -> do
       let connectionString = renderPostgresConnectionString dbCfg
-      validationResult <- verifyPostgresNoteStorage connectionString
-      case validationResult of
-        Left err -> pure (Left ("Postgres note storage validation failed: " ++ err))
-        Right () -> pure (Right (postgresNoteRepository connectionString))
+      case requirePostgresPool "note backend" mPool of
+        Left err -> pure (Left err)
+        Right pool -> do
+          validationResult <- verifyPostgresNoteStorage connectionString
+          case validationResult of
+            Left err -> pure (Left ("Postgres note storage validation failed: " ++ err))
+            Right () -> pure (Right (postgresNoteRepository pool connectionString))
 
-makeChecklistRepository :: ChecklistBackend -> Maybe DatabaseConfig -> IO (Either String ChecklistRepository)
-makeChecklistRepository ChecklistBackendFilesystem _ = pure (Right defaultChecklistRepository)
-makeChecklistRepository ChecklistBackendPostgres mDatabaseCfg =
+makeChecklistRepository :: ChecklistBackend -> Maybe (Pool Connection) -> Maybe DatabaseConfig -> IO (Either String ChecklistRepository)
+makeChecklistRepository ChecklistBackendFilesystem _ _ = pure (Right defaultChecklistRepository)
+makeChecklistRepository ChecklistBackendPostgres mPool mDatabaseCfg =
   case mDatabaseCfg of
     Nothing -> pure (Left "Configuration database is required when checklistBackend=postgres")
     Just dbCfg -> do
       let connectionString = renderPostgresConnectionString dbCfg
-      validationResult <- verifyPostgresChecklistStorage connectionString
-      case validationResult of
-        Left err -> pure (Left ("Postgres checklist storage validation failed: " ++ err))
-        Right () -> pure (Right (postgresChecklistRepository connectionString))
+      case requirePostgresPool "checklist backend" mPool of
+        Left err -> pure (Left err)
+        Right pool -> do
+          validationResult <- verifyPostgresChecklistStorage connectionString
+          case validationResult of
+            Left err -> pure (Left ("Postgres checklist storage validation failed: " ++ err))
+            Right () -> pure (Right (postgresChecklistRepository pool connectionString))
 
-makeSessionStore :: SessionBackend -> Maybe DatabaseConfig -> FilePath -> SessionConfig -> IO (Either String SessionStore)
-makeSessionStore SessionBackendFilesystem _ cd sessionCfg =
+makeSessionStore :: SessionBackend -> Maybe (Pool Connection) -> Maybe DatabaseConfig -> FilePath -> SessionConfig -> IO (Either String SessionStore)
+makeSessionStore SessionBackendFilesystem _ _ cd sessionCfg =
   Right <$> mkFileSessionStore (cd </> "data" </> "sessions") sessionCfg
-makeSessionStore SessionBackendPostgres mDatabaseCfg _ sessionCfg =
+makeSessionStore SessionBackendPostgres mPool mDatabaseCfg _ sessionCfg =
   case mDatabaseCfg of
     Nothing -> pure (Left "Configuration database is required when session.sessionBackend=postgres")
     Just dbCfg -> do
       let connectionString = renderPostgresConnectionString dbCfg
-      validationResult <- verifyPostgresSessionStorage connectionString
-      case validationResult of
-        Left err -> pure (Left ("Postgres session storage validation failed: " ++ err))
-        Right () -> pure (Right (mkSessionStore (mkPostgresSessionRepository connectionString) sessionCfg))
+      case requirePostgresPool "session backend" mPool of
+        Left err -> pure (Left err)
+        Right pool -> do
+          validationResult <- verifyPostgresSessionStorage connectionString
+          case validationResult of
+            Left err -> pure (Left ("Postgres session storage validation failed: " ++ err))
+            Right () -> pure (Right (mkSessionStore (mkPostgresSessionRepository pool connectionString) sessionCfg))
 
 validateDatabaseConfig :: DatabaseConfigFile -> Either String DatabaseConfig
 validateDatabaseConfig DatabaseConfigFile {databaseHostFile, databasePortFile, databaseNameFile, databaseUserFile, databasePasswordFile}

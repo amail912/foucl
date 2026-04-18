@@ -22,9 +22,12 @@ Reduce request latency and DB connection overhead by replacing per-operation `co
 
 ## Stories
 
+### Done
+
+- [001 Pooling Contract And Runtime Wiring](done/001-pooling-contract-and-runtime-wiring.md)
+
 ### Ready
 
-- [001 Pooling Contract And Runtime Wiring](ready/001-pooling-contract-and-runtime-wiring.md)
 - [002 Repository Cutover To WithResource](ready/002-repository-cutover-to-withresource.md)
 - [003 Session Hot-Path Write Reduction](ready/003-session-hotpath-write-reduction.md)
 - [004 Verification And Runtime Docs](ready/004-verification-and-runtime-docs.md)

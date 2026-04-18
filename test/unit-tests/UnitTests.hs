@@ -72,6 +72,9 @@ import Data.Time.Clock (addUTCTime, getCurrentTime)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import qualified Data.ByteString.Lazy.Char8 as BL8
 import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteString.Char8 as BS8
+import Data.Pool (Pool, createPool, destroyAllResources)
+import Database.PostgreSQL.Simple (Connection, close, connectPostgreSQL)
 import System.FilePath ((</>))
 
 runUnitTests :: IO ()
@@ -1340,7 +1343,7 @@ sessionBackendRejectsInvalid =
 
 sessionBackendWiringComposesFilesystem :: IO ()
 sessionBackendWiringComposesFilesystem = withSessionBackendSandbox "filesystem-wiring" $ \sandboxDir -> do
-  result <- makeSessionStore SessionBackendFilesystem Nothing sandboxDir testSessionConfig
+  result <- makeSessionStore SessionBackendFilesystem Nothing Nothing sandboxDir testSessionConfig
   case result of
     Left err -> assertFailure ("Expected filesystem session backend wiring success, got " ++ err)
     Right store -> do
@@ -1352,7 +1355,7 @@ sessionBackendWiringComposesFilesystem = withSessionBackendSandbox "filesystem-w
 
 sessionBackendPostgresRequiresDatabaseConfig :: IO ()
 sessionBackendPostgresRequiresDatabaseConfig = do
-  result <- makeSessionStore SessionBackendPostgres Nothing "." testSessionConfig
+  result <- makeSessionStore SessionBackendPostgres Nothing Nothing "." testSessionConfig
   case result of
     Left "Configuration database is required when session.sessionBackend=postgres" ->
       assertBool "Expected missing database config rejection for postgres session backend" True
@@ -1368,12 +1371,13 @@ sessionBackendPostgresFailsFastOnStorageValidationFailure = do
         , databaseUser = "foucl"
         , databasePassword = "foucl"
         }
-  result <- makeSessionStore SessionBackendPostgres (Just dbCfg) "." testSessionConfig
-  case result of
-    Left err | "Postgres session storage validation failed:" `isPrefixOf` err ->
-      assertBool "Expected postgres session storage validation failure" True
-    Left err -> assertFailure ("Unexpected postgres session wiring error: " ++ err)
-    Right _ -> assertFailure "Expected postgres session backend to fail fast when storage validation fails"
+  withTestPostgresPoolFromDbConfig dbCfg $ \pool -> do
+    result <- makeSessionStore SessionBackendPostgres (Just pool) (Just dbCfg) "." testSessionConfig
+    case result of
+      Left err | "Postgres session storage validation failed:" `isPrefixOf` err ->
+        assertBool "Expected postgres session storage validation failure" True
+      Left err -> assertFailure ("Unexpected postgres session wiring error: " ++ err)
+      Right _ -> assertFailure "Expected postgres session backend to fail fast when storage validation fails"
 
 calendarBackendDefaultsToFilesystem :: IO ()
 calendarBackendDefaultsToFilesystem =
@@ -1402,7 +1406,7 @@ calendarBackendRejectsInvalid =
 
 calendarBackendWiringComposesFilesystem :: IO ()
 calendarBackendWiringComposesFilesystem = withBackendSandbox "calendar-backend-fs-wiring" $ do
-  result <- makeCalendarRepository CalendarBackendFilesystem Nothing
+  result <- makeCalendarRepository CalendarBackendFilesystem Nothing Nothing
   case result of
     Left err -> assertFailure ("Expected filesystem calendar backend wiring success, got " ++ err)
     Right repo -> do
@@ -1418,7 +1422,7 @@ calendarBackendWiringComposesFilesystem = withBackendSandbox "calendar-backend-f
 
 calendarBackendPostgresRequiresDatabaseConfig :: IO ()
 calendarBackendPostgresRequiresDatabaseConfig = do
-  result <- makeCalendarRepository CalendarBackendPostgres Nothing
+  result <- makeCalendarRepository CalendarBackendPostgres Nothing Nothing
   case result of
     Left "Configuration database is required when calendarBackend=postgres" ->
       assertBool "Expected missing database config rejection for postgres calendar backend" True
@@ -1434,12 +1438,13 @@ calendarBackendPostgresFailsFastOnStorageValidationFailure = do
         , databaseUser = "foucl"
         , databasePassword = "foucl"
         }
-  result <- makeCalendarRepository CalendarBackendPostgres (Just dbCfg)
-  case result of
-    Left err | "Postgres calendar storage validation failed:" `isPrefixOf` err ->
-      assertBool "Expected postgres calendar storage validation failure" True
-    Left err -> assertFailure ("Unexpected postgres calendar wiring error: " ++ err)
-    Right _ -> assertFailure "Expected postgres calendar backend to fail fast when storage validation fails"
+  withTestPostgresPoolFromDbConfig dbCfg $ \pool -> do
+    result <- makeCalendarRepository CalendarBackendPostgres (Just pool) (Just dbCfg)
+    case result of
+      Left err | "Postgres calendar storage validation failed:" `isPrefixOf` err ->
+        assertBool "Expected postgres calendar storage validation failure" True
+      Left err -> assertFailure ("Unexpected postgres calendar wiring error: " ++ err)
+      Right _ -> assertFailure "Expected postgres calendar backend to fail fast when storage validation fails"
 
 tripSharingBackendDefaultsToFilesystem :: IO ()
 tripSharingBackendDefaultsToFilesystem =
@@ -1468,7 +1473,7 @@ tripSharingBackendRejectsInvalid =
 
 tripSharingBackendWiringComposesFilesystem :: IO ()
 tripSharingBackendWiringComposesFilesystem = withBackendSandbox "trip-sharing-backend-fs-wiring" $ do
-  result <- makeTripSharingRepository TripSharingBackendFilesystem Nothing
+  result <- makeTripSharingRepository TripSharingBackendFilesystem Nothing Nothing
   case result of
     Left err -> assertFailure ("Expected filesystem trip-sharing backend wiring success, got " ++ err)
     Right repo -> do
@@ -1484,7 +1489,7 @@ tripSharingBackendWiringComposesFilesystem = withBackendSandbox "trip-sharing-ba
 
 tripSharingBackendPostgresRequiresDatabaseConfig :: IO ()
 tripSharingBackendPostgresRequiresDatabaseConfig = do
-  result <- makeTripSharingRepository TripSharingBackendPostgres Nothing
+  result <- makeTripSharingRepository TripSharingBackendPostgres Nothing Nothing
   case result of
     Left "Configuration database is required when tripSharingBackend=postgres" ->
       assertBool "Expected missing database config rejection for postgres trip-sharing backend" True
@@ -1500,12 +1505,13 @@ tripSharingBackendPostgresFailsFastOnStorageValidationFailure = do
         , databaseUser = "foucl"
         , databasePassword = "foucl"
         }
-  result <- makeTripSharingRepository TripSharingBackendPostgres (Just dbCfg)
-  case result of
-    Left err | "Postgres trip-sharing storage validation failed:" `isPrefixOf` err ->
-      assertBool "Expected postgres trip-sharing storage validation failure" True
-    Left err -> assertFailure ("Unexpected postgres trip-sharing wiring error: " ++ err)
-    Right _ -> assertFailure "Expected postgres trip-sharing backend to fail fast when storage validation fails"
+  withTestPostgresPoolFromDbConfig dbCfg $ \pool -> do
+    result <- makeTripSharingRepository TripSharingBackendPostgres (Just pool) (Just dbCfg)
+    case result of
+      Left err | "Postgres trip-sharing storage validation failed:" `isPrefixOf` err ->
+        assertBool "Expected postgres trip-sharing storage validation failure" True
+      Left err -> assertFailure ("Unexpected postgres trip-sharing wiring error: " ++ err)
+      Right _ -> assertFailure "Expected postgres trip-sharing backend to fail fast when storage validation fails"
 
 noteBackendDefaultsToFilesystem :: IO ()
 noteBackendDefaultsToFilesystem =
@@ -1534,7 +1540,7 @@ noteBackendRejectsInvalid =
 
 noteBackendWiringComposesFilesystem :: IO ()
 noteBackendWiringComposesFilesystem = withBackendSandbox "note-backend-fs-wiring" $ do
-  result <- makeNoteRepository NoteBackendFilesystem Nothing
+  result <- makeNoteRepository NoteBackendFilesystem Nothing Nothing
   case result of
     Left err -> assertFailure ("Expected filesystem note backend wiring success, got " ++ err)
     Right repo -> do
@@ -1550,7 +1556,7 @@ noteBackendWiringComposesFilesystem = withBackendSandbox "note-backend-fs-wiring
 
 noteBackendPostgresRequiresDatabaseConfig :: IO ()
 noteBackendPostgresRequiresDatabaseConfig = do
-  result <- makeNoteRepository NoteBackendPostgres Nothing
+  result <- makeNoteRepository NoteBackendPostgres Nothing Nothing
   case result of
     Left "Configuration database is required when noteBackend=postgres" ->
       assertBool "Expected missing database config rejection for postgres note backend" True
@@ -1566,12 +1572,13 @@ noteBackendPostgresFailsFastOnStorageValidationFailure = do
         , databaseUser = "foucl"
         , databasePassword = "foucl"
         }
-  result <- makeNoteRepository NoteBackendPostgres (Just dbCfg)
-  case result of
-    Left err | "Postgres note storage validation failed:" `isPrefixOf` err ->
-      assertBool "Expected postgres note storage validation failure" True
-    Left err -> assertFailure ("Unexpected postgres note wiring error: " ++ err)
-    Right _ -> assertBool "Postgres note backend wiring can succeed when local schema is already available" True
+  withTestPostgresPoolFromDbConfig dbCfg $ \pool -> do
+    result <- makeNoteRepository NoteBackendPostgres (Just pool) (Just dbCfg)
+    case result of
+      Left err | "Postgres note storage validation failed:" `isPrefixOf` err ->
+        assertBool "Expected postgres note storage validation failure" True
+      Left err -> assertFailure ("Unexpected postgres note wiring error: " ++ err)
+      Right _ -> assertBool "Postgres note backend wiring can succeed when local schema is already available" True
 
 checklistBackendDefaultsToFilesystem :: IO ()
 checklistBackendDefaultsToFilesystem =
@@ -1600,7 +1607,7 @@ checklistBackendRejectsInvalid =
 
 checklistBackendWiringComposesFilesystem :: IO ()
 checklistBackendWiringComposesFilesystem = withBackendSandbox "checklist-backend-fs-wiring" $ do
-  result <- makeChecklistRepository ChecklistBackendFilesystem Nothing
+  result <- makeChecklistRepository ChecklistBackendFilesystem Nothing Nothing
   case result of
     Left err -> assertFailure ("Expected filesystem checklist backend wiring success, got " ++ err)
     Right repo -> do
@@ -1616,7 +1623,7 @@ checklistBackendWiringComposesFilesystem = withBackendSandbox "checklist-backend
 
 checklistBackendPostgresRequiresDatabaseConfig :: IO ()
 checklistBackendPostgresRequiresDatabaseConfig = do
-  result <- makeChecklistRepository ChecklistBackendPostgres Nothing
+  result <- makeChecklistRepository ChecklistBackendPostgres Nothing Nothing
   case result of
     Left "Configuration database is required when checklistBackend=postgres" ->
       assertBool "Expected missing database config rejection for postgres checklist backend" True
@@ -1632,12 +1639,13 @@ checklistBackendPostgresFailsFastOnStorageValidationFailure = do
         , databaseUser = "foucl"
         , databasePassword = "foucl"
         }
-  result <- makeChecklistRepository ChecklistBackendPostgres (Just dbCfg)
-  case result of
-    Left err | "Postgres checklist storage validation failed:" `isPrefixOf` err ->
-      assertBool "Expected postgres checklist storage validation failure" True
-    Left err -> assertFailure ("Unexpected postgres checklist wiring error: " ++ err)
-    Right _ -> assertBool "Postgres checklist backend wiring can succeed when local schema is already available" True
+  withTestPostgresPoolFromDbConfig dbCfg $ \pool -> do
+    result <- makeChecklistRepository ChecklistBackendPostgres (Just pool) (Just dbCfg)
+    case result of
+      Left err | "Postgres checklist storage validation failed:" `isPrefixOf` err ->
+        assertBool "Expected postgres checklist storage validation failure" True
+      Left err -> assertFailure ("Unexpected postgres checklist wiring error: " ++ err)
+      Right _ -> assertBool "Postgres checklist backend wiring can succeed when local schema is already available" True
 
 startupMigrationDomainsFilesystemOnly :: IO ()
 startupMigrationDomainsFilesystemOnly =
@@ -2618,8 +2626,9 @@ pgRepoRoundTripLifecycle =
       case upResult of
         Left err -> assertFailure ("Expected session migration up success, got " ++ err)
         Right () -> do
+          pool <- mkTestPostgresPool schemaConn
           now <- getCurrentTime
-          let repo = mkPostgresSessionRepository schemaConn
+          let repo = mkPostgresSessionRepository pool schemaConn
               st = SessionState
                 { stateId = "11111111-1111-1111-1111-111111111111"
                 , stateUserId = "pg-user"
@@ -2675,8 +2684,9 @@ pgRepoDuplicateHandleCreateReturnsAlreadyExists =
       case upResult of
         Left err -> assertFailure ("Expected session migration up success, got " ++ err)
         Right () -> do
+          pool <- mkTestPostgresPool schemaConn
           now <- getCurrentTime
-          let repo = mkPostgresSessionRepository schemaConn
+          let repo = mkPostgresSessionRepository pool schemaConn
               st = SessionState
                 { stateId = "33333333-3333-3333-3333-333333333333"
                 , stateUserId = "dup-user"
@@ -2710,7 +2720,8 @@ pgRepoMissingHandleLoadReturnsNotFound =
       case upResult of
         Left err -> assertFailure ("Expected session migration up success, got " ++ err)
         Right () -> do
-          let repo = mkPostgresSessionRepository schemaConn
+          pool <- mkTestPostgresPool schemaConn
+          let repo = mkPostgresSessionRepository pool schemaConn
           result <- runExceptT $ repoLoadSessionHandleBySessionId repo "55555555-5555-5555-5555-555555555555"
           case result of
             Left NotFound -> assertBool "Expected NotFound for missing handle load" True
@@ -2725,8 +2736,9 @@ pgRepoMissingStateUpdateReturnsNotFound =
       case upResult of
         Left err -> assertFailure ("Expected session migration up success, got " ++ err)
         Right () -> do
+          pool <- mkTestPostgresPool schemaConn
           now <- getCurrentTime
-          let repo = mkPostgresSessionRepository schemaConn
+          let repo = mkPostgresSessionRepository pool schemaConn
               st = SessionState
                 { stateId = "66666666-6666-6666-6666-666666666666"
                 , stateUserId = "missing-update-user"
@@ -2749,8 +2761,9 @@ pgRepoDeleteAllBindingsIsIdempotent =
       case upResult of
         Left err -> assertFailure ("Expected session migration up success, got " ++ err)
         Right () -> do
+          pool <- mkTestPostgresPool schemaConn
           now <- getCurrentTime
-          let repo = mkPostgresSessionRepository schemaConn
+          let repo = mkPostgresSessionRepository pool schemaConn
               st = SessionState
                 { stateId = "77777777-7777-7777-7777-777777777777"
                 , stateUserId = "idempotent-user"
@@ -2785,7 +2798,8 @@ pgCalendarRepoRoundTripLifecycle =
       case upResult of
         Left err -> assertFailure ("Expected calendar migration up success, got " ++ err)
         Right () -> do
-          let repo = postgresCalendarRepository schemaConn
+          pool <- mkTestPostgresPool schemaConn
+          let repo = postgresCalendarRepository pool schemaConn
               userId = "pg-calendar-user"
           created <- runExceptT $ repoCreateCalendarItem repo userId sampleAgendaContent
           case created of
@@ -2838,7 +2852,8 @@ pgCalendarRepoTripDurationUpdateIsNoop =
       case upResult of
         Left err -> assertFailure ("Expected calendar migration up success, got " ++ err)
         Right () -> do
-          let repo = postgresCalendarRepository schemaConn
+          pool <- mkTestPostgresPool schemaConn
+          let repo = postgresCalendarRepository pool schemaConn
               userId = "pg-calendar-trip-user"
           created <- runExceptT $ repoCreateCalendarItem repo userId sampleTripContent
           case created of
@@ -2865,7 +2880,8 @@ pgCalendarRepoMissingOperationsReturnNotFound =
       case upResult of
         Left err -> assertFailure ("Expected calendar migration up success, got " ++ err)
         Right () -> do
-          let repo = postgresCalendarRepository schemaConn
+          pool <- mkTestPostgresPool schemaConn
+          let repo = postgresCalendarRepository pool schemaConn
               userId = "pg-calendar-missing-user"
               missingId = "missing-id"
           loadResult <- runExceptT $ repoLoadCalendarItemById repo userId missingId
@@ -2885,7 +2901,8 @@ pgTripSharingRepoRoundTripDeterministic =
       case upResult of
         Left err -> assertFailure ("Expected trip-sharing migration up success, got " ++ err)
         Right () -> do
-          let repo = postgresTripSharingRepository schemaConn
+          pool <- mkTestPostgresPool schemaConn
+          let repo = postgresTripSharingRepository pool schemaConn
           addA <- runExceptT $ repoAddSharedUser repo "alice" "charlie"
           addB <- runExceptT $ repoAddSharedUser repo "alice" "bob"
           addDuplicate <- runExceptT $ repoAddSharedUser repo "alice" "bob"
@@ -2911,7 +2928,8 @@ pgTripSharingRepoSubscriptionsIndependent =
       case upResult of
         Left err -> assertFailure ("Expected trip-sharing migration up success, got " ++ err)
         Right () -> do
-          let repo = postgresTripSharingRepository schemaConn
+          pool <- mkTestPostgresPool schemaConn
+          let repo = postgresTripSharingRepository pool schemaConn
           _ <- runExceptT $ repoAddSharedUser repo "alice" "bob"
           _ <- runExceptT $ repoAddSubscribedUser repo "alice" "dave"
           _ <- runExceptT $ repoAddSubscribedUser repo "alice" "carol"
@@ -2936,7 +2954,8 @@ pgNoteRepoRoundTripLifecycle =
       case upResult of
         Left err -> assertFailure ("Expected note migration up success, got " ++ err)
         Right () -> do
-          let repo = postgresNoteRepository schemaConn
+          pool <- mkTestPostgresPool schemaConn
+          let repo = postgresNoteRepository pool schemaConn
               createdContent = NoteContent { title = Just "pg note title", noteContent = "pg note body" }
               updatedContent = NoteContent { title = Just "pg note title updated", noteContent = "pg note body updated" }
 
@@ -2986,7 +3005,8 @@ pgNoteRepoWrongVersionReturnsNotCurrentVersion =
       case upResult of
         Left err -> assertFailure ("Expected note migration up success, got " ++ err)
         Right () -> do
-          let repo = postgresNoteRepository schemaConn
+          pool <- mkTestPostgresPool schemaConn
+          let repo = postgresNoteRepository pool schemaConn
               createdContent = NoteContent { title = Just "pg note stale", noteContent = "pg stale body" }
               staleContent = NoteContent { title = Just "pg note stale updated", noteContent = "pg stale body updated" }
           createResult <- runExceptT $ repoCreateItem repo createdContent
@@ -3009,7 +3029,8 @@ pgNoteRepoDeleteMissingIsIdempotent =
       case upResult of
         Left err -> assertFailure ("Expected note migration up success, got " ++ err)
         Right () -> do
-          let repo = postgresNoteRepository schemaConn
+          pool <- mkTestPostgresPool schemaConn
+          let repo = postgresNoteRepository pool schemaConn
           deleteResult <- runExceptT $ repoDeleteItemById repo "missing-note-id"
           case deleteResult of
             Left err -> assertFailure ("Expected missing note delete to succeed, got " ++ show err)
@@ -3023,7 +3044,8 @@ pgChecklistRepoRoundTripLifecycle =
       case upResult of
         Left err -> assertFailure ("Expected checklist migration up success, got " ++ err)
         Right () -> do
-          let repo = postgresChecklistRepository schemaConn
+          pool <- mkTestPostgresPool schemaConn
+          let repo = postgresChecklistRepository pool schemaConn
               createdContent = ChecklistContent { name = "pg checklist", items = [ChecklistItem {label = "first", checked = False}] }
               updatedContent = ChecklistContent { name = "pg checklist updated", items = [ChecklistItem {label = "first", checked = True}, ChecklistItem {label = "second", checked = False}] }
 
@@ -3073,7 +3095,8 @@ pgChecklistRepoWrongVersionReturnsNotCurrentVersion =
       case upResult of
         Left err -> assertFailure ("Expected checklist migration up success, got " ++ err)
         Right () -> do
-          let repo = postgresChecklistRepository schemaConn
+          pool <- mkTestPostgresPool schemaConn
+          let repo = postgresChecklistRepository pool schemaConn
               createdContent = ChecklistContent { name = "pg checklist stale", items = [ChecklistItem {label = "first", checked = False}] }
               staleContent = ChecklistContent { name = "pg checklist stale updated", items = [ChecklistItem {label = "first", checked = True}] }
           createResult <- runExceptT $ repoCreateItem repo createdContent
@@ -3096,11 +3119,35 @@ pgChecklistRepoDeleteMissingIsIdempotent =
       case upResult of
         Left err -> assertFailure ("Expected checklist migration up success, got " ++ err)
         Right () -> do
-          let repo = postgresChecklistRepository schemaConn
+          pool <- mkTestPostgresPool schemaConn
+          let repo = postgresChecklistRepository pool schemaConn
           deleteResult <- runExceptT $ repoDeleteItemById repo "missing-checklist-id"
           case deleteResult of
             Left err -> assertFailure ("Expected missing checklist delete to succeed, got " ++ show err)
             Right () -> assertBool "Expected missing checklist delete to remain idempotent" True
+
+withTestPostgresPoolFromDbConfig :: DatabaseConfig -> (Pool Connection -> IO a) -> IO a
+withTestPostgresPoolFromDbConfig dbCfg action =
+  withTestPostgresPool (dbConfigToConnectionString dbCfg) action
+
+withTestPostgresPool :: String -> (Pool Connection -> IO a) -> IO a
+withTestPostgresPool connectionString action = do
+  pool <- createPool (connectPostgreSQL (BS8.pack connectionString)) close 1 60 4
+  action pool `finally` destroyAllResources pool
+
+mkTestPostgresPool :: String -> IO (Pool Connection)
+mkTestPostgresPool connectionString =
+  createPool (connectPostgreSQL (BS8.pack connectionString)) close 1 60 4
+
+dbConfigToConnectionString :: DatabaseConfig -> String
+dbConfigToConnectionString dbCfg =
+  unwords
+    [ "host=" ++ databaseHost dbCfg
+    , "port=" ++ show (databasePort dbCfg)
+    , "dbname=" ++ databaseName dbCfg
+    , "user=" ++ databaseUser dbCfg
+    , "password=" ++ databasePassword dbCfg
+    ]
 
 withIsolatedPostgresSchemaConn :: PostgresTestContext -> (String -> IO ()) -> IO ()
 withIsolatedPostgresSchemaConn ctx action = do

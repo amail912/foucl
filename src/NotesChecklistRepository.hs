@@ -30,6 +30,7 @@ import Data.Aeson (encode, eitherDecode)
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy.Char8 as BL8
 import Data.Int (Int64)
+import Data.Pool (Pool)
 import Data.String (fromString)
 import Data.UUID (toString)
 import Data.UUID.V4 (nextRandom)
@@ -85,11 +86,11 @@ filesystemChecklistRepository config =
     , repoUpdateItem = modifyItem config
     }
 
-postgresNoteRepository :: String -> NoteRepository
-postgresNoteRepository connectionString = postgresNotesChecklistRepository connectionString "note_items"
+postgresNoteRepository :: Pool Connection -> String -> NoteRepository
+postgresNoteRepository pool connectionString = postgresNotesChecklistRepository pool connectionString "note_items"
 
-postgresChecklistRepository :: String -> ChecklistRepository
-postgresChecklistRepository connectionString = postgresNotesChecklistRepository connectionString "checklist_items"
+postgresChecklistRepository :: Pool Connection -> String -> ChecklistRepository
+postgresChecklistRepository pool connectionString = postgresNotesChecklistRepository pool connectionString "checklist_items"
 
 verifyPostgresNoteStorage :: String -> IO (Either String ())
 verifyPostgresNoteStorage connectionString = verifyPostgresStorageTable connectionString "note_items"
@@ -112,8 +113,8 @@ listItemsIgnoringParsingFailures loadItems = do
           pure acc
         Right item -> pure (item : acc)
 
-postgresNotesChecklistRepository :: Content a => String -> String -> NotesChecklistRepository a
-postgresNotesChecklistRepository connectionString tableName =
+postgresNotesChecklistRepository :: Content a => Pool Connection -> String -> String -> NotesChecklistRepository a
+postgresNotesChecklistRepository _ connectionString tableName =
   NotesChecklistRepository
     { repoCreateItem = pgCreateItem connectionString tableName
     , repoListItems = pgListItems connectionString tableName

@@ -12,6 +12,7 @@ import Control.Monad.Except (ExceptT, runExceptT, throwError)
 import Control.Monad.IO.Class (liftIO)
 import Data.Int (Int64)
 import Data.List (sort)
+import Data.Pool (Pool)
 import qualified Data.ByteString.Char8 as BS8
 import Database.PostgreSQL.Simple
   ( Connection
@@ -63,8 +64,8 @@ filesystemTripSharingRepository shareConfig subscriptionConfig =
     , repoDeleteSubscribedUser = fsDeleteSubscribedUser subscriptionConfig
     }
 
-postgresTripSharingRepository :: String -> TripSharingRepository
-postgresTripSharingRepository connectionString =
+postgresTripSharingRepository :: Pool Connection -> String -> TripSharingRepository
+postgresTripSharingRepository _ connectionString =
   TripSharingRepository
     { repoListSharedUsers = pgListSharedUsers connectionString
     , repoAddSharedUser = pgAddSharedUser connectionString

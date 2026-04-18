@@ -106,7 +106,7 @@ _wait-server:
 			echo "Server is ready"; \
 			exit 0; \
 		fi; \
-		sleep 0.25; \
+		sleep 1; \
 	done; \
 	echo "Server did not become ready on localhost:8081" >&2; \
 	exit 1

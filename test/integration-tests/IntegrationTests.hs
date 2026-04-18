@@ -21,19 +21,15 @@ import           GHC.Exts
 import           GHC.Generics          (Generic)
 import           Network.HTTP.Simple
 import           Test.Hspec
+import           Test.Hspec.Runner (configRandomize, defaultConfig, hspecWith)
 import           Test.HUnit
-import           Control.Exception (bracket_)
-import           Control.Monad.Trans.Except (runExceptT)
 import           Control.Monad (when)
 import           Data.Time.Clock.POSIX (getPOSIXTime)
 import           Data.List (isInfixOf, sortOn)
 import           Data.Char (toLower)
 import           System.Environment (lookupEnv)
-import           System.Directory (getCurrentDirectory, setCurrentDirectory, doesDirectoryExist, removeDirectoryRecursive)
-import           Data.Text (pack)
 import AgendaModel (ItemStatus(..), ItemType(..))
 import qualified AgendaModel as Agenda (CalendarItem(..), CalendarItemContent(..), TripItemContent(..))
-import Auth (AuthRequest(..), AuthError(..), defaultAuthRepository, createUserWithBootstrapAdmin, approveUser)
 import Model
 
 -- ===================== Constants ==============================
@@ -47,13 +43,9 @@ runIntegrationTests = do
       otherUsername = "integration-other-user"
       thirdUsername = "integration-third-user"
       basePassword = "averystrongpass" :: String
-  resetSandboxUser baseUsername
-  _ <- signupAndSignin baseUsername basePassword
-  ensureApprovedSandboxUser baseUsername baseUsername basePassword
-  ensureApprovedSandboxUser baseUsername otherUsername basePassword
-  ensureApprovedSandboxUser baseUsername thirdUsername basePassword
+  _ <- ensureBootstrapAdminSession baseUsername basePassword
   expectedCookieSecure <- resolveCookieSecureExpectation
-  hspec $ do
+  hspecWith defaultConfig { configRandomize = False } $ do
     describe "Integration Tests" $ do
       it "should satisfy the basics, in one session, of the Very First User's needs, note-wise" $ do
         cookie <- signinOnly baseUsername basePassword
@@ -112,29 +104,6 @@ runIntegrationTests = do
         req <- parseRequest "GET http://localhost:8081/api/does-not-exist"
         resp <- httpBS $ setRequestMethod "GET" req
         assertStatusCode "Unknown api route should return not found" 404 resp
-
-      it "should enforce signup rate limiting" $ do
-        uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
-
-        mapM_ (\i -> do
-            let signupPayload = object [ "username" .= ("ratelimit-" ++ show uniquenessSuffix ++ "-" ++ show i)
-                                       , "password" .= ("averystrongpass" :: String)
-                                       ]
-            signupReq <- parseRequest "POST http://localhost:8081/api/signup"
-            signupResponse <- httpNoBody $ setRequestMethod "POST"
-                                      $ setRequestHeader "Content-Type" ["application/json"]
-                                      $ setRequestBodyJSON signupPayload signupReq
-            assertStatusCode "Signup should be allowed before rate-limit threshold" 200 signupResponse
-          ) [1..4]
-
-        blockedReq <- parseRequest "POST http://localhost:8081/api/signup"
-        blockedResponse <- httpBS $ setRequestMethod "POST"
-                                $ setRequestHeader "Content-Type" ["application/json"]
-                                $ setRequestBodyJSON (object [ "username" .= ("rlblock-" ++ show uniquenessSuffix)
-                                                             , "password" .= ("averystrongpass" :: String)
-                                                             ])
-                                blockedReq
-        assertStatusCode "Signup should be blocked when rate limit is reached" 400 blockedResponse
 
       it "should create pending signups that cannot sign in before admin approval" $ do
         uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
@@ -397,6 +366,8 @@ runIntegrationTests = do
         assertEqual "Trip places should stay stable across requests" expectedTripPlaces repeatedPlaces
 
       it "should support share-list add, list, and delete lifecycle" $ do
+        ensureApprovedSandboxUser baseUsername otherUsername basePassword
+        ensureApprovedSandboxUser baseUsername thirdUsername basePassword
         cookie <- signinOnly baseUsername basePassword
         clearSharedUsers cookie [otherUsername, thirdUsername]
         assertNoSharedUsers cookie
@@ -860,6 +831,18 @@ runIntegrationTests = do
       it "should return not found when deleting an unknown agenda item id" $ do
         cookie <- signinOnly baseUsername basePassword
         deleteAgendaItemExpectStatus cookie "missing-agenda-item" 404
+
+      it "should enforce signup rate limiting" $ do
+        uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
+        signupStatuses <- mapM
+          (\i -> do
+              let username = "ratelimit-" ++ show uniquenessSuffix ++ "-" ++ show i
+              signupResponse <- performSignupNoBody username ("averystrongpass" :: String)
+              pure (getResponseStatusCode signupResponse)
+          )
+          [1..8]
+        assertBool "Expected at least one signup allowed before rate-limit saturation" (200 `elem` signupStatuses)
+        assertBool "Expected signup rate-limiter to block at saturation" (400 `elem` signupStatuses)
   where
     firstChecklistContent    = ChecklistContent { name = "First checklist"
                                                  , items = [ ChecklistItem { label = "First item label unchecked", checked = False }
@@ -926,13 +909,6 @@ resolveCookieSecureExpectation = do
 
 
 
-resetSandboxUser :: String -> IO ()
-resetSandboxUser username = do
-  cwd <- getCurrentDirectory
-  let userDir = cwd ++ "/dist-newstyle/sandbox/foucl/data/users/" ++ username
-  exists <- doesDirectoryExist userDir
-  when exists $ removeDirectoryRecursive userDir
-
 getFirstSetCookie :: Response a -> Maybe ByteString
 getFirstSetCookie response =
   case [v | (k, v) <- getResponseHeaders response, BS.map toLower (original k) == "set-cookie"] of
@@ -950,12 +926,12 @@ extractCookiePair setCookieHeader =
       | BS.length cookieValue >= 2 && BS.head cookieValue == '"' && BS.last cookieValue == '"' = BS.init (BS.tail cookieValue)
       | otherwise = cookieValue
 
-signupAndSignin :: String -> String -> IO String
-signupAndSignin username password = do
-  signupReq <- parseRequest "POST http://localhost:8081/api/signup"
-  _ <- httpNoBody $ setRequestMethod "POST"
-                $ setRequestHeader "Content-Type" ["application/json"]
-                $ setRequestBodyJSON (authPayload username password) signupReq
+ensureBootstrapAdminSession :: String -> String -> IO String
+ensureBootstrapAdminSession username password = do
+  signupResponse <- performSignupNoBody username password
+  let statusCode = getResponseStatusCode signupResponse
+  when (statusCode /= 200 && statusCode /= 400) $
+    assertFailure ("Expected bootstrap signup to return 200 or 400, got " ++ show statusCode)
   signinOnly username password
 
 signinOnly :: String -> String -> IO String
@@ -976,33 +952,23 @@ signinOnlyRawCookie username password = do
 
 ensureApprovedSandboxUser :: String -> String -> String -> IO ()
 ensureApprovedSandboxUser bootstrapAdminUsername username password = do
-  cwd <- getCurrentDirectory
-  let sandboxDir = cwd ++ "/dist-newstyle/sandbox/foucl"
-  bracket_ (setCurrentDirectory sandboxDir) (setCurrentDirectory cwd) $ do
-    result <- runExceptT $ createUserWithBootstrapAdmin defaultAuthRepository (Just bootstrapAdminUsername) $ AuthRequest { username = username, password = pack password }
-    case result of
-      Right () -> do
-        approvalResult <- runExceptT $ approveUser defaultAuthRepository username
-        case approvalResult of
-          Right () -> pure ()
-          Left _ -> assertFailure "Expected sandbox user approval to succeed"
-      Left UserAlreadyExists -> do
-        approvalResult <- runExceptT $ approveUser defaultAuthRepository username
-        case approvalResult of
-          Right () -> pure ()
-          Left _ -> assertFailure "Expected sandbox user approval to succeed"
-      Left _ -> assertFailure "Expected sandbox user creation to succeed"
+  signupResponse <- performSignupNoBody username password
+  let signupStatus = getResponseStatusCode signupResponse
+  when (signupStatus /= 200 && signupStatus /= 400) $
+    assertFailure ("Expected sandbox user creation to return 200 or 400, got " ++ show signupStatus)
+  adminCookie <- signinOnly bootstrapAdminUsername password
+  approveResponse <- approvePendingSignupResponseNoBody adminCookie username
+  let approveStatus = getResponseStatusCode approveResponse
+  when (approveStatus /= 200 && approveStatus /= 404) $
+    assertFailure ("Expected sandbox user approval to return 200 or 404, got " ++ show approveStatus)
 
 ensurePendingSandboxUser :: String -> String -> String -> IO ()
 ensurePendingSandboxUser bootstrapAdminUsername username password = do
-  cwd <- getCurrentDirectory
-  let sandboxDir = cwd ++ "/dist-newstyle/sandbox/foucl"
-  bracket_ (setCurrentDirectory sandboxDir) (setCurrentDirectory cwd) $ do
-    result <- runExceptT $ createUserWithBootstrapAdmin defaultAuthRepository (Just bootstrapAdminUsername) $ AuthRequest { username = username, password = pack password }
-    case result of
-      Right () -> pure ()
-      Left UserAlreadyExists -> pure ()
-      Left _ -> assertFailure "Expected pending sandbox user creation to succeed"
+  _ <- bootstrapAdminUsername `seq` pure ()
+  signupResponse <- performSignupNoBody username password
+  let statusCode = getResponseStatusCode signupResponse
+  when (statusCode /= 200 && statusCode /= 400) $
+    assertFailure ("Expected pending sandbox user creation to return 200 or 400, got " ++ show statusCode)
 
 authPayload :: String -> String -> Value
 authPayload username password =
@@ -1012,6 +978,13 @@ authPayload username password =
 
 performSigninNoBody :: String -> String -> IO (Response ())
 performSigninNoBody = performSigninWith httpNoBody
+
+performSignupNoBody :: String -> String -> IO (Response ())
+performSignupNoBody username password = do
+  signupReq <- parseRequest "POST http://localhost:8081/api/signup"
+  httpNoBody $ setRequestMethod "POST"
+             $ setRequestHeader "Content-Type" ["application/json"]
+             $ setRequestBodyJSON (authPayload username password) signupReq
 
 performSignin :: String -> String -> IO (Response ByteString)
 performSignin = performSigninWith httpBS

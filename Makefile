@@ -1,4 +1,4 @@
-.PHONY: help lint build test ci start-sandbox restart-sandbox stop-sandbox integration-test integration-test-postgres integration-test-auth-postgres _prepare-sandbox _wait-server _prepare-postgres-test-db _write-postgres-config _start-postgres-test-db _stop-postgres-test-db
+.PHONY: help lint build test ci start-sandbox restart-sandbox stop-sandbox integration-test storage-migration-tests _prepare-sandbox _wait-server _prepare-postgres-test-db _write-postgres-config _start-postgres-test-db _stop-postgres-test-db
 
 SHELL := /bin/bash
 
@@ -25,8 +25,8 @@ help:
 	@echo "  make start-sandbox    Build and start sandbox server"
 	@echo "  make restart-sandbox  Restart sandbox server"
 	@echo "  make stop-sandbox     Stop sandbox server"
-	@echo "  make integration-test Run integration tests against sandbox server"
-	@echo "  make integration-test-postgres Run postgres parity integration tests (auth + session + calendar + trip-sharing + notes + checklists) against postgres backends"
+	@echo "  make integration-test Run integration tests against postgres-backed sandbox server"
+	@echo "  make storage-migration-tests Run postgres migration/storage integration tests"
 
 lint:
 	./scripts/lint.sh
@@ -135,11 +135,14 @@ stop-sandbox:
 integration-test:
 	@set -euo pipefail; \
 	$(MAKE) --no-print-directory _prepare-sandbox; \
-	trap '$(DAEMON_SCRIPT) stop --pidfile "$(SANDBOX_PIDFILE)" >/dev/null 2>&1 || true' EXIT INT TERM; \
+	$(MAKE) --no-print-directory _start-postgres-test-db; \
+	$(MAKE) --no-print-directory _prepare-postgres-test-db; \
+	$(MAKE) --no-print-directory _write-postgres-config; \
+	trap '$(DAEMON_SCRIPT) stop --pidfile "$(SANDBOX_PIDFILE)" >/dev/null 2>&1 || true; $(MAKE) --no-print-directory _stop-postgres-test-db >/dev/null 2>&1 || true' EXIT INT TERM; \
 	export FOUCL_SESSION_COOKIE_SECURE="$${FOUCL_SESSION_COOKIE_SECURE:-false}"; \
 	( \
 		export FOUCL_SESSION_SECRET="$${FOUCL_SESSION_SECRET:-dev-only-session-secret}"; \
-		export FOUCL_CONFIG_FILE="$${FOUCL_CONFIG_FILE:-$(FOUCL_CONFIG_FILE_DEFAULT)}"; \
+		export FOUCL_CONFIG_FILE="$(SANDBOX_AUTH_PG_CONFIG)"; \
 		export FOUCL_SESSION_COOKIE_SECURE="$$FOUCL_SESSION_COOKIE_SECURE"; \
 		cd "$(SANDBOX_DIR)"; \
 		$(DAEMON_SCRIPT) start --bin "$(abspath $(SANDBOX_EXE))" --pidfile "$(abspath $(SANDBOX_PIDFILE))"; \
@@ -147,7 +150,7 @@ integration-test:
 	$(MAKE) --no-print-directory _wait-server; \
 	cabal test foucl-integration-tests
 
-integration-test-postgres:
+storage-migration-tests:
 	@set -euo pipefail; \
 	$(MAKE) --no-print-directory _prepare-sandbox; \
 	$(MAKE) --no-print-directory _start-postgres-test-db; \
@@ -164,5 +167,3 @@ integration-test-postgres:
 	); \
 	$(MAKE) --no-print-directory _wait-server; \
 	cabal test foucl-integration-postgres-tests
-
-integration-test-auth-postgres: integration-test-postgres

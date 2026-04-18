@@ -79,7 +79,6 @@ Move persistence to Postgres incrementally, with per-domain cutover control, and
 
 ### To Refine
 
-- [004 Domain Switching And Bootstrap Import](to-refine/004-domain-switching-and-bootstrap-import.md)
 - [005 Remove Filesystem Backend Per Migrated Domain](to-refine/005-remove-fs-backend-per-domain.md)
 
 ### Canceled
@@ -92,3 +91,4 @@ Move persistence to Postgres incrementally, with per-domain cutover control, and
 - [010 Auth Session Startup Import](canceled/010-auth-session-startup-import.md) - Canceled because it mixed auth and session startup import execution/verification; replaced by 023 and 024.
 - [002 Calendar And Trip Sharing Postgres Cutover](canceled/002-calendar-tripsharing-postgres-cutover.md) - Canceled because it mixed contracts, wiring, schema, adapters, parity, and startup import into one oversized story; replaced by 025, 026, 027, 028, 029, 030, and 031.
 - [003 Notes And Checklists Postgres Cutover](canceled/003-notes-checklists-postgres-cutover.md) - Canceled because it mixed contracts, wiring, filesystem parity, schema, adapters, parity, and startup import into one oversized story; replaced by 032, 033, 034, 035, 036, 037, and 038.
+- [004 Domain Switching And Bootstrap Import](canceled/004-domain-switching-and-bootstrap-import.md) - Canceled as superseded because it mixed cross-domain backend switching and startup import concerns; replaced by 012, 018, 026, 033, 023, 024, 031, 038, 039, 040, 041, and 042.

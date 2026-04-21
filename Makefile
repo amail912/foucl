@@ -114,6 +114,7 @@ _wait-server:
 start-sandbox:
 	@set -euo pipefail; \
 	$(MAKE) --no-print-directory _prepare-sandbox; \
+	$(MAKE) --no-print-directory _start-postgres-test-db; \
 	$(DAEMON_SCRIPT) stop --pidfile "$(SANDBOX_PIDFILE)" >/dev/null 2>&1 || true; \
 	( \
 		export FOUCL_SESSION_SECRET="$${FOUCL_SESSION_SECRET:-dev-only-session-secret}"; \

@@ -49,7 +49,7 @@ import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Lazy.Char8 as BL8
 import qualified Control.Exception as Ex
-import Data.Pool (Pool, createPool)
+import Data.Pool (Pool, createPool, withResource)
 import Happstack.Server (FilterMonad, Response, ServerPartT, RqBody, takeRequestBody, unBody, rqBody, decodeBody, askRq, rqPaths, defaultBodyPolicy, nullDir, path, serveFileFrom, guessContentTypeM, mimeTypes, uriRest, nullConf, simpleHTTP, toResponse, method, ok, internalServerError, notFound, dir, Method(GET, POST, DELETE, PUT), Conf(..), addCookie, mkCookie, CookieLife(Session, Expired), getHeaderM, unauthorized, requestEntityTooLarge, look, setResponseCode)
 import qualified Happstack.Server as HServer
 import Happstack.Server.Internal.Cookie (Cookie(..), SameSite(..))
@@ -84,6 +84,8 @@ import Data.Time.LocalTime (LocalTime)
 import Data.Time.Format (defaultTimeLocale, parseTimeM)
 import Data.Time.Format.ISO8601 (iso8601ParseM)
 import Text.Printf (printf)
+import Data.UUID (toString)
+import Data.UUID.V4 (nextRandom)
 import GHC.Generics (Generic)
 import Data.ByteString.Lazy.Char8 (writeFile)
 import Filesystem.Path.CurrentOS    (commonPrefix, encodeString, decodeString, collapse, append)
@@ -217,9 +219,8 @@ data ChecklistBackend
   | ChecklistBackendPostgres
   deriving (Eq, Show)
 
-newtype AppContext = AppContext
-  { sessionPrincipal :: SessionPrincipal
-  }
+data AppContext = AppContext
+  { sessionPrincipal :: SessionPrincipal }
 
 newtype TripPlace = TripPlace
   { tripPlaceName :: String
@@ -684,6 +685,7 @@ runApp = do
                                     putStrLn ("[startup] trip-sharing backend wiring ready: " ++ renderTripSharingBackend selectedTripSharingBackend)
                                     calendarTripSharingImportResult <-
                                       runCalendarTripSharingStartupImportIfNeeded
+                                        sharedPool
                                         selectedCalendarBackend
                                         selectedTripSharingBackend
                                         (databaseConfig appConfig)
@@ -711,6 +713,7 @@ runApp = do
                                                 putStrLn ("[startup] checklist backend wiring ready: " ++ renderChecklistBackend selectedChecklistBackend)
                                                 notesChecklistImportResult <-
                                                   runNotesChecklistStartupImportIfNeeded
+                                                    sharedPool
                                                     selectedNoteBackend
                                                     selectedChecklistBackend
                                                     (databaseConfig appConfig)
@@ -721,19 +724,12 @@ runApp = do
                                                     exitFailure
                                                   Right () ->
                                                     simpleHTTP nullConf { port = 8081 } $ do
-                                                        log "Incoming request"
                                                         rq <- askRq
-                                                        let requestPath = "/" ++ intercalate "/" (rqPaths rq)
-                                                        startedAt <- liftIO getCurrentTime
                                                         response <- msum [ homePage
                                                                          , apiController authRepo calendarRepo tripSharingRepo noteRepo checklistRepo signupRateLimitState tmpDir appConfig sessionStore
                                                                          , serveStaticResource
                                                                          , mzero
                                                                          ]
-                                                        endedAt <- liftIO getCurrentTime
-                                                        let elapsedMs :: Double
-                                                            elapsedMs = realToFrac (diffUTCTime endedAt startedAt) * 1000
-                                                        log ("[request-timing] path=" ++ requestPath ++ " duration_ms=" ++ printf "%.3f" elapsedMs)
                                                         log "=========================END REQUEST====================\n"
                                                         pure response
 
@@ -925,26 +921,24 @@ makeAuthRepository AuthBackendPostgres mPool mDatabaseCfg =
   case mDatabaseCfg of
     Nothing -> pure (Left "Configuration database is required when auth.authBackend=postgres")
     Just dbCfg -> do
-      let connectionString = renderPostgresConnectionString dbCfg
       case requirePostgresPool "auth backend" mPool of
         Left err -> pure (Left err)
         Right pool -> do
-          validationResult <- AuthRepository.verifyPostgresAuthStorage connectionString
+          validationResult <- AuthRepository.verifyPostgresAuthStorage pool
           case validationResult of
             Left err -> pure (Left ("Postgres auth storage validation failed: " ++ err))
-            Right () -> pure (Right (AuthRepository.postgresAuthRepository pool connectionString))
+            Right () -> pure (Right (AuthRepository.postgresAuthRepository pool))
 
 runAuthStartupImportIfNeeded :: AuthBackend -> Maybe (Pool Connection) -> Maybe DatabaseConfig -> IO (Either String ())
 runAuthStartupImportIfNeeded AuthBackendFilesystem _ _ = pure (Right ())
 runAuthStartupImportIfNeeded AuthBackendPostgres _ Nothing =
   pure (Left "Configuration database is required when auth.authBackend=postgres")
 runAuthStartupImportIfNeeded AuthBackendPostgres mPool (Just dbCfg) = do
-  let connectionString = renderPostgresConnectionString dbCfg
-      filesystemRepo = defaultAuthRepository
+  let filesystemRepo = defaultAuthRepository
   case requirePostgresPool "auth startup import" mPool of
     Left err -> pure (Left err)
     Right pool -> do
-      let postgresRepo = AuthRepository.postgresAuthRepository pool connectionString
+      let postgresRepo = AuthRepository.postgresAuthRepository pool
       filesystemUsersResult <- runExceptT (AuthRepository.repoListUsers filesystemRepo)
       filesystemUsers <-
         case filesystemUsersResult of
@@ -994,17 +988,16 @@ runSessionStartupImportIfNeeded SessionBackendFilesystem _ _ _ = pure (Right ())
 runSessionStartupImportIfNeeded SessionBackendPostgres _ Nothing _ =
   pure (Left "Configuration database is required when session.sessionBackend=postgres")
 runSessionStartupImportIfNeeded SessionBackendPostgres mPool (Just dbCfg) cd = do
-  let connectionString = renderPostgresConnectionString dbCfg
-      sessionBaseDir = cd </> "data" </> "sessions"
+  let sessionBaseDir = cd </> "data" </> "sessions"
   case requirePostgresPool "session startup import" mPool of
     Left err -> pure (Left err)
     Right pool -> do
-      let postgresRepo = mkPostgresSessionRepository pool connectionString
+      let postgresRepo = mkPostgresSessionRepository pool
       filesystemSourceResult <- loadFilesystemSessionImportSource sessionBaseDir
       case filesystemSourceResult of
         Left err -> pure (Left err)
         Right (fsStates, fsHandles, fsBindings) -> do
-          postgresSnapshotResult <- loadPostgresSessionImportSnapshot connectionString
+          postgresSnapshotResult <- loadPostgresSessionImportSnapshot pool
           case postgresSnapshotResult of
             Left err -> pure (Left err)
             Right (pgStates, pgHandles, pgBindings) -> do
@@ -1165,16 +1158,12 @@ loadFilesystemSessionImportSource baseDir = do
                 Left err -> pure (Left ("Session startup import failed while reading filesystem user bindings: " ++ err))
                 Right bindings -> pure (Right (states, handles, bindings))
 
-loadPostgresSessionImportSnapshot :: String -> IO (Either String ([SessionState], [SessionHandle], [(String, UserStateBinding)]))
-loadPostgresSessionImportSnapshot connectionString = do
-  connResult <- Ex.try (connectPostgreSQL (BS8.pack connectionString)) :: IO (Either Ex.SomeException Connection)
-  case connResult of
-    Left err -> pure (Left ("Session startup import failed while connecting to Postgres: " ++ show err))
-    Right conn -> do
+loadPostgresSessionImportSnapshot :: Pool Connection -> IO (Either String ([SessionState], [SessionHandle], [(String, UserStateBinding)]))
+loadPostgresSessionImportSnapshot pool = do
+  snapshotResult <- Ex.try $ withResource pool $ \conn -> do
       statesResult <- timedTry "SELECT session_states-for-startup-import" (query_ conn "SELECT state_id::text, user_id, created_at, expires_at, idle_expires_at, revoked_at FROM session_states" :: IO [(String, String, UTCTime, UTCTime, UTCTime, Maybe UTCTime)])
       handlesResult <- timedTry "SELECT session_handles-for-startup-import" (query_ conn "SELECT session_id::text, state_id::text, issued_at, revoked_at FROM session_handles" :: IO [(String, String, UTCTime, Maybe UTCTime)])
       bindingsResult <- timedTry "SELECT session_user_bindings-for-startup-import" (query_ conn "SELECT user_id, state_id::text FROM session_user_bindings" :: IO [(String, String)])
-      _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
       case statesResult of
         Left err -> pure (Left ("Session startup import failed while reading Postgres states: " ++ show (err :: Ex.SomeException)))
         Right stateRows ->
@@ -1191,6 +1180,9 @@ loadPostgresSessionImportSnapshot connectionString = do
                         , map (second UserStateBinding) bindingRows
                         )
                     )
+  case snapshotResult of
+    Left err -> pure (Left ("Session startup import failed while connecting to Postgres: " ++ show (err :: Ex.SomeException)))
+    Right value -> pure value
 
 decodeJsonDirectory :: FromJSON a => FilePath -> IO (Either String [a])
 decodeJsonDirectory dirPath = do
@@ -1232,150 +1224,145 @@ decodeSessionBindingsDirectory dirPath = do
             Just parsed -> pure (Right ((userId, parsed) : acc))
 
 runCalendarTripSharingStartupImportIfNeeded
-  :: CalendarBackend
+  :: Maybe (Pool Connection)
+  -> CalendarBackend
   -> TripSharingBackend
   -> Maybe DatabaseConfig
   -> FilePath
   -> IO (Either String ())
-runCalendarTripSharingStartupImportIfNeeded calendarMode tripSharingMode _ _
+runCalendarTripSharingStartupImportIfNeeded _ calendarMode tripSharingMode _ _
   | calendarMode == CalendarBackendFilesystem
       && tripSharingMode == TripSharingBackendFilesystem =
       pure (Right ())
-runCalendarTripSharingStartupImportIfNeeded CalendarBackendPostgres _ Nothing _ =
+runCalendarTripSharingStartupImportIfNeeded _ CalendarBackendPostgres _ Nothing _ =
   pure (Left "Configuration database is required when calendarBackend=postgres")
-runCalendarTripSharingStartupImportIfNeeded _ TripSharingBackendPostgres Nothing _ =
+runCalendarTripSharingStartupImportIfNeeded _ _ TripSharingBackendPostgres Nothing _ =
   pure (Left "Configuration database is required when tripSharingBackend=postgres")
-runCalendarTripSharingStartupImportIfNeeded calendarMode tripSharingMode (Just dbCfg) cd = do
+runCalendarTripSharingStartupImportIfNeeded mPool calendarMode tripSharingMode (Just dbCfg) cd = do
   let connectionString = renderPostgresConnectionString dbCfg
-  calendarResult <-
-    case calendarMode of
-      CalendarBackendFilesystem -> pure (Right ())
-      CalendarBackendPostgres -> runCalendarStartupImport connectionString cd
-  case calendarResult of
+  case requirePostgresPool "calendar/trip-sharing startup import" mPool of
     Left err -> pure (Left err)
-    Right () ->
-      case tripSharingMode of
-        TripSharingBackendFilesystem -> pure (Right ())
-        TripSharingBackendPostgres -> runTripSharingStartupImport connectionString cd
+    Right pool -> do
+      calendarResult <-
+        case calendarMode of
+          CalendarBackendFilesystem -> pure (Right ())
+          CalendarBackendPostgres -> runCalendarStartupImport pool cd
+      case calendarResult of
+        Left err -> pure (Left err)
+        Right () ->
+          case tripSharingMode of
+            TripSharingBackendFilesystem -> pure (Right ())
+            TripSharingBackendPostgres -> runTripSharingStartupImport pool cd
 
 runNotesChecklistStartupImportIfNeeded
-  :: NoteBackend
+  :: Maybe (Pool Connection)
+  -> NoteBackend
   -> ChecklistBackend
   -> Maybe DatabaseConfig
   -> FilePath
   -> IO (Either String ())
-runNotesChecklistStartupImportIfNeeded noteMode checklistMode _ _
+runNotesChecklistStartupImportIfNeeded _ noteMode checklistMode _ _
   | noteMode == NoteBackendFilesystem
       && checklistMode == ChecklistBackendFilesystem =
       pure (Right ())
-runNotesChecklistStartupImportIfNeeded NoteBackendPostgres _ Nothing _ =
+runNotesChecklistStartupImportIfNeeded _ NoteBackendPostgres _ Nothing _ =
   pure (Left "Configuration database is required when noteBackend=postgres")
-runNotesChecklistStartupImportIfNeeded _ ChecklistBackendPostgres Nothing _ =
+runNotesChecklistStartupImportIfNeeded _ _ ChecklistBackendPostgres Nothing _ =
   pure (Left "Configuration database is required when checklistBackend=postgres")
-runNotesChecklistStartupImportIfNeeded noteMode checklistMode (Just dbCfg) cd = do
-  let connectionString = renderPostgresConnectionString dbCfg
-  noteResult <-
-    case noteMode of
-      NoteBackendFilesystem -> pure (Right ())
-      NoteBackendPostgres -> runNoteStartupImport connectionString cd
-  case noteResult of
+runNotesChecklistStartupImportIfNeeded mPool noteMode checklistMode (Just dbCfg) cd = do
+  case requirePostgresPool "notes/checklist startup import" mPool of
     Left err -> pure (Left err)
-    Right () ->
-      case checklistMode of
-        ChecklistBackendFilesystem -> pure (Right ())
-        ChecklistBackendPostgres -> runChecklistStartupImport connectionString cd
+    Right pool -> do
+      noteResult <-
+        case noteMode of
+          NoteBackendFilesystem -> pure (Right ())
+          NoteBackendPostgres -> runNoteStartupImport pool cd
+      case noteResult of
+        Left err -> pure (Left err)
+        Right () ->
+          case checklistMode of
+            ChecklistBackendFilesystem -> pure (Right ())
+            ChecklistBackendPostgres -> runChecklistStartupImport pool cd
 
-runNoteStartupImport :: String -> FilePath -> IO (Either String ())
-runNoteStartupImport connectionString cd = do
+runNoteStartupImport :: Pool Connection -> FilePath -> IO (Either String ())
+runNoteStartupImport pool cd = do
   let notesBaseDir = cd </> "data" </> "note"
   filesystemEntriesResult <- loadFilesystemNoteImportEntries notesBaseDir
   case filesystemEntriesResult of
     Left err -> pure (Left err)
-    Right fsEntries -> do
-      connResult <- Ex.try (connectPostgreSQL (BS8.pack connectionString)) :: IO (Either Ex.SomeException Connection)
-      case connResult of
-        Left err -> pure (Left ("Note startup import failed while connecting to Postgres: " ++ show err))
-        Right conn -> do
-          snapshotResult <- timedTry "SELECT note_items-for-startup-import" (query_ conn "SELECT item_id FROM note_items" :: IO [Only String]) :: IO (Either Ex.SomeException [Only String])
-          case snapshotResult of
-            Left err -> do
-              _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
-              pure (Left ("Note startup import failed while reading Postgres notes: " ++ show err))
-            Right pgRows -> do
-              let orderedFsEntries = sortOn (\(itemId, _, _) -> itemId) fsEntries
-                  knownIds = Set.fromList (map fromOnly pgRows)
-              when (not (null orderedFsEntries) && not (null pgRows)) $
+    Right fsEntries ->
+      withResource pool $ \conn -> do
+        snapshotResult <- timedTry "SELECT note_items-for-startup-import" (query_ conn "SELECT item_id FROM note_items" :: IO [Only String]) :: IO (Either Ex.SomeException [Only String])
+        case snapshotResult of
+          Left err -> pure (Left ("Note startup import failed while reading Postgres notes: " ++ show err))
+          Right pgRows -> do
+            let orderedFsEntries = sortOn (\(itemId, _, _) -> itemId) fsEntries
+                knownIds = Set.fromList (map fromOnly pgRows)
+            when (not (null orderedFsEntries) && not (null pgRows)) $
+              putStrLn
+                ( "[startup][note-import][warning] overlap detected:"
+                    ++ " filesystem_count="
+                    ++ show (length orderedFsEntries)
+                    ++ " postgres_count="
+                    ++ show (length pgRows)
+                    ++ " conflict_policy=postgres-wins"
+                )
+            importResult <- foldM (importSingleNoteItem conn) (Right (0 :: Int, 0 :: Int, knownIds)) orderedFsEntries
+            case importResult of
+              Left err -> pure (Left err)
+              Right (importedCount, skippedCount, _) -> do
                 putStrLn
-                  ( "[startup][note-import][warning] overlap detected:"
+                  ( "[startup][note-import] completed"
                       ++ " filesystem_count="
                       ++ show (length orderedFsEntries)
                       ++ " postgres_count="
                       ++ show (length pgRows)
-                      ++ " conflict_policy=postgres-wins"
+                      ++ " imported="
+                      ++ show importedCount
+                      ++ " skipped_conflicts="
+                      ++ show skippedCount
                   )
-              importResult <- foldM (importSingleNoteItem conn) (Right (0 :: Int, 0 :: Int, knownIds)) orderedFsEntries
-              _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
-              case importResult of
-                Left err -> pure (Left err)
-                Right (importedCount, skippedCount, _) -> do
-                  putStrLn
-                    ( "[startup][note-import] completed"
-                        ++ " filesystem_count="
-                        ++ show (length orderedFsEntries)
-                        ++ " postgres_count="
-                        ++ show (length pgRows)
-                        ++ " imported="
-                        ++ show importedCount
-                        ++ " skipped_conflicts="
-                        ++ show skippedCount
-                    )
-                  pure (Right ())
+                pure (Right ())
 
-runChecklistStartupImport :: String -> FilePath -> IO (Either String ())
-runChecklistStartupImport connectionString cd = do
+runChecklistStartupImport :: Pool Connection -> FilePath -> IO (Either String ())
+runChecklistStartupImport pool cd = do
   let checklistsBaseDir = cd </> "data" </> "checklist"
   filesystemEntriesResult <- loadFilesystemChecklistImportEntries checklistsBaseDir
   case filesystemEntriesResult of
     Left err -> pure (Left err)
-    Right fsEntries -> do
-      connResult <- Ex.try (connectPostgreSQL (BS8.pack connectionString)) :: IO (Either Ex.SomeException Connection)
-      case connResult of
-        Left err -> pure (Left ("Checklist startup import failed while connecting to Postgres: " ++ show err))
-        Right conn -> do
-          snapshotResult <- timedTry "SELECT checklist_items-for-startup-import" (query_ conn "SELECT item_id FROM checklist_items" :: IO [Only String]) :: IO (Either Ex.SomeException [Only String])
-          case snapshotResult of
-            Left err -> do
-              _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
-              pure (Left ("Checklist startup import failed while reading Postgres checklists: " ++ show err))
-            Right pgRows -> do
-              let orderedFsEntries = sortOn (\(itemId, _, _) -> itemId) fsEntries
-                  knownIds = Set.fromList (map fromOnly pgRows)
-              when (not (null orderedFsEntries) && not (null pgRows)) $
+    Right fsEntries ->
+      withResource pool $ \conn -> do
+        snapshotResult <- timedTry "SELECT checklist_items-for-startup-import" (query_ conn "SELECT item_id FROM checklist_items" :: IO [Only String]) :: IO (Either Ex.SomeException [Only String])
+        case snapshotResult of
+          Left err -> pure (Left ("Checklist startup import failed while reading Postgres checklists: " ++ show err))
+          Right pgRows -> do
+            let orderedFsEntries = sortOn (\(itemId, _, _) -> itemId) fsEntries
+                knownIds = Set.fromList (map fromOnly pgRows)
+            when (not (null orderedFsEntries) && not (null pgRows)) $
+              putStrLn
+                ( "[startup][checklist-import][warning] overlap detected:"
+                    ++ " filesystem_count="
+                    ++ show (length orderedFsEntries)
+                    ++ " postgres_count="
+                    ++ show (length pgRows)
+                    ++ " conflict_policy=postgres-wins"
+                )
+            importResult <- foldM (importSingleChecklistItem conn) (Right (0 :: Int, 0 :: Int, knownIds)) orderedFsEntries
+            case importResult of
+              Left err -> pure (Left err)
+              Right (importedCount, skippedCount, _) -> do
                 putStrLn
-                  ( "[startup][checklist-import][warning] overlap detected:"
+                  ( "[startup][checklist-import] completed"
                       ++ " filesystem_count="
                       ++ show (length orderedFsEntries)
                       ++ " postgres_count="
                       ++ show (length pgRows)
-                      ++ " conflict_policy=postgres-wins"
+                      ++ " imported="
+                      ++ show importedCount
+                      ++ " skipped_conflicts="
+                      ++ show skippedCount
                   )
-              importResult <- foldM (importSingleChecklistItem conn) (Right (0 :: Int, 0 :: Int, knownIds)) orderedFsEntries
-              _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
-              case importResult of
-                Left err -> pure (Left err)
-                Right (importedCount, skippedCount, _) -> do
-                  putStrLn
-                    ( "[startup][checklist-import] completed"
-                        ++ " filesystem_count="
-                        ++ show (length orderedFsEntries)
-                        ++ " postgres_count="
-                        ++ show (length pgRows)
-                        ++ " imported="
-                        ++ show importedCount
-                        ++ " skipped_conflicts="
-                        ++ show skippedCount
-                    )
-                  pure (Right ())
+                pure (Right ())
 
 importSingleNoteItem
   :: Connection
@@ -1505,51 +1492,45 @@ decodeSingleFilesystemChecklist rootDir (Right acc) fileName
                   itemVersion = Model.version itemStorageId
                in pure (Right ((itemId, itemVersion, content checklistItem) : acc))
 
-runCalendarStartupImport :: String -> FilePath -> IO (Either String ())
-runCalendarStartupImport connectionString cd = do
+runCalendarStartupImport :: Pool Connection -> FilePath -> IO (Either String ())
+runCalendarStartupImport pool cd = do
   let calendarBaseDir = cd </> "data" </> "calendar-items"
   filesystemEntriesResult <- loadFilesystemCalendarImportEntries calendarBaseDir
   case filesystemEntriesResult of
     Left err -> pure (Left err)
-    Right fsEntries -> do
-      connResult <- Ex.try (connectPostgreSQL (BS8.pack connectionString)) :: IO (Either Ex.SomeException Connection)
-      case connResult of
-        Left err -> pure (Left ("Calendar startup import failed while connecting to Postgres: " ++ show err))
-        Right conn -> do
-          snapshotResult <- timedTry "SELECT calendar_items-for-startup-import" (query_ conn "SELECT user_id, item_id FROM calendar_items" :: IO [(String, String)]) :: IO (Either Ex.SomeException [(String, String)])
-          case snapshotResult of
-            Left err -> do
-              _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
-              pure (Left ("Calendar startup import failed while reading Postgres items: " ++ show err))
-            Right pgRows -> do
-              let orderedFsEntries = sortOn (\(userId, itemId, _) -> (userId, itemId)) fsEntries
-                  knownKeys = Set.fromList pgRows
-              when (not (null orderedFsEntries) && not (null pgRows)) $
+    Right fsEntries ->
+      withResource pool $ \conn -> do
+        snapshotResult <- timedTry "SELECT calendar_items-for-startup-import" (query_ conn "SELECT user_id, item_id FROM calendar_items" :: IO [(String, String)]) :: IO (Either Ex.SomeException [(String, String)])
+        case snapshotResult of
+          Left err -> pure (Left ("Calendar startup import failed while reading Postgres items: " ++ show err))
+          Right pgRows -> do
+            let orderedFsEntries = sortOn (\(userId, itemId, _) -> (userId, itemId)) fsEntries
+                knownKeys = Set.fromList pgRows
+            when (not (null orderedFsEntries) && not (null pgRows)) $
+              putStrLn
+                ( "[startup][calendar-import][warning] overlap detected:"
+                    ++ " filesystem_count="
+                    ++ show (length orderedFsEntries)
+                    ++ " postgres_count="
+                    ++ show (length pgRows)
+                    ++ " conflict_policy=postgres-wins"
+                )
+            importResult <- foldM (importSingleCalendarItem conn) (Right (0 :: Int, 0 :: Int, knownKeys)) orderedFsEntries
+            case importResult of
+              Left err -> pure (Left err)
+              Right (importedCount, skippedCount, _) -> do
                 putStrLn
-                  ( "[startup][calendar-import][warning] overlap detected:"
+                  ( "[startup][calendar-import] completed"
                       ++ " filesystem_count="
                       ++ show (length orderedFsEntries)
                       ++ " postgres_count="
                       ++ show (length pgRows)
-                      ++ " conflict_policy=postgres-wins"
+                      ++ " imported="
+                      ++ show importedCount
+                      ++ " skipped_conflicts="
+                      ++ show skippedCount
                   )
-              importResult <- foldM (importSingleCalendarItem conn) (Right (0 :: Int, 0 :: Int, knownKeys)) orderedFsEntries
-              _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
-              case importResult of
-                Left err -> pure (Left err)
-                Right (importedCount, skippedCount, _) -> do
-                  putStrLn
-                    ( "[startup][calendar-import] completed"
-                        ++ " filesystem_count="
-                        ++ show (length orderedFsEntries)
-                        ++ " postgres_count="
-                        ++ show (length pgRows)
-                        ++ " imported="
-                        ++ show importedCount
-                        ++ " skipped_conflicts="
-                        ++ show skippedCount
-                    )
-                  pure (Right ())
+                pure (Right ())
 
 importSingleCalendarItem
   :: Connection
@@ -1645,8 +1626,8 @@ extractCalendarImportEntry userId (Right acc) item =
     Agenda.NewCalendarItem {} ->
       pure (Left ("Calendar startup import failed while reading filesystem items for user_id=" ++ userId ++ ": expected stored calendar item with id"))
 
-runTripSharingStartupImport :: String -> FilePath -> IO (Either String ())
-runTripSharingStartupImport connectionString cd = do
+runTripSharingStartupImport :: Pool Connection -> FilePath -> IO (Either String ())
+runTripSharingStartupImport pool cd = do
   let sharesBaseDir = cd </> "data" </> "trip-sharing" </> "shares"
       subscriptionsBaseDir = cd </> "data" </> "trip-sharing" </> "subscriptions"
   sharesResult <- loadFilesystemOwnerUserPairs sharesBaseDir "shares"
@@ -1656,73 +1637,65 @@ runTripSharingStartupImport connectionString cd = do
       subscriptionsResult <- loadFilesystemOwnerUserPairs subscriptionsBaseDir "subscriptions"
       case subscriptionsResult of
         Left err -> pure (Left err)
-        Right fsSubscriptions -> do
-          connResult <- Ex.try (connectPostgreSQL (BS8.pack connectionString)) :: IO (Either Ex.SomeException Connection)
-          case connResult of
-            Left err -> pure (Left ("Trip-sharing startup import failed while connecting to Postgres: " ++ show err))
-            Right conn -> do
-              pgSharesResult <- timedTry "SELECT trip_shares-for-startup-import" (query_ conn "SELECT owner_user_id, target_username FROM trip_shares" :: IO [(String, String)]) :: IO (Either Ex.SomeException [(String, String)])
-              pgSubscriptionsResult <- timedTry "SELECT trip_subscriptions-for-startup-import" (query_ conn "SELECT owner_user_id, target_username FROM trip_subscriptions" :: IO [(String, String)]) :: IO (Either Ex.SomeException [(String, String)])
-              case pgSharesResult of
-                Left err -> do
-                  _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
-                  pure (Left ("Trip-sharing startup import failed while reading Postgres shares: " ++ show err))
-                Right pgShares ->
-                  case pgSubscriptionsResult of
-                    Left err -> do
-                      _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
-                      pure (Left ("Trip-sharing startup import failed while reading Postgres subscriptions: " ++ show err))
-                    Right pgSubscriptions -> do
-                      let orderedFsShares = sortOn id fsShares
-                          orderedFsSubscriptions = sortOn id fsSubscriptions
-                          pgShareKeys = Set.fromList pgShares
-                          pgSubscriptionKeys = Set.fromList pgSubscriptions
-                          filesystemCount = length orderedFsShares + length orderedFsSubscriptions
-                          postgresCount = length pgShares + length pgSubscriptions
-                      when (filesystemCount > 0 && postgresCount > 0) $
-                        putStrLn
-                          ( "[startup][trip-sharing-import][warning] overlap detected:"
-                              ++ " filesystem_shares="
-                              ++ show (length orderedFsShares)
-                              ++ " filesystem_subscriptions="
-                              ++ show (length orderedFsSubscriptions)
-                              ++ " postgres_shares="
-                              ++ show (length pgShares)
-                              ++ " postgres_subscriptions="
-                              ++ show (length pgSubscriptions)
-                              ++ " conflict_policy=postgres-wins"
-                          )
-                      sharesImportResult <- foldM (importSingleTripShare conn) (Right (0 :: Int, 0 :: Int, pgShareKeys)) orderedFsShares
-                      case sharesImportResult of
-                        Left err -> do
-                          _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
-                          pure (Left err)
-                        Right (sharesImported, sharesSkipped, _) -> do
-                          subscriptionsImportResult <- foldM (importSingleTripSubscription conn) (Right (0 :: Int, 0 :: Int, pgSubscriptionKeys)) orderedFsSubscriptions
-                          _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
-                          case subscriptionsImportResult of
-                            Left err -> pure (Left err)
-                            Right (subscriptionsImported, subscriptionsSkipped, _) -> do
-                              putStrLn
-                                ( "[startup][trip-sharing-import] completed"
-                                    ++ " filesystem_shares="
-                                    ++ show (length orderedFsShares)
-                                    ++ " filesystem_subscriptions="
-                                    ++ show (length orderedFsSubscriptions)
-                                    ++ " postgres_shares="
-                                    ++ show (length pgShares)
-                                    ++ " postgres_subscriptions="
-                                    ++ show (length pgSubscriptions)
-                                    ++ " imported_shares="
-                                    ++ show sharesImported
-                                    ++ " imported_subscriptions="
-                                    ++ show subscriptionsImported
-                                    ++ " skipped_share_conflicts="
-                                    ++ show sharesSkipped
-                                    ++ " skipped_subscription_conflicts="
-                                    ++ show subscriptionsSkipped
-                                )
-                              pure (Right ())
+        Right fsSubscriptions ->
+          withResource pool $ \conn -> do
+            pgSharesResult <- timedTry "SELECT trip_shares-for-startup-import" (query_ conn "SELECT owner_user_id, target_username FROM trip_shares" :: IO [(String, String)]) :: IO (Either Ex.SomeException [(String, String)])
+            pgSubscriptionsResult <- timedTry "SELECT trip_subscriptions-for-startup-import" (query_ conn "SELECT owner_user_id, target_username FROM trip_subscriptions" :: IO [(String, String)]) :: IO (Either Ex.SomeException [(String, String)])
+            case pgSharesResult of
+              Left err ->
+                pure (Left ("Trip-sharing startup import failed while reading Postgres shares: " ++ show err))
+              Right pgShares ->
+                case pgSubscriptionsResult of
+                  Left err ->
+                    pure (Left ("Trip-sharing startup import failed while reading Postgres subscriptions: " ++ show err))
+                  Right pgSubscriptions -> do
+                    let orderedFsShares = sortOn id fsShares
+                        orderedFsSubscriptions = sortOn id fsSubscriptions
+                        pgShareKeys = Set.fromList pgShares
+                        pgSubscriptionKeys = Set.fromList pgSubscriptions
+                        filesystemCount = length orderedFsShares + length orderedFsSubscriptions
+                        postgresCount = length pgShares + length pgSubscriptions
+                    when (filesystemCount > 0 && postgresCount > 0) $
+                      putStrLn
+                        ( "[startup][trip-sharing-import][warning] overlap detected:"
+                            ++ " filesystem_shares="
+                            ++ show (length orderedFsShares)
+                            ++ " filesystem_subscriptions="
+                            ++ show (length orderedFsSubscriptions)
+                            ++ " postgres_shares="
+                            ++ show (length pgShares)
+                            ++ " postgres_subscriptions="
+                            ++ show (length pgSubscriptions)
+                            ++ " conflict_policy=postgres-wins"
+                        )
+                    sharesImportResult <- foldM (importSingleTripShare conn) (Right (0 :: Int, 0 :: Int, pgShareKeys)) orderedFsShares
+                    case sharesImportResult of
+                      Left err -> pure (Left err)
+                      Right (sharesImported, sharesSkipped, _) -> do
+                        subscriptionsImportResult <- foldM (importSingleTripSubscription conn) (Right (0 :: Int, 0 :: Int, pgSubscriptionKeys)) orderedFsSubscriptions
+                        case subscriptionsImportResult of
+                          Left err -> pure (Left err)
+                          Right (subscriptionsImported, subscriptionsSkipped, _) -> do
+                            putStrLn
+                              ( "[startup][trip-sharing-import] completed"
+                                  ++ " filesystem_shares="
+                                  ++ show (length orderedFsShares)
+                                  ++ " filesystem_subscriptions="
+                                  ++ show (length orderedFsSubscriptions)
+                                  ++ " postgres_shares="
+                                  ++ show (length pgShares)
+                                  ++ " postgres_subscriptions="
+                                  ++ show (length pgSubscriptions)
+                                  ++ " imported_shares="
+                                  ++ show sharesImported
+                                  ++ " imported_subscriptions="
+                                  ++ show subscriptionsImported
+                                  ++ " skipped_share_conflicts="
+                                  ++ show sharesSkipped
+                                  ++ " skipped_subscription_conflicts="
+                                  ++ show subscriptionsSkipped
+                              )
+                            pure (Right ())
 
 importSingleTripShare
   :: Connection
@@ -1939,14 +1912,13 @@ makeCalendarRepository CalendarBackendPostgres mPool mDatabaseCfg =
   case mDatabaseCfg of
     Nothing -> pure (Left "Configuration database is required when calendarBackend=postgres")
     Just dbCfg -> do
-      let connectionString = renderPostgresConnectionString dbCfg
       case requirePostgresPool "calendar backend" mPool of
         Left err -> pure (Left err)
         Right pool -> do
-          validationResult <- verifyPostgresCalendarStorage connectionString
+          validationResult <- verifyPostgresCalendarStorage pool
           case validationResult of
             Left err -> pure (Left ("Postgres calendar storage validation failed: " ++ err))
-            Right () -> pure (Right (postgresCalendarRepository pool connectionString))
+            Right () -> pure (Right (postgresCalendarRepository pool))
 
 makeTripSharingRepository :: TripSharingBackend -> Maybe (Pool Connection) -> Maybe DatabaseConfig -> IO (Either String TripSharingRepository)
 makeTripSharingRepository TripSharingBackendFilesystem _ _ = pure (Right defaultTripSharingRepository)
@@ -1954,14 +1926,13 @@ makeTripSharingRepository TripSharingBackendPostgres mPool mDatabaseCfg =
   case mDatabaseCfg of
     Nothing -> pure (Left "Configuration database is required when tripSharingBackend=postgres")
     Just dbCfg -> do
-      let connectionString = renderPostgresConnectionString dbCfg
       case requirePostgresPool "trip-sharing backend" mPool of
         Left err -> pure (Left err)
         Right pool -> do
-          validationResult <- verifyPostgresTripSharingStorage connectionString
+          validationResult <- verifyPostgresTripSharingStorage pool
           case validationResult of
             Left err -> pure (Left ("Postgres trip-sharing storage validation failed: " ++ err))
-            Right () -> pure (Right (postgresTripSharingRepository pool connectionString))
+            Right () -> pure (Right (postgresTripSharingRepository pool))
 
 makeNoteRepository :: NoteBackend -> Maybe (Pool Connection) -> Maybe DatabaseConfig -> IO (Either String NoteRepository)
 makeNoteRepository NoteBackendFilesystem _ _ = pure (Right defaultNoteRepository)
@@ -1969,14 +1940,13 @@ makeNoteRepository NoteBackendPostgres mPool mDatabaseCfg =
   case mDatabaseCfg of
     Nothing -> pure (Left "Configuration database is required when noteBackend=postgres")
     Just dbCfg -> do
-      let connectionString = renderPostgresConnectionString dbCfg
       case requirePostgresPool "note backend" mPool of
         Left err -> pure (Left err)
         Right pool -> do
-          validationResult <- verifyPostgresNoteStorage connectionString
+          validationResult <- verifyPostgresNoteStorage pool
           case validationResult of
             Left err -> pure (Left ("Postgres note storage validation failed: " ++ err))
-            Right () -> pure (Right (postgresNoteRepository pool connectionString))
+            Right () -> pure (Right (postgresNoteRepository pool))
 
 makeChecklistRepository :: ChecklistBackend -> Maybe (Pool Connection) -> Maybe DatabaseConfig -> IO (Either String ChecklistRepository)
 makeChecklistRepository ChecklistBackendFilesystem _ _ = pure (Right defaultChecklistRepository)
@@ -1984,14 +1954,13 @@ makeChecklistRepository ChecklistBackendPostgres mPool mDatabaseCfg =
   case mDatabaseCfg of
     Nothing -> pure (Left "Configuration database is required when checklistBackend=postgres")
     Just dbCfg -> do
-      let connectionString = renderPostgresConnectionString dbCfg
       case requirePostgresPool "checklist backend" mPool of
         Left err -> pure (Left err)
         Right pool -> do
-          validationResult <- verifyPostgresChecklistStorage connectionString
+          validationResult <- verifyPostgresChecklistStorage pool
           case validationResult of
             Left err -> pure (Left ("Postgres checklist storage validation failed: " ++ err))
-            Right () -> pure (Right (postgresChecklistRepository pool connectionString))
+            Right () -> pure (Right (postgresChecklistRepository pool))
 
 makeSessionStore :: SessionBackend -> Maybe (Pool Connection) -> Maybe DatabaseConfig -> FilePath -> SessionConfig -> IO (Either String SessionStore)
 makeSessionStore SessionBackendFilesystem _ _ cd sessionCfg =
@@ -2000,14 +1969,13 @@ makeSessionStore SessionBackendPostgres mPool mDatabaseCfg _ sessionCfg =
   case mDatabaseCfg of
     Nothing -> pure (Left "Configuration database is required when session.sessionBackend=postgres")
     Just dbCfg -> do
-      let connectionString = renderPostgresConnectionString dbCfg
       case requirePostgresPool "session backend" mPool of
         Left err -> pure (Left err)
         Right pool -> do
-          validationResult <- verifyPostgresSessionStorage connectionString
+          validationResult <- verifyPostgresSessionStorage pool
           case validationResult of
             Left err -> pure (Left ("Postgres session storage validation failed: " ++ err))
-            Right () -> pure (Right (mkSessionStore (mkPostgresSessionRepository pool connectionString) sessionCfg))
+            Right () -> pure (Right (mkSessionStore (mkPostgresSessionRepository pool) sessionCfg))
 
 validateDatabaseConfig :: DatabaseConfigFile -> Either String DatabaseConfig
 validateDatabaseConfig DatabaseConfigFile {databaseHostFile, databasePortFile, databaseNameFile, databaseUserFile, databasePasswordFile}
@@ -2057,8 +2025,8 @@ apiController authRepo calendarRepo tripSharingRepo noteRepo checklistRepo signu
                       , signinController authRepo sessionCfg sessionStore
                       , signoutController sessionCfg sessionStore
                       , dir "auth" $ requireAuth sessionCfg sessionStore (authController authRepo)
-                      , dir "note" $ requireAuth sessionCfg sessionStore (`noteController` noteRepo)
-                      , dir "checklist" $ requireAuth sessionCfg sessionStore (`checklistController` checklistRepo)
+                      , dir "note" $ requireAuth sessionCfg sessionStore (noteController noteRepo)
+                      , dir "checklist" $ requireAuth sessionCfg sessionStore (checklistController checklistRepo)
                       , dir "v1" $
                           msum
                             [ dir "trip-places" $ requireAuth sessionCfg sessionStore tripPlacesController
@@ -2251,7 +2219,8 @@ trim = dropWhile (== ' ')
 requireAuth :: SessionConfig -> SessionStore -> (AppContext -> ServerPartT IO Response) -> ServerPartT IO Response
 requireAuth sessionConfig sessionStore handler = do
   mToken <- getSessionCookieValue sessionConfig
-  case mToken >>= verifyAndExtractSessionId (sessionSecret sessionConfig) of
+  let mSid = mToken >>= verifyAndExtractSessionId (sessionSecret sessionConfig)
+  case mSid of
     Nothing -> unauthorized $ jsonMessage "Not authenticated"
     Just sid -> do
       mPrincipal <- liftIO $ resolveSession sessionStore sid
@@ -2268,14 +2237,14 @@ requireApprovedAdmin authRepo AppContext { sessionPrincipal = SessionPrincipal {
     Right True -> handler
 
 
-noteController :: AppContext -> NoteRepository -> ServerPartT IO Response
-noteController _ = notesChecklistHandlers "note"
+noteController :: NoteRepository -> AppContext -> ServerPartT IO Response
+noteController = notesChecklistHandlers "note"
 
-checklistController :: AppContext -> ChecklistRepository -> ServerPartT IO Response
-checklistController _ = notesChecklistHandlers "checklist"
+checklistController :: ChecklistRepository -> AppContext -> ServerPartT IO Response
+checklistController = notesChecklistHandlers "checklist"
 
-notesChecklistHandlers :: Content a => String -> NotesChecklistRepository a -> ServerPartT IO Response
-notesChecklistHandlers crudTypeName repo =
+notesChecklistHandlers :: Content a => String -> NotesChecklistRepository a -> AppContext -> ServerPartT IO Response
+notesChecklistHandlers crudTypeName repo _ =
   msum
     [ notesChecklistGet crudTypeName repo
     , notesChecklistPost crudTypeName repo
@@ -2287,11 +2256,10 @@ notesChecklistGet :: Content a => String -> NotesChecklistRepository a -> Server
 notesChecklistGet crudTypeName repo = do
   nullDir
   method GET
-  log ("crud GET on " ++ crudTypeName)
-  recover
-    (\err -> genericInternalError ("Unexpected problem during retrieving all " ++ crudTypeName ++ "s:\n\t" ++ show err))
-    (ok . jsonResponse)
-    (repoListItems repo)
+  repoResult <- lift $ runExceptT (repoListItems repo)
+  case repoResult of
+    Left err -> genericInternalError ("Unexpected problem during retrieving all " ++ crudTypeName ++ "s:\n\t" ++ show err)
+    Right items -> ok (jsonResponse items)
 
 notesChecklistPost :: Content a => String -> NotesChecklistRepository a -> ServerPartT IO Response
 notesChecklistPost crudTypeName repo = do

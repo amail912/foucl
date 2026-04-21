@@ -33,13 +33,11 @@ import Data.Password.Argon2 (Argon2, PasswordHash(..))
 import Data.Int (Int64)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Pool (Pool)
+import Data.Pool (Pool, withResource)
 import Database.PostgreSQL.Simple
   ( Connection
   , SqlError(..)
   , Only(..)
-  , connectPostgreSQL
-  , close
   , execute
   , query
   , query_
@@ -132,26 +130,20 @@ defaultAuthRepository =
     , repoListUsers = fsListUsers
     }
 
-postgresAuthRepository :: Pool Connection -> String -> AuthRepository
-postgresAuthRepository _ connectionString =
-  AuthRepository
-    { repoCreateUser = pgCreateUser connectionString
-    , repoLoadUserByUsername = pgLoadUserByUsername connectionString
-    , repoUpdateUser = pgUpdateUser connectionString
-    , repoDeleteUserByUsername = pgDeleteUserByUsername connectionString
-    , repoListUsers = pgListUsers connectionString
-    }
+postgresAuthRepository :: Pool Connection -> AuthRepository
+postgresAuthRepository pool = AuthRepository { repoCreateUser = pgCreateUser pool
+                                             , repoLoadUserByUsername = pgLoadUserByUsername pool
+                                             , repoUpdateUser = pgUpdateUser pool
+                                             , repoDeleteUserByUsername = pgDeleteUserByUsername pool
+                                             , repoListUsers = pgListUsers pool
+                                             }
 
-verifyPostgresAuthStorage :: String -> IO (Either String ())
-verifyPostgresAuthStorage connectionString = do
-  connResult <- Ex.try (connectPostgreSQL (BS8.pack connectionString)) :: IO (Either Ex.SomeException Connection)
-  case connResult of
-    Left err -> pure (Left ("Unable to connect to Postgres: " ++ show err))
-    Right conn -> do
+verifyPostgresAuthStorage :: Pool Connection -> IO (Either String ())
+verifyPostgresAuthStorage pool = do
+  verifyResult <- Ex.try $ withResource pool $ \conn -> do
       pingResult <- timedTry "SELECT ping-auth" (query_ conn "SELECT 1" :: IO [Only Int]) :: IO (Either Ex.SomeException [Only Int])
       tableResult <- timedTry "SELECT auth-schema-check" (query_ conn "SELECT username, password_hash, role::text, approved FROM auth_users LIMIT 0" :: IO [(String, Text, Text, Bool)]) :: IO (Either Ex.SomeException [(String, Text, Text, Bool)])
       enumResult <- timedTry "SELECT auth-enum-check" (query conn "SELECT EXISTS(SELECT 1 FROM pg_type WHERE typname = ?)" (Only ("auth_user_role" :: String)) :: IO [Only Bool]) :: IO (Either Ex.SomeException [Only Bool])
-      close conn
       case pingResult of
         Left err -> pure (Left ("Postgres ping query failed: " ++ show err))
         Right _ ->
@@ -162,6 +154,9 @@ verifyPostgresAuthStorage connectionString = do
                 Left err -> pure (Left ("Auth enum check failed: " ++ show err))
                 Right [Only True] -> pure (Right ())
                 Right _ -> pure (Left "Auth schema check failed: enum auth_user_role is missing")
+  case verifyResult of
+    Left err -> pure (Left ("Unable to connect to Postgres: " ++ show (err :: Ex.SomeException)))
+    Right value -> pure value
 
 fsCreateUser :: PersistedUser -> ExceptT RepositoryError IO ()
 fsCreateUser persistedUser@PersistedUser {uname = username} = do
@@ -288,9 +283,9 @@ isPrefixOf [] _ = True
 isPrefixOf _ [] = False
 isPrefixOf (x:xs) (y:ys) = x == y && isPrefixOf xs ys
 
-pgCreateUser :: String -> PersistedUser -> ExceptT RepositoryError IO ()
-pgCreateUser connectionString persistedUser =
-  withPgConnection connectionString StorageFailure $ \conn -> do
+pgCreateUser :: Pool Connection -> PersistedUser -> ExceptT RepositoryError IO ()
+pgCreateUser pool persistedUser =
+  withPgConnection pool StorageFailure $ \conn -> do
     let roleValue = userRoleToDb (userRole persistedUser)
         approvedValue = approvalStatusToDb (approvalStatus persistedUser)
     writeResult <- liftIO (timedTry "INSERT auth-user"
@@ -303,9 +298,9 @@ pgCreateUser connectionString persistedUser =
       Left err -> throwError (mapWriteException err)
       Right _ -> pure ()
 
-pgLoadUserByUsername :: String -> String -> ExceptT RepositoryError IO PersistedUser
-pgLoadUserByUsername connectionString username =
-  withPgConnection connectionString StorageFailure $ \conn -> do
+pgLoadUserByUsername :: Pool Connection -> String -> ExceptT RepositoryError IO PersistedUser
+pgLoadUserByUsername pool username =
+  withPgConnection pool StorageFailure $ \conn -> do
     readResult <- liftIO (timedTry "SELECT auth-user-by-username"
       (query
         conn
@@ -326,9 +321,9 @@ pgLoadUserByUsername connectionString username =
               , approvalStatus = dbToApprovalStatus dbApproved
               }
 
-pgUpdateUser :: String -> PersistedUser -> ExceptT RepositoryError IO ()
-pgUpdateUser connectionString persistedUser =
-  withPgConnection connectionString StorageFailure $ \conn -> do
+pgUpdateUser :: Pool Connection -> PersistedUser -> ExceptT RepositoryError IO ()
+pgUpdateUser pool persistedUser =
+  withPgConnection pool StorageFailure $ \conn -> do
     let roleValue = userRoleToDb (userRole persistedUser)
         approvedValue = approvalStatusToDb (approvalStatus persistedUser)
     writeResult <- liftIO (timedTry "UPDATE auth-user"
@@ -341,9 +336,9 @@ pgUpdateUser connectionString persistedUser =
       Left err -> throwError (mapWriteException err)
       Right affected -> when (affected == 0) (throwError NotFound)
 
-pgDeleteUserByUsername :: String -> String -> ExceptT RepositoryError IO ()
-pgDeleteUserByUsername connectionString username =
-  withPgConnection connectionString StorageFailure $ \conn -> do
+pgDeleteUserByUsername :: Pool Connection -> String -> ExceptT RepositoryError IO ()
+pgDeleteUserByUsername pool username =
+  withPgConnection pool StorageFailure $ \conn -> do
     writeResult <- liftIO (timedTry "DELETE auth-user"
       (execute conn "DELETE FROM auth_users WHERE username = ?" (Only username))
       :: IO (Either Ex.SomeException Int64))
@@ -351,9 +346,9 @@ pgDeleteUserByUsername connectionString username =
       Left err -> throwError (mapWriteException err)
       Right affected -> when (affected == 0) (throwError NotFound)
 
-pgListUsers :: String -> ExceptT RepositoryError IO [PersistedUser]
-pgListUsers connectionString =
-  withPgConnection connectionString StorageFailure $ \conn -> do
+pgListUsers :: Pool Connection -> ExceptT RepositoryError IO [PersistedUser]
+pgListUsers pool =
+  withPgConnection pool StorageFailure $ \conn -> do
     readResult <- liftIO (timedTry "SELECT auth-users"
       (query_ conn "SELECT username, password_hash, role::text, approved FROM auth_users ORDER BY username" :: IO [(String, Text, Text, Bool)])
       :: IO (Either Ex.SomeException [(String, Text, Text, Bool)]))
@@ -373,15 +368,13 @@ pgListUsers connectionString =
             , approvalStatus = dbToApprovalStatus dbApproved
             }
 
-withPgConnection :: String -> RepositoryError -> (Connection -> ExceptT RepositoryError IO a) -> ExceptT RepositoryError IO a
-withPgConnection connectionString connectionError action = do
-  connResult <- liftIO $ Ex.try (connectPostgreSQL (BS8.pack connectionString)) :: ExceptT RepositoryError IO (Either Ex.SomeException Connection)
-  case connResult of
+withPgConnection :: forall a. Pool Connection -> RepositoryError -> (Connection -> ExceptT RepositoryError IO a) -> ExceptT RepositoryError IO a
+withPgConnection pool connectionError action = do
+  runResult <- liftIO (Ex.try (withResource pool (\conn -> runExceptT (action conn))) :: IO (Either Ex.SomeException (Either RepositoryError a)))
+  case runResult of
     Left _ -> throwError connectionError
-    Right conn -> do
-      runResult <- liftIO (runExceptT (action conn))
-      _ <- liftIO $ Ex.try (close conn) :: ExceptT RepositoryError IO (Either Ex.SomeException ())
-      either throwError pure runResult
+    Right (Left err) -> throwError err
+    Right (Right value) -> pure value
 
 mapReadException :: Ex.SomeException -> RepositoryError
 mapReadException ex =

@@ -1,5 +1,6 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module CalendarRepository
   ( CalendarRepository(..)
@@ -24,7 +25,7 @@ import Control.Monad (when)
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
 import Control.Monad.IO.Class (liftIO)
 import Data.List (sortOn)
-import Data.Pool (Pool)
+import Data.Pool (Pool, withResource)
 import Data.UUID (toString)
 import Data.UUID.V4 (nextRandom)
 import qualified Data.ByteString.Char8 as BS8
@@ -32,8 +33,6 @@ import Database.PostgreSQL.Simple
   ( Connection
   , Only(..)
   , SqlError(..)
-  , close
-  , connectPostgreSQL
   , execute
   , query
   , query_
@@ -68,36 +67,35 @@ filesystemCalendarRepository config =
     , repoDeleteCalendarItemById = fsDeleteCalendarItemById config
     }
 
-postgresCalendarRepository :: Pool Connection -> String -> CalendarRepository
-postgresCalendarRepository _ connectionString =
+postgresCalendarRepository :: Pool Connection -> CalendarRepository
+postgresCalendarRepository pool =
   CalendarRepository
-    { repoCreateCalendarItem = pgCreateCalendarItem connectionString
-    , repoLoadCalendarItemById = pgLoadCalendarItemById connectionString
-    , repoListCalendarItemsForUser = pgListCalendarItemsForUser connectionString
-    , repoUpdateCalendarItem = pgUpdateCalendarItem connectionString
-    , repoUpdateCalendarItemDuration = pgUpdateCalendarItemDuration connectionString
-    , repoDeleteCalendarItemById = pgDeleteCalendarItemById connectionString
+    { repoCreateCalendarItem = pgCreateCalendarItem pool
+    , repoLoadCalendarItemById = pgLoadCalendarItemById pool
+    , repoListCalendarItemsForUser = pgListCalendarItemsForUser pool
+    , repoUpdateCalendarItem = pgUpdateCalendarItem pool
+    , repoUpdateCalendarItemDuration = pgUpdateCalendarItemDuration pool
+    , repoDeleteCalendarItemById = pgDeleteCalendarItemById pool
     }
 
-verifyPostgresCalendarStorage :: String -> IO (Either String ())
-verifyPostgresCalendarStorage connectionString = do
-  connResult <- Ex.try (connectPostgreSQL (BS8.pack connectionString)) :: IO (Either Ex.SomeException Connection)
-  case connResult of
-    Left err -> pure (Left ("Unable to connect to Postgres: " ++ show err))
-    Right conn -> do
+verifyPostgresCalendarStorage :: Pool Connection -> IO (Either String ())
+verifyPostgresCalendarStorage pool = do
+  verifyResult <- Ex.try $ withResource pool $ \conn -> do
       pingResult <- timedTry "SELECT ping-calendar" (query_ conn "SELECT 1" :: IO [Only Int]) :: IO (Either Ex.SomeException [Only Int])
       schemaResult <- timedTry "SELECT calendar-schema-check"
         (query_ conn
           "SELECT user_id, item_id, item_kind, item_type, title, window_start, window_end, status, source_item_id, actual_duration_minutes, category, recurrence_rule_type, recurrence_interval_days, recurrence_exception_dates, trip_window_start, trip_window_end, trip_departure_place_id, trip_arrival_place_id FROM calendar_items LIMIT 0"
           :: IO [(String, String, String, Maybe String, Maybe String, Maybe String, Maybe String, Maybe String, Maybe String, Maybe Int, Maybe String, Maybe String, Maybe Int, PGArray String, Maybe String, Maybe String, Maybe String, Maybe String)])
         :: IO (Either Ex.SomeException [(String, String, String, Maybe String, Maybe String, Maybe String, Maybe String, Maybe String, Maybe String, Maybe Int, Maybe String, Maybe String, Maybe Int, PGArray String, Maybe String, Maybe String, Maybe String, Maybe String)])
-      _ <- Ex.try (close conn) :: IO (Either Ex.SomeException ())
       case pingResult of
         Left err -> pure (Left ("Postgres ping query failed: " ++ show err))
         Right _ ->
           case schemaResult of
             Left err -> pure (Left ("Calendar schema check failed: " ++ show err))
             Right _ -> pure (Right ())
+  case verifyResult of
+    Left err -> pure (Left ("Unable to connect to Postgres: " ++ show (err :: Ex.SomeException)))
+    Right value -> pure value
 
 fsCreateCalendarItem :: CalendarStorageConfig -> String -> Agenda.CalendarItemContent -> ExceptT RepositoryError IO Agenda.CalendarItem
 fsCreateCalendarItem config userId content = do
@@ -157,9 +155,9 @@ calendarItemSortKey item =
     Agenda.ServerCalendarItem {Agenda.itemId} -> itemId
     Agenda.NewCalendarItem {} -> ""
 
-pgCreateCalendarItem :: String -> String -> Agenda.CalendarItemContent -> ExceptT RepositoryError IO Agenda.CalendarItem
-pgCreateCalendarItem connectionString userId content =
-  withPgConnection connectionString StorageFailure $ \conn -> do
+pgCreateCalendarItem :: Pool Connection -> String -> Agenda.CalendarItemContent -> ExceptT RepositoryError IO Agenda.CalendarItem
+pgCreateCalendarItem pool userId content =
+  withPgConnection pool StorageFailure $ \conn -> do
     itemId <- liftIO (toString <$> nextRandom)
     let row = contentToDbRow content
     writeResult <- liftIO (timedTry "INSERT calendar-item"
@@ -189,9 +187,9 @@ pgCreateCalendarItem connectionString userId content =
       Left err -> throwError (mapWriteException err)
       Right _ -> pure Agenda.ServerCalendarItem {Agenda.content = content, Agenda.itemId = itemId}
 
-pgLoadCalendarItemById :: String -> String -> String -> ExceptT RepositoryError IO Agenda.CalendarItem
-pgLoadCalendarItemById connectionString userId itemId =
-  withPgConnection connectionString StorageFailure $ \conn -> do
+pgLoadCalendarItemById :: Pool Connection -> String -> String -> ExceptT RepositoryError IO Agenda.CalendarItem
+pgLoadCalendarItemById pool userId itemId =
+  withPgConnection pool StorageFailure $ \conn -> do
     readResult <- liftIO (timedTry "SELECT calendar-item-by-id"
       (query conn
         "SELECT user_id, item_id, item_kind, item_type, title, window_start, window_end, status, source_item_id, actual_duration_minutes, category, recurrence_rule_type, recurrence_interval_days, recurrence_exception_dates, trip_window_start, trip_window_end, trip_departure_place_id, trip_arrival_place_id FROM calendar_items WHERE user_id = ? AND item_id = ?"
@@ -205,9 +203,9 @@ pgLoadCalendarItemById connectionString userId itemId =
           Nothing -> throwError ReadFailure
           Just item -> pure item
 
-pgListCalendarItemsForUser :: String -> String -> ExceptT RepositoryError IO [Agenda.CalendarItem]
-pgListCalendarItemsForUser connectionString userId =
-  withPgConnection connectionString StorageFailure $ \conn -> do
+pgListCalendarItemsForUser :: Pool Connection -> String -> ExceptT RepositoryError IO [Agenda.CalendarItem]
+pgListCalendarItemsForUser pool userId =
+  withPgConnection pool StorageFailure $ \conn -> do
     readResult <- liftIO (timedTry "SELECT calendar-items-by-user"
       (query conn
         "SELECT user_id, item_id, item_kind, item_type, title, window_start, window_end, status, source_item_id, actual_duration_minutes, category, recurrence_rule_type, recurrence_interval_days, recurrence_exception_dates, trip_window_start, trip_window_end, trip_departure_place_id, trip_arrival_place_id FROM calendar_items WHERE user_id = ? ORDER BY item_id"
@@ -220,9 +218,9 @@ pgListCalendarItemsForUser connectionString userId =
           Nothing -> throwError ReadFailure
           Just items -> pure items
 
-pgUpdateCalendarItem :: String -> String -> String -> Agenda.CalendarItemContent -> ExceptT RepositoryError IO Agenda.CalendarItem
-pgUpdateCalendarItem connectionString userId itemId content =
-  withPgConnection connectionString StorageFailure $ \conn -> do
+pgUpdateCalendarItem :: Pool Connection -> String -> String -> Agenda.CalendarItemContent -> ExceptT RepositoryError IO Agenda.CalendarItem
+pgUpdateCalendarItem pool userId itemId content =
+  withPgConnection pool StorageFailure $ \conn -> do
     let row = contentToDbRow content
     writeResult <- liftIO (timedTry "UPDATE calendar-item"
       (execute conn
@@ -253,12 +251,12 @@ pgUpdateCalendarItem connectionString userId itemId content =
         when (affected == 0) (throwError NotFound)
         pure Agenda.ServerCalendarItem {Agenda.content = content, Agenda.itemId = itemId}
 
-pgUpdateCalendarItemDuration :: String -> String -> String -> Int -> ExceptT RepositoryError IO Agenda.CalendarItem
-pgUpdateCalendarItemDuration connectionString userId itemId minutes = do
-  loaded <- pgLoadCalendarItemById connectionString userId itemId
+pgUpdateCalendarItemDuration :: Pool Connection -> String -> String -> Int -> ExceptT RepositoryError IO Agenda.CalendarItem
+pgUpdateCalendarItemDuration pool userId itemId minutes = do
+  loaded <- pgLoadCalendarItemById pool userId itemId
   case loaded of
     Agenda.ServerCalendarItem {Agenda.content = Agenda.CalendarItemContent {}} -> do
-      withPgConnection connectionString StorageFailure $ \conn -> do
+      withPgConnection pool StorageFailure $ \conn -> do
         writeResult <- liftIO (timedTry "UPDATE calendar-item-duration"
           (execute conn
             "UPDATE calendar_items SET actual_duration_minutes = ? WHERE user_id = ? AND item_id = ?"
@@ -267,12 +265,12 @@ pgUpdateCalendarItemDuration connectionString userId itemId minutes = do
         case writeResult of
           Left err -> throwError (mapWriteException err)
           Right affected -> when (affected == 0) (throwError NotFound)
-      pgLoadCalendarItemById connectionString userId itemId
+      pgLoadCalendarItemById pool userId itemId
     _ -> pure loaded
 
-pgDeleteCalendarItemById :: String -> String -> String -> ExceptT RepositoryError IO ()
-pgDeleteCalendarItemById connectionString userId itemId =
-  withPgConnection connectionString StorageFailure $ \conn -> do
+pgDeleteCalendarItemById :: Pool Connection -> String -> String -> ExceptT RepositoryError IO ()
+pgDeleteCalendarItemById pool userId itemId =
+  withPgConnection pool StorageFailure $ \conn -> do
     writeResult <- liftIO (timedTry "DELETE calendar-item"
       (execute conn "DELETE FROM calendar_items WHERE user_id = ? AND item_id = ?" (userId, itemId))
       :: IO (Either Ex.SomeException Int64))
@@ -455,15 +453,13 @@ recurrenceFromDb (Just "YEARLY") Nothing = Just (Just Agenda.RecurrenceYearly)
 recurrenceFromDb (Just "EVERY_X_DAYS") (Just n) = Just (Just (Agenda.RecurrenceEveryXDays n))
 recurrenceFromDb _ _ = Nothing
 
-withPgConnection :: String -> RepositoryError -> (Connection -> ExceptT RepositoryError IO a) -> ExceptT RepositoryError IO a
-withPgConnection connectionString connectionError action = do
-  connResult <- liftIO $ Ex.try (connectPostgreSQL (BS8.pack connectionString)) :: ExceptT RepositoryError IO (Either Ex.SomeException Connection)
-  case connResult of
+withPgConnection :: forall a. Pool Connection -> RepositoryError -> (Connection -> ExceptT RepositoryError IO a) -> ExceptT RepositoryError IO a
+withPgConnection pool connectionError action = do
+  runResult <- liftIO (Ex.try (withResource pool (\conn -> runExceptT (action conn))) :: IO (Either Ex.SomeException (Either RepositoryError a)))
+  case runResult of
     Left _ -> throwError connectionError
-    Right conn -> do
-      runResult <- liftIO (runExceptT (action conn))
-      _ <- liftIO $ Ex.try (close conn) :: ExceptT RepositoryError IO (Either Ex.SomeException ())
-      either throwError pure runResult
+    Right (Left err) -> throwError err
+    Right (Right value) -> pure value
 
 mapReadException :: Ex.SomeException -> RepositoryError
 mapReadException ex =

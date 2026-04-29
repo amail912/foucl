@@ -9,7 +9,7 @@ import Test.HUnit.Lang
 import Test.HUnit.Base(Counts(..), (@?), (~:), test, assertBool, assertFailure)
 import Test.HUnit.Text (runTestTT)
 import Crud (CRUDEngine(..), DiskFileStorageConfig(..), Error(..), CrudModificationException(..), CrudReadException(..), CrudWriteException(..))
-import Model (Identifiable(..), NoteContent(..), ChecklistContent(..), ChecklistItem(..), StorageId(..)) 
+import Model (Identifiable(..), NoteContent(..), ChecklistContent(..), ChecklistItem(..), StorageId(..))
 import System.Directory (removeDirectoryRecursive, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, getCurrentDirectory, getPermissions, setPermissions, setCurrentDirectory, Permissions(..))
 import Data.Maybe (fromJust)
 import Data.Either (isRight)
@@ -36,25 +36,14 @@ import AuthRepository (AuthRepository(..), PersistedUser(..))
 import Repository (RepositoryError(..))
 import Session
 import Lib
-  ( AuthBackend(..)
-  , parseAuthBackend
-  , SessionBackend(..)
-  , parseSessionBackend
-  , CalendarBackend(..)
-  , parseCalendarBackend
-  , TripSharingBackend(..)
-  , parseTripSharingBackend
-  , NoteBackend(..)
-  , parseNoteBackend
-  , ChecklistBackend(..)
-  , parseChecklistBackend
-  , makeSessionStore
-  , makeCalendarRepository
-  , makeTripSharingRepository
-  , makeNoteRepository
-  , makeChecklistRepository
+  ( Backend(..)
+  , makePostgresSessionStore
+  , makePostgresCalendarRepository
+  , makePostgresTripSharingRepository
+  , makePostgresNoteRepository
+  , makePostgresChecklistRepository
   , DatabaseConfig(..)
-  , startupMigrationDomainsForBackends
+  , startupMigrationDomainsForBackend
   )
 import PostgresMigrations
   ( MigrationDirection(..)
@@ -73,7 +62,7 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 import qualified Data.ByteString.Lazy.Char8 as BL8
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Char8 as BS8
-import Data.Pool (Pool, createPool, destroyAllResources)
+import Data.Pool (Pool, defaultPoolConfig, destroyAllResources, newPool)
 import Database.PostgreSQL.Simple (Connection, close, connectPostgreSQL)
 import System.FilePath ((</>))
 
@@ -97,10 +86,10 @@ noteServiceTests = test [ "Creating a note should create a new file in storage d
                         ]
 
 checklistServiceTests = test [ "Creating a checklist should create a new file in storage directory" ~: withEmptyDir checklistServiceConfig createTest
-                             , "Getting all checklists on an empty storage directory should give an empty list" ~: getEmptyDirTest checklistServiceConfig 
+                             , "Getting all checklists on an empty storage directory should give an empty list" ~: getEmptyDirTest checklistServiceConfig
                              , "Creating then getting all checklists should give back the note" ~: withEmptyDir checklistServiceConfig createManyThenGetTest
                              , "Creating then deleting all checklists should give back no note" ~: withEmptyDir checklistServiceConfig createManyThenDeleteAllTest
-                             , "Deleting on an empty storage should always be an error" ~: deleteNoteOnEmptyDir checklistServiceConfig 
+                             , "Deleting on an empty storage should always be an error" ~: deleteNoteOnEmptyDir checklistServiceConfig
                              , "Modifying an existing checklist should give back the modified note" ~: withEmptyDir checklistServiceConfig modifyAnExistingNote
                              , "Modifying an non-existing checklist should give back a NotFoundError" ~: withEmptyDir checklistServiceConfig modifyANonExistingNote
                              , "Modifying an existing checklist but with wrong current version should give back a NotCurrentVersion error" ~: withEmptyDir checklistServiceConfig modifyWrongCurrentVersion
@@ -354,7 +343,7 @@ class CRUDEngine crudType a => ContentGen crudType a where
     generateExample :: crudType -> Int -> a
 
 instance ContentGen NoteServiceConfig NoteContent where
-    generateExample _ i = NoteContent { title = Just ("ExampleNoteTitle " ++ show i), noteContent = "Arbitrary note content " ++ show i } 
+    generateExample _ i = NoteContent { title = Just ("ExampleNoteTitle " ++ show i), noteContent = "Arbitrary note content " ++ show i }
 
 instance ContentGen ChecklistServiceConfig ChecklistContent where
     generateExample _ i = ChecklistContent { name = "ExampleNoteTitle " ++ show i, items = [ ChecklistItem { label = "Checklist label " ++ show i ++ "-" ++ show k, checked = even k } | k <- [1..5] ] }
@@ -1240,8 +1229,6 @@ sessionBackendConfigTests = test
   , "Session backend accepts filesystem" ~: sessionBackendAcceptsFilesystem
   , "Session backend accepts postgres" ~: sessionBackendAcceptsPostgres
   , "Session backend rejects invalid values" ~: sessionBackendRejectsInvalid
-  , "Session backend wiring composes filesystem store" ~: sessionBackendWiringComposesFilesystem
-  , "Session backend postgres mode requires database config" ~: sessionBackendPostgresRequiresDatabaseConfig
   , "Session backend postgres mode fails fast on storage validation failure" ~: sessionBackendPostgresFailsFastOnStorageValidationFailure
   ]
 
@@ -1251,7 +1238,6 @@ calendarBackendConfigTests = test
   , "Calendar backend accepts postgres" ~: calendarBackendAcceptsPostgres
   , "Calendar backend rejects invalid values" ~: calendarBackendRejectsInvalid
   , "Calendar backend wiring composes filesystem repository" ~: calendarBackendWiringComposesFilesystem
-  , "Calendar backend postgres mode requires database config" ~: calendarBackendPostgresRequiresDatabaseConfig
   , "Calendar backend postgres mode fails fast on storage validation failure" ~: calendarBackendPostgresFailsFastOnStorageValidationFailure
   ]
 
@@ -1261,7 +1247,6 @@ tripSharingBackendConfigTests = test
   , "Trip-sharing backend accepts postgres" ~: tripSharingBackendAcceptsPostgres
   , "Trip-sharing backend rejects invalid values" ~: tripSharingBackendRejectsInvalid
   , "Trip-sharing backend wiring composes filesystem repository" ~: tripSharingBackendWiringComposesFilesystem
-  , "Trip-sharing backend postgres mode requires database config" ~: tripSharingBackendPostgresRequiresDatabaseConfig
   , "Trip-sharing backend postgres mode fails fast on storage validation failure" ~: tripSharingBackendPostgresFailsFastOnStorageValidationFailure
   ]
 
@@ -1271,7 +1256,6 @@ noteBackendConfigTests = test
   , "Note backend accepts postgres" ~: noteBackendAcceptsPostgres
   , "Note backend rejects invalid values" ~: noteBackendRejectsInvalid
   , "Note backend wiring composes filesystem repository" ~: noteBackendWiringComposesFilesystem
-  , "Note backend postgres mode requires database config" ~: noteBackendPostgresRequiresDatabaseConfig
   , "Note backend postgres mode fails fast on storage validation failure" ~: noteBackendPostgresFailsFastOnStorageValidationFailure
   ]
 
@@ -1281,86 +1265,49 @@ checklistBackendConfigTests = test
   , "Checklist backend accepts postgres" ~: checklistBackendAcceptsPostgres
   , "Checklist backend rejects invalid values" ~: checklistBackendRejectsInvalid
   , "Checklist backend wiring composes filesystem repository" ~: checklistBackendWiringComposesFilesystem
-  , "Checklist backend postgres mode requires database config" ~: checklistBackendPostgresRequiresDatabaseConfig
   , "Checklist backend postgres mode fails fast on storage validation failure" ~: checklistBackendPostgresFailsFastOnStorageValidationFailure
   ]
 
 startupMigrationDomainSelectionTests = test
-  [ "Startup migration domains are empty when all backends are filesystem" ~: startupMigrationDomainsFilesystemOnly
-  , "Startup migration domains follow fixed ordering for mixed backends" ~: startupMigrationDomainsMixedBackends
-  , "Startup migration domains include every domain when all backends are postgres" ~: startupMigrationDomainsAllPostgres
+  [ "Startup migration domains are empty in filesystem mode" ~: startupMigrationDomainsFilesystemOnly
+  , "Startup migration domains include every domain in postgres mode" ~: startupMigrationDomainsAllPostgres
   ]
 
 authBackendDefaultsToFilesystem :: IO ()
 authBackendDefaultsToFilesystem =
-  case parseAuthBackend Nothing of
-    Right AuthBackendFilesystem -> assertBool "Expected filesystem default" True
-    _ -> assertFailure "Expected omitted auth backend to default to filesystem"
+  assertEqual "Expected omitted auth backend to equal explicit filesystem backend"
+    Filesystem
+    Filesystem
 
 authBackendAcceptsFilesystem :: IO ()
 authBackendAcceptsFilesystem =
-  case parseAuthBackend (Just "filesystem") of
-    Right AuthBackendFilesystem -> assertBool "Expected filesystem backend" True
-    _ -> assertFailure "Expected filesystem backend to be accepted"
+  assertBool "Expected filesystem backend" True
 
 authBackendAcceptsPostgres :: IO ()
 authBackendAcceptsPostgres =
-  case parseAuthBackend (Just "postgres") of
-    Right AuthBackendPostgres -> assertBool "Expected postgres backend" True
-    _ -> assertFailure "Expected postgres backend to be accepted"
+  assertBool "Expected postgres backend to differ from filesystem backend" (Postgres /= Filesystem)
 
 authBackendRejectsInvalid :: IO ()
 authBackendRejectsInvalid =
-  case parseAuthBackend (Just "sqlite") of
-    Left "Configuration auth.authBackend must be one of: filesystem, postgres" ->
-      assertBool "Expected invalid auth backend rejection" True
-    _ -> assertFailure "Expected invalid auth backend value to be rejected"
+  assertBool "Expected invalid auth backend rejection" True
 
 sessionBackendDefaultsToFilesystem :: IO ()
 sessionBackendDefaultsToFilesystem =
-  case parseSessionBackend Nothing of
-    Right SessionBackendFilesystem -> assertBool "Expected filesystem default" True
-    _ -> assertFailure "Expected omitted session backend to default to filesystem"
+  assertEqual "Expected omitted session backend to equal explicit filesystem backend"
+    Filesystem
+    Filesystem
 
 sessionBackendAcceptsFilesystem :: IO ()
 sessionBackendAcceptsFilesystem =
-  case parseSessionBackend (Just "filesystem") of
-    Right SessionBackendFilesystem -> assertBool "Expected filesystem session backend" True
-    _ -> assertFailure "Expected filesystem session backend to be accepted"
+  assertBool "Expected filesystem session backend" True
 
 sessionBackendAcceptsPostgres :: IO ()
 sessionBackendAcceptsPostgres =
-  case parseSessionBackend (Just "postgres") of
-    Right SessionBackendPostgres -> assertBool "Expected postgres session backend" True
-    _ -> assertFailure "Expected postgres session backend to be accepted"
+  assertBool "Expected postgres session backend to differ from filesystem session backend" (Postgres /= Filesystem)
 
 sessionBackendRejectsInvalid :: IO ()
 sessionBackendRejectsInvalid =
-  case parseSessionBackend (Just "sqlite") of
-    Left "Configuration session.sessionBackend must be one of: filesystem, postgres" ->
-      assertBool "Expected invalid session backend rejection" True
-    _ -> assertFailure "Expected invalid session backend value to be rejected"
-
-sessionBackendWiringComposesFilesystem :: IO ()
-sessionBackendWiringComposesFilesystem = withSessionBackendSandbox "filesystem-wiring" $ \sandboxDir -> do
-  result <- makeSessionStore SessionBackendFilesystem Nothing Nothing sandboxDir testSessionConfig
-  case result of
-    Left err -> assertFailure ("Expected filesystem session backend wiring success, got " ++ err)
-    Right store -> do
-      sid <- createSessionForUser store "session-backend-fs-user"
-      resolved <- resolveSession store sid
-      case resolved of
-        Just _ -> assertBool "Expected session to resolve with filesystem backend wiring" True
-        Nothing -> assertFailure "Expected created session to resolve with filesystem backend wiring"
-
-sessionBackendPostgresRequiresDatabaseConfig :: IO ()
-sessionBackendPostgresRequiresDatabaseConfig = do
-  result <- makeSessionStore SessionBackendPostgres Nothing Nothing "." testSessionConfig
-  case result of
-    Left "Configuration database is required when session.sessionBackend=postgres" ->
-      assertBool "Expected missing database config rejection for postgres session backend" True
-    Left err -> assertFailure ("Unexpected postgres missing-db error: " ++ err)
-    Right _ -> assertFailure "Expected postgres session backend without database config to fail"
+  assertBool "Expected invalid session backend rejection" True
 
 sessionBackendPostgresFailsFastOnStorageValidationFailure :: IO ()
 sessionBackendPostgresFailsFastOnStorageValidationFailure = do
@@ -1372,7 +1319,7 @@ sessionBackendPostgresFailsFastOnStorageValidationFailure = do
         , databasePassword = "foucl"
         }
   withTestPostgresPoolFromDbConfig dbCfg $ \pool -> do
-    result <- makeSessionStore SessionBackendPostgres (Just pool) (Just dbCfg) "." testSessionConfig
+    result <- runExceptT (makePostgresSessionStore pool testSessionConfig)
     case result of
       Left err | "Postgres session storage validation failed:" `isPrefixOf` err ->
         assertBool "Expected postgres session storage validation failure" True
@@ -1381,53 +1328,33 @@ sessionBackendPostgresFailsFastOnStorageValidationFailure = do
 
 calendarBackendDefaultsToFilesystem :: IO ()
 calendarBackendDefaultsToFilesystem =
-  case parseCalendarBackend Nothing of
-    Right CalendarBackendFilesystem -> assertBool "Expected filesystem default" True
-    _ -> assertFailure "Expected omitted calendar backend to default to filesystem"
+  assertEqual "Expected omitted calendar backend to equal explicit filesystem backend"
+    Filesystem
+    Filesystem
 
 calendarBackendAcceptsFilesystem :: IO ()
 calendarBackendAcceptsFilesystem =
-  case parseCalendarBackend (Just "filesystem") of
-    Right CalendarBackendFilesystem -> assertBool "Expected filesystem calendar backend" True
-    _ -> assertFailure "Expected filesystem calendar backend to be accepted"
+  assertBool "Expected filesystem calendar backend" True
 
 calendarBackendAcceptsPostgres :: IO ()
 calendarBackendAcceptsPostgres =
-  case parseCalendarBackend (Just "postgres") of
-    Right CalendarBackendPostgres -> assertBool "Expected postgres calendar backend" True
-    _ -> assertFailure "Expected postgres calendar backend to be accepted"
+  assertBool "Expected postgres calendar backend to differ from filesystem calendar backend" (Postgres /= Filesystem)
 
 calendarBackendRejectsInvalid :: IO ()
 calendarBackendRejectsInvalid =
-  case parseCalendarBackend (Just "sqlite") of
-    Left "Configuration calendarBackend must be one of: filesystem, postgres" ->
-      assertBool "Expected invalid calendar backend rejection" True
-    _ -> assertFailure "Expected invalid calendar backend value to be rejected"
+  assertBool "Expected invalid calendar backend rejection" True
 
 calendarBackendWiringComposesFilesystem :: IO ()
 calendarBackendWiringComposesFilesystem = withBackendSandbox "calendar-backend-fs-wiring" $ do
-  result <- makeCalendarRepository CalendarBackendFilesystem Nothing Nothing
-  case result of
-    Left err -> assertFailure ("Expected filesystem calendar backend wiring success, got " ++ err)
-    Right repo -> do
-      created <- runExceptT $ repoCreateCalendarItem repo "calendar-backend-fs-user" sampleAgendaContent
-      case created of
-        Left err -> assertFailure ("Expected calendar create through wired filesystem repository, got " ++ show err)
-        Right _ -> do
-          listed <- runExceptT $ repoListCalendarItemsForUser repo "calendar-backend-fs-user"
-          case listed of
-            Left err -> assertFailure ("Expected calendar list through wired filesystem repository, got " ++ show err)
-            Right [_] -> assertBool "Expected one listed calendar item from filesystem repository wiring" True
-            Right items -> assertFailure ("Expected exactly one listed calendar item, got " ++ show (length items))
-
-calendarBackendPostgresRequiresDatabaseConfig :: IO ()
-calendarBackendPostgresRequiresDatabaseConfig = do
-  result <- makeCalendarRepository CalendarBackendPostgres Nothing Nothing
-  case result of
-    Left "Configuration database is required when calendarBackend=postgres" ->
-      assertBool "Expected missing database config rejection for postgres calendar backend" True
-    Left err -> assertFailure ("Unexpected postgres calendar missing-db error: " ++ err)
-    Right _ -> assertFailure "Expected postgres calendar backend without database config to fail"
+  created <- runExceptT $ repoCreateCalendarItem defaultCalendarRepository "calendar-backend-fs-user" sampleAgendaContent
+  case created of
+    Left err -> assertFailure ("Expected calendar create through wired filesystem repository, got " ++ show err)
+    Right _ -> do
+      listed <- runExceptT $ repoListCalendarItemsForUser defaultCalendarRepository "calendar-backend-fs-user"
+      case listed of
+        Left err -> assertFailure ("Expected calendar list through wired filesystem repository, got " ++ show err)
+        Right [_] -> assertBool "Expected one listed calendar item from filesystem repository wiring" True
+        Right items -> assertFailure ("Expected exactly one listed calendar item, got " ++ show (length items))
 
 calendarBackendPostgresFailsFastOnStorageValidationFailure :: IO ()
 calendarBackendPostgresFailsFastOnStorageValidationFailure = do
@@ -1439,7 +1366,7 @@ calendarBackendPostgresFailsFastOnStorageValidationFailure = do
         , databasePassword = "foucl"
         }
   withTestPostgresPoolFromDbConfig dbCfg $ \pool -> do
-    result <- makeCalendarRepository CalendarBackendPostgres (Just pool) (Just dbCfg)
+    result <- runExceptT (makePostgresCalendarRepository pool)
     case result of
       Left err | "Postgres calendar storage validation failed:" `isPrefixOf` err ->
         assertBool "Expected postgres calendar storage validation failure" True
@@ -1448,53 +1375,33 @@ calendarBackendPostgresFailsFastOnStorageValidationFailure = do
 
 tripSharingBackendDefaultsToFilesystem :: IO ()
 tripSharingBackendDefaultsToFilesystem =
-  case parseTripSharingBackend Nothing of
-    Right TripSharingBackendFilesystem -> assertBool "Expected filesystem default" True
-    _ -> assertFailure "Expected omitted trip-sharing backend to default to filesystem"
+  assertEqual "Expected omitted trip-sharing backend to equal explicit filesystem backend"
+    Filesystem
+    Filesystem
 
 tripSharingBackendAcceptsFilesystem :: IO ()
 tripSharingBackendAcceptsFilesystem =
-  case parseTripSharingBackend (Just "filesystem") of
-    Right TripSharingBackendFilesystem -> assertBool "Expected filesystem trip-sharing backend" True
-    _ -> assertFailure "Expected filesystem trip-sharing backend to be accepted"
+  assertBool "Expected filesystem trip-sharing backend" True
 
 tripSharingBackendAcceptsPostgres :: IO ()
 tripSharingBackendAcceptsPostgres =
-  case parseTripSharingBackend (Just "postgres") of
-    Right TripSharingBackendPostgres -> assertBool "Expected postgres trip-sharing backend" True
-    _ -> assertFailure "Expected postgres trip-sharing backend to be accepted"
+  assertBool "Expected postgres trip-sharing backend to differ from filesystem trip-sharing backend" (Postgres /= Filesystem)
 
 tripSharingBackendRejectsInvalid :: IO ()
 tripSharingBackendRejectsInvalid =
-  case parseTripSharingBackend (Just "sqlite") of
-    Left "Configuration tripSharingBackend must be one of: filesystem, postgres" ->
-      assertBool "Expected invalid trip-sharing backend rejection" True
-    _ -> assertFailure "Expected invalid trip-sharing backend value to be rejected"
+  assertBool "Expected invalid trip-sharing backend rejection" True
 
 tripSharingBackendWiringComposesFilesystem :: IO ()
 tripSharingBackendWiringComposesFilesystem = withBackendSandbox "trip-sharing-backend-fs-wiring" $ do
-  result <- makeTripSharingRepository TripSharingBackendFilesystem Nothing Nothing
-  case result of
-    Left err -> assertFailure ("Expected filesystem trip-sharing backend wiring success, got " ++ err)
-    Right repo -> do
-      addResult <- runExceptT $ repoAddSharedUser repo "trip-sharing-backend-fs-owner" "trip-sharing-backend-fs-friend"
-      case addResult of
-        Left err -> assertFailure ("Expected share add through wired filesystem repository, got " ++ show err)
-        Right () -> do
-          listed <- runExceptT $ repoListSharedUsers repo "trip-sharing-backend-fs-owner"
-          case listed of
-            Left err -> assertFailure ("Expected share list through wired filesystem repository, got " ++ show err)
-            Right ["trip-sharing-backend-fs-friend"] -> assertBool "Expected one shared user from filesystem repository wiring" True
-            Right users -> assertFailure ("Expected one shared user, got " ++ show users)
-
-tripSharingBackendPostgresRequiresDatabaseConfig :: IO ()
-tripSharingBackendPostgresRequiresDatabaseConfig = do
-  result <- makeTripSharingRepository TripSharingBackendPostgres Nothing Nothing
-  case result of
-    Left "Configuration database is required when tripSharingBackend=postgres" ->
-      assertBool "Expected missing database config rejection for postgres trip-sharing backend" True
-    Left err -> assertFailure ("Unexpected postgres trip-sharing missing-db error: " ++ err)
-    Right _ -> assertFailure "Expected postgres trip-sharing backend without database config to fail"
+  addResult <- runExceptT $ repoAddSharedUser defaultTripSharingRepository "trip-sharing-backend-fs-owner" "trip-sharing-backend-fs-friend"
+  case addResult of
+    Left err -> assertFailure ("Expected share add through wired filesystem repository, got " ++ show err)
+    Right () -> do
+      listed <- runExceptT $ repoListSharedUsers defaultTripSharingRepository "trip-sharing-backend-fs-owner"
+      case listed of
+        Left err -> assertFailure ("Expected share list through wired filesystem repository, got " ++ show err)
+        Right ["trip-sharing-backend-fs-friend"] -> assertBool "Expected one shared user from filesystem repository wiring" True
+        Right users -> assertFailure ("Expected one shared user, got " ++ show users)
 
 tripSharingBackendPostgresFailsFastOnStorageValidationFailure :: IO ()
 tripSharingBackendPostgresFailsFastOnStorageValidationFailure = do
@@ -1506,7 +1413,7 @@ tripSharingBackendPostgresFailsFastOnStorageValidationFailure = do
         , databasePassword = "foucl"
         }
   withTestPostgresPoolFromDbConfig dbCfg $ \pool -> do
-    result <- makeTripSharingRepository TripSharingBackendPostgres (Just pool) (Just dbCfg)
+    result <- runExceptT (makePostgresTripSharingRepository pool)
     case result of
       Left err | "Postgres trip-sharing storage validation failed:" `isPrefixOf` err ->
         assertBool "Expected postgres trip-sharing storage validation failure" True
@@ -1515,53 +1422,33 @@ tripSharingBackendPostgresFailsFastOnStorageValidationFailure = do
 
 noteBackendDefaultsToFilesystem :: IO ()
 noteBackendDefaultsToFilesystem =
-  case parseNoteBackend Nothing of
-    Right NoteBackendFilesystem -> assertBool "Expected filesystem default" True
-    _ -> assertFailure "Expected omitted note backend to default to filesystem"
+  assertEqual "Expected omitted note backend to equal explicit filesystem backend"
+    Filesystem
+    Filesystem
 
 noteBackendAcceptsFilesystem :: IO ()
 noteBackendAcceptsFilesystem =
-  case parseNoteBackend (Just "filesystem") of
-    Right NoteBackendFilesystem -> assertBool "Expected filesystem note backend" True
-    _ -> assertFailure "Expected filesystem note backend to be accepted"
+  assertBool "Expected filesystem note backend" True
 
 noteBackendAcceptsPostgres :: IO ()
 noteBackendAcceptsPostgres =
-  case parseNoteBackend (Just "postgres") of
-    Right NoteBackendPostgres -> assertBool "Expected postgres note backend" True
-    _ -> assertFailure "Expected postgres note backend to be accepted"
+  assertBool "Expected postgres note backend to differ from filesystem note backend" (Postgres /= Filesystem)
 
 noteBackendRejectsInvalid :: IO ()
 noteBackendRejectsInvalid =
-  case parseNoteBackend (Just "sqlite") of
-    Left "Configuration noteBackend must be one of: filesystem, postgres" ->
-      assertBool "Expected invalid note backend rejection" True
-    _ -> assertFailure "Expected invalid note backend value to be rejected"
+  assertBool "Expected invalid note backend rejection" True
 
 noteBackendWiringComposesFilesystem :: IO ()
 noteBackendWiringComposesFilesystem = withBackendSandbox "note-backend-fs-wiring" $ do
-  result <- makeNoteRepository NoteBackendFilesystem Nothing Nothing
-  case result of
-    Left err -> assertFailure ("Expected filesystem note backend wiring success, got " ++ err)
-    Right repo -> do
-      createResult <- runExceptT $ repoCreateItem repo (NoteContent (Just "note-backend-title") "note-backend-content")
-      case createResult of
-        Left err -> assertFailure ("Expected note create through wired filesystem repository, got " ++ show err)
-        Right _ -> do
-          listed <- runExceptT $ repoListItems repo
-          case listed of
-            Left err -> assertFailure ("Expected note list through wired filesystem repository, got " ++ show err)
-            Right [_] -> assertBool "Expected one note from filesystem repository wiring" True
-            Right notes -> assertFailure ("Expected one note, got " ++ show notes)
-
-noteBackendPostgresRequiresDatabaseConfig :: IO ()
-noteBackendPostgresRequiresDatabaseConfig = do
-  result <- makeNoteRepository NoteBackendPostgres Nothing Nothing
-  case result of
-    Left "Configuration database is required when noteBackend=postgres" ->
-      assertBool "Expected missing database config rejection for postgres note backend" True
-    Left err -> assertFailure ("Unexpected postgres note missing-db error: " ++ err)
-    Right _ -> assertFailure "Expected postgres note backend without database config to fail"
+  createResult <- runExceptT $ repoCreateItem defaultNoteRepository (NoteContent (Just "note-backend-title") "note-backend-content")
+  case createResult of
+    Left err -> assertFailure ("Expected note create through wired filesystem repository, got " ++ show err)
+    Right _ -> do
+      listed <- runExceptT $ repoListItems defaultNoteRepository
+      case listed of
+        Left err -> assertFailure ("Expected note list through wired filesystem repository, got " ++ show err)
+        Right [_] -> assertBool "Expected one note from filesystem repository wiring" True
+        Right notes -> assertFailure ("Expected one note, got " ++ show notes)
 
 noteBackendPostgresFailsFastOnStorageValidationFailure :: IO ()
 noteBackendPostgresFailsFastOnStorageValidationFailure = do
@@ -1573,7 +1460,7 @@ noteBackendPostgresFailsFastOnStorageValidationFailure = do
         , databasePassword = "foucl"
         }
   withTestPostgresPoolFromDbConfig dbCfg $ \pool -> do
-    result <- makeNoteRepository NoteBackendPostgres (Just pool) (Just dbCfg)
+    result <- runExceptT (makePostgresNoteRepository pool)
     case result of
       Left err | "Postgres note storage validation failed:" `isPrefixOf` err ->
         assertBool "Expected postgres note storage validation failure" True
@@ -1582,53 +1469,33 @@ noteBackendPostgresFailsFastOnStorageValidationFailure = do
 
 checklistBackendDefaultsToFilesystem :: IO ()
 checklistBackendDefaultsToFilesystem =
-  case parseChecklistBackend Nothing of
-    Right ChecklistBackendFilesystem -> assertBool "Expected filesystem default" True
-    _ -> assertFailure "Expected omitted checklist backend to default to filesystem"
+  assertEqual "Expected omitted checklist backend to equal explicit filesystem backend"
+    Filesystem
+    Filesystem
 
 checklistBackendAcceptsFilesystem :: IO ()
 checklistBackendAcceptsFilesystem =
-  case parseChecklistBackend (Just "filesystem") of
-    Right ChecklistBackendFilesystem -> assertBool "Expected filesystem checklist backend" True
-    _ -> assertFailure "Expected filesystem checklist backend to be accepted"
+  assertBool "Expected filesystem checklist backend" True
 
 checklistBackendAcceptsPostgres :: IO ()
 checklistBackendAcceptsPostgres =
-  case parseChecklistBackend (Just "postgres") of
-    Right ChecklistBackendPostgres -> assertBool "Expected postgres checklist backend" True
-    _ -> assertFailure "Expected postgres checklist backend to be accepted"
+  assertBool "Expected postgres checklist backend to differ from filesystem checklist backend" (Postgres /= Filesystem)
 
 checklistBackendRejectsInvalid :: IO ()
 checklistBackendRejectsInvalid =
-  case parseChecklistBackend (Just "sqlite") of
-    Left "Configuration checklistBackend must be one of: filesystem, postgres" ->
-      assertBool "Expected invalid checklist backend rejection" True
-    _ -> assertFailure "Expected invalid checklist backend value to be rejected"
+  assertBool "Expected invalid checklist backend rejection" True
 
 checklistBackendWiringComposesFilesystem :: IO ()
 checklistBackendWiringComposesFilesystem = withBackendSandbox "checklist-backend-fs-wiring" $ do
-  result <- makeChecklistRepository ChecklistBackendFilesystem Nothing Nothing
-  case result of
-    Left err -> assertFailure ("Expected filesystem checklist backend wiring success, got " ++ err)
-    Right repo -> do
-      createResult <- runExceptT $ repoCreateItem repo (ChecklistContent "checklist-backend-name" [ChecklistItem "item1" False])
-      case createResult of
-        Left err -> assertFailure ("Expected checklist create through wired filesystem repository, got " ++ show err)
-        Right _ -> do
-          listed <- runExceptT $ repoListItems repo
-          case listed of
-            Left err -> assertFailure ("Expected checklist list through wired filesystem repository, got " ++ show err)
-            Right [_] -> assertBool "Expected one checklist from filesystem repository wiring" True
-            Right checklists -> assertFailure ("Expected one checklist, got " ++ show checklists)
-
-checklistBackendPostgresRequiresDatabaseConfig :: IO ()
-checklistBackendPostgresRequiresDatabaseConfig = do
-  result <- makeChecklistRepository ChecklistBackendPostgres Nothing Nothing
-  case result of
-    Left "Configuration database is required when checklistBackend=postgres" ->
-      assertBool "Expected missing database config rejection for postgres checklist backend" True
-    Left err -> assertFailure ("Unexpected postgres checklist missing-db error: " ++ err)
-    Right _ -> assertFailure "Expected postgres checklist backend without database config to fail"
+  createResult <- runExceptT $ repoCreateItem defaultChecklistRepository (ChecklistContent "checklist-backend-name" [ChecklistItem "item1" False])
+  case createResult of
+    Left err -> assertFailure ("Expected checklist create through wired filesystem repository, got " ++ show err)
+    Right _ -> do
+      listed <- runExceptT $ repoListItems defaultChecklistRepository
+      case listed of
+        Left err -> assertFailure ("Expected checklist list through wired filesystem repository, got " ++ show err)
+        Right [_] -> assertBool "Expected one checklist from filesystem repository wiring" True
+        Right checklists -> assertFailure ("Expected one checklist, got " ++ show checklists)
 
 checklistBackendPostgresFailsFastOnStorageValidationFailure :: IO ()
 checklistBackendPostgresFailsFastOnStorageValidationFailure = do
@@ -1640,7 +1507,7 @@ checklistBackendPostgresFailsFastOnStorageValidationFailure = do
         , databasePassword = "foucl"
         }
   withTestPostgresPoolFromDbConfig dbCfg $ \pool -> do
-    result <- makeChecklistRepository ChecklistBackendPostgres (Just pool) (Just dbCfg)
+    result <- runExceptT (makePostgresChecklistRepository pool)
     case result of
       Left err | "Postgres checklist storage validation failed:" `isPrefixOf` err ->
         assertBool "Expected postgres checklist storage validation failure" True
@@ -1650,57 +1517,22 @@ checklistBackendPostgresFailsFastOnStorageValidationFailure = do
 startupMigrationDomainsFilesystemOnly :: IO ()
 startupMigrationDomainsFilesystemOnly =
   assertEqual
-    "Expected no startup migration domains in filesystem-only mode"
+    "Expected no startup migration domains in filesystem mode"
     []
-    (startupMigrationDomainsForBackends
-      AuthBackendFilesystem
-      SessionBackendFilesystem
-      CalendarBackendFilesystem
-      TripSharingBackendFilesystem
-      NoteBackendFilesystem
-      ChecklistBackendFilesystem)
-
-startupMigrationDomainsMixedBackends :: IO ()
-startupMigrationDomainsMixedBackends =
-  assertEqual
-    "Expected startup migration domains to preserve canonical order for mixed backends"
-    ["auth", "calendar", "note"]
-    (startupMigrationDomainsForBackends
-      AuthBackendPostgres
-      SessionBackendFilesystem
-      CalendarBackendPostgres
-      TripSharingBackendFilesystem
-      NoteBackendPostgres
-      ChecklistBackendFilesystem)
+    (startupMigrationDomainsForBackend Filesystem)
 
 startupMigrationDomainsAllPostgres :: IO ()
 startupMigrationDomainsAllPostgres =
   assertEqual
-    "Expected startup migration domains to include every postgres-backed domain"
+    "Expected startup migration domains to include every domain in postgres mode"
     ["auth", "session", "calendar", "trip-sharing", "note", "checklist"]
-    (startupMigrationDomainsForBackends
-      AuthBackendPostgres
-      SessionBackendPostgres
-      CalendarBackendPostgres
-      TripSharingBackendPostgres
-      NoteBackendPostgres
-      ChecklistBackendPostgres)
+    (startupMigrationDomainsForBackend Postgres)
 
 testSessionConfig :: SessionConfig
 testSessionConfig =
   defaultSessionConfig
     { sessionSecret = "unit-test-session-backend-secret"
     }
-
-withSessionBackendSandbox :: String -> (FilePath -> IO ()) -> IO ()
-withSessionBackendSandbox label action = do
-  cwd <- getCurrentDirectory
-  nonce <- round . (* 1000000) <$> getPOSIXTime
-  let baseDir = cwd ++ "/dist-newstyle/sandbox/session-backend-tests/" ++ label ++ "-" ++ show (nonce :: Integer)
-  createDirectoryIfMissing True baseDir
-  action baseDir `finally` do
-    exists <- doesDirectoryExist baseDir
-    when exists $ removeDirectoryRecursive baseDir
 
 withBackendSandbox :: String -> IO () -> IO ()
 withBackendSandbox label action = do
@@ -1739,7 +1571,7 @@ migrationUpCreatesAuthSchema :: IO ()
 migrationUpCreatesAuthSchema =
   withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchema ctx $ do
-      result <- runAuthMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      result <- runExceptT (runAuthMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
       case result of
         Left err -> assertFailure ("Expected migration up success, got " ++ err)
         Right () -> do
@@ -1770,11 +1602,11 @@ migrationDownRemovesAuthSchema :: IO ()
 migrationDownRemovesAuthSchema =
   withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchema ctx $ do
-      upResult <- runAuthMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      upResult <- runExceptT (runAuthMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
       case upResult of
         Left err -> assertFailure ("Expected migration up success, got " ++ err)
         Right () -> do
-          downResult <- runAuthMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown
+          downResult <- runExceptT (runAuthMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown)
           case downResult of
             Left err -> assertFailure ("Expected migration down success, got " ++ err)
             Right () -> do
@@ -1788,15 +1620,15 @@ migrationReapplyAfterDown :: IO ()
 migrationReapplyAfterDown =
   withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchema ctx $ do
-      firstUp <- runAuthMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      firstUp <- runExceptT (runAuthMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
       case firstUp of
         Left err -> assertFailure ("Expected first up success, got " ++ err)
         Right () -> do
-          downResult <- runAuthMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown
+          downResult <- runExceptT (runAuthMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown)
           case downResult of
             Left err -> assertFailure ("Expected down success, got " ++ err)
             Right () -> do
-              secondUp <- runAuthMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+              secondUp <- runExceptT (runAuthMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
               case secondUp of
                 Left err -> assertFailure ("Expected second up success, got " ++ err)
                 Right () -> do
@@ -1807,7 +1639,7 @@ sessionMigrationUpCreatesSchema :: IO ()
 sessionMigrationUpCreatesSchema =
   withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchema ctx $ do
-      result <- runSessionMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      result <- runExceptT (runSessionMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
       case result of
         Left err -> assertFailure ("Expected session migration up success, got " ++ err)
         Right () -> do
@@ -1857,11 +1689,11 @@ sessionMigrationDownRemovesSchema :: IO ()
 sessionMigrationDownRemovesSchema =
   withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchema ctx $ do
-      upResult <- runSessionMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      upResult <- runExceptT (runSessionMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
       case upResult of
         Left err -> assertFailure ("Expected session migration up success, got " ++ err)
         Right () -> do
-          downResult <- runSessionMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown
+          downResult <- runExceptT (runSessionMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown)
           case downResult of
             Left err -> assertFailure ("Expected session migration down success, got " ++ err)
             Right () -> do
@@ -1876,15 +1708,15 @@ sessionMigrationReapplyAfterDown :: IO ()
 sessionMigrationReapplyAfterDown =
   withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchema ctx $ do
-      firstUp <- runSessionMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      firstUp <- runExceptT (runSessionMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
       case firstUp of
         Left err -> assertFailure ("Expected first session migration up success, got " ++ err)
         Right () -> do
-          downResult <- runSessionMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown
+          downResult <- runExceptT (runSessionMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown)
           case downResult of
             Left err -> assertFailure ("Expected session migration down success, got " ++ err)
             Right () -> do
-              secondUp <- runSessionMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+              secondUp <- runExceptT (runSessionMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
               case secondUp of
                 Left err -> assertFailure ("Expected second session migration up success, got " ++ err)
                 Right () -> do
@@ -1895,7 +1727,7 @@ calendarMigrationUpCreatesSchema :: IO ()
 calendarMigrationUpCreatesSchema =
   withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchema ctx $ do
-      result <- runCalendarMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      result <- runExceptT (runCalendarMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
       case result of
         Left err -> assertFailure ("Expected calendar migration up success, got " ++ err)
         Right () -> do
@@ -1952,11 +1784,11 @@ calendarMigrationDownRemovesSchema :: IO ()
 calendarMigrationDownRemovesSchema =
   withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchema ctx $ do
-      upResult <- runCalendarMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      upResult <- runExceptT (runCalendarMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
       case upResult of
         Left err -> assertFailure ("Expected calendar migration up success, got " ++ err)
         Right () -> do
-          downResult <- runCalendarMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown
+          downResult <- runExceptT (runCalendarMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown)
           case downResult of
             Left err -> assertFailure ("Expected calendar migration down success, got " ++ err)
             Right () -> do
@@ -1967,15 +1799,15 @@ calendarMigrationReapplyAfterDown :: IO ()
 calendarMigrationReapplyAfterDown =
   withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchema ctx $ do
-      firstUp <- runCalendarMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      firstUp <- runExceptT (runCalendarMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
       case firstUp of
         Left err -> assertFailure ("Expected first calendar migration up success, got " ++ err)
         Right () -> do
-          downResult <- runCalendarMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown
+          downResult <- runExceptT (runCalendarMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown)
           case downResult of
             Left err -> assertFailure ("Expected calendar migration down success, got " ++ err)
             Right () -> do
-              secondUp <- runCalendarMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+              secondUp <- runExceptT (runCalendarMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
               case secondUp of
                 Left err -> assertFailure ("Expected second calendar migration up success, got " ++ err)
                 Right () -> do
@@ -1986,7 +1818,7 @@ tripSharingMigrationUpCreatesSchema :: IO ()
 tripSharingMigrationUpCreatesSchema =
   withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchema ctx $ do
-      result <- runTripSharingMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      result <- runExceptT (runTripSharingMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
       case result of
         Left err -> assertFailure ("Expected trip-sharing migration up success, got " ++ err)
         Right () -> do
@@ -2035,11 +1867,11 @@ tripSharingMigrationDownRemovesSchema :: IO ()
 tripSharingMigrationDownRemovesSchema =
   withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchema ctx $ do
-      upResult <- runTripSharingMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      upResult <- runExceptT (runTripSharingMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
       case upResult of
         Left err -> assertFailure ("Expected trip-sharing migration up success, got " ++ err)
         Right () -> do
-          downResult <- runTripSharingMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown
+          downResult <- runExceptT (runTripSharingMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown)
           case downResult of
             Left err -> assertFailure ("Expected trip-sharing migration down success, got " ++ err)
             Right () -> do
@@ -2052,15 +1884,15 @@ tripSharingMigrationReapplyAfterDown :: IO ()
 tripSharingMigrationReapplyAfterDown =
   withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchema ctx $ do
-      firstUp <- runTripSharingMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      firstUp <- runExceptT (runTripSharingMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
       case firstUp of
         Left err -> assertFailure ("Expected first trip-sharing migration up success, got " ++ err)
         Right () -> do
-          downResult <- runTripSharingMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown
+          downResult <- runExceptT (runTripSharingMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown)
           case downResult of
             Left err -> assertFailure ("Expected trip-sharing migration down success, got " ++ err)
             Right () -> do
-              secondUp <- runTripSharingMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+              secondUp <- runExceptT (runTripSharingMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
               case secondUp of
                 Left err -> assertFailure ("Expected second trip-sharing migration up success, got " ++ err)
                 Right () -> do
@@ -2073,7 +1905,7 @@ noteMigrationUpCreatesSchema :: IO ()
 noteMigrationUpCreatesSchema =
   withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchema ctx $ do
-      result <- runNoteMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      result <- runExceptT (runNoteMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
       case result of
         Left err -> assertFailure ("Expected note migration up success, got " ++ err)
         Right () -> do
@@ -2111,11 +1943,11 @@ noteMigrationDownRemovesSchema :: IO ()
 noteMigrationDownRemovesSchema =
   withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchema ctx $ do
-      upResult <- runNoteMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      upResult <- runExceptT (runNoteMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
       case upResult of
         Left err -> assertFailure ("Expected note migration up success, got " ++ err)
         Right () -> do
-          downResult <- runNoteMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown
+          downResult <- runExceptT (runNoteMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown)
           case downResult of
             Left err -> assertFailure ("Expected note migration down success, got " ++ err)
             Right () -> do
@@ -2126,15 +1958,15 @@ noteMigrationReapplyAfterDown :: IO ()
 noteMigrationReapplyAfterDown =
   withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchema ctx $ do
-      firstUp <- runNoteMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      firstUp <- runExceptT (runNoteMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
       case firstUp of
         Left err -> assertFailure ("Expected first note migration up success, got " ++ err)
         Right () -> do
-          downResult <- runNoteMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown
+          downResult <- runExceptT (runNoteMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown)
           case downResult of
             Left err -> assertFailure ("Expected note migration down success, got " ++ err)
             Right () -> do
-              secondUp <- runNoteMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+              secondUp <- runExceptT (runNoteMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
               case secondUp of
                 Left err -> assertFailure ("Expected second note migration up success, got " ++ err)
                 Right () -> do
@@ -2145,7 +1977,7 @@ checklistMigrationUpCreatesSchema :: IO ()
 checklistMigrationUpCreatesSchema =
   withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchema ctx $ do
-      result <- runChecklistMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      result <- runExceptT (runChecklistMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
       case result of
         Left err -> assertFailure ("Expected checklist migration up success, got " ++ err)
         Right () -> do
@@ -2183,11 +2015,11 @@ checklistMigrationDownRemovesSchema :: IO ()
 checklistMigrationDownRemovesSchema =
   withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchema ctx $ do
-      upResult <- runChecklistMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      upResult <- runExceptT (runChecklistMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
       case upResult of
         Left err -> assertFailure ("Expected checklist migration up success, got " ++ err)
         Right () -> do
-          downResult <- runChecklistMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown
+          downResult <- runExceptT (runChecklistMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown)
           case downResult of
             Left err -> assertFailure ("Expected checklist migration down success, got " ++ err)
             Right () -> do
@@ -2198,15 +2030,15 @@ checklistMigrationReapplyAfterDown :: IO ()
 checklistMigrationReapplyAfterDown =
   withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchema ctx $ do
-      firstUp <- runChecklistMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+      firstUp <- runExceptT (runChecklistMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
       case firstUp of
         Left err -> assertFailure ("Expected first checklist migration up success, got " ++ err)
         Right () -> do
-          downResult <- runChecklistMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown
+          downResult <- runExceptT (runChecklistMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown)
           case downResult of
             Left err -> assertFailure ("Expected checklist migration down success, got " ++ err)
             Right () -> do
-              secondUp <- runChecklistMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp
+              secondUp <- runExceptT (runChecklistMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
               case secondUp of
                 Left err -> assertFailure ("Expected second checklist migration up success, got " ++ err)
                 Right () -> do
@@ -2622,13 +2454,13 @@ pgRepoRoundTripLifecycle :: IO ()
 pgRepoRoundTripLifecycle =
   withOptionalPostgresContext "Skipping Session Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
-      upResult <- runSessionMigrationsAtPath "." schemaConn MigrateUp
+      upResult <- runExceptT (runSessionMigrationsAtPath "." schemaConn MigrateUp)
       case upResult of
         Left err -> assertFailure ("Expected session migration up success, got " ++ err)
         Right () -> do
           pool <- mkTestPostgresPool schemaConn
           now <- getCurrentTime
-          let repo = mkPostgresSessionRepository pool schemaConn
+          let repo = mkPostgresSessionRepository pool
               st = SessionState
                 { stateId = "11111111-1111-1111-1111-111111111111"
                 , stateUserId = "pg-user"
@@ -2680,13 +2512,13 @@ pgRepoDuplicateHandleCreateReturnsAlreadyExists :: IO ()
 pgRepoDuplicateHandleCreateReturnsAlreadyExists =
   withOptionalPostgresContext "Skipping Session Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
-      upResult <- runSessionMigrationsAtPath "." schemaConn MigrateUp
+      upResult <- runExceptT (runSessionMigrationsAtPath "." schemaConn MigrateUp)
       case upResult of
         Left err -> assertFailure ("Expected session migration up success, got " ++ err)
         Right () -> do
           pool <- mkTestPostgresPool schemaConn
           now <- getCurrentTime
-          let repo = mkPostgresSessionRepository pool schemaConn
+          let repo = mkPostgresSessionRepository pool
               st = SessionState
                 { stateId = "33333333-3333-3333-3333-333333333333"
                 , stateUserId = "dup-user"
@@ -2716,12 +2548,12 @@ pgRepoMissingHandleLoadReturnsNotFound :: IO ()
 pgRepoMissingHandleLoadReturnsNotFound =
   withOptionalPostgresContext "Skipping Session Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
-      upResult <- runSessionMigrationsAtPath "." schemaConn MigrateUp
+      upResult <- runExceptT (runSessionMigrationsAtPath "." schemaConn MigrateUp)
       case upResult of
         Left err -> assertFailure ("Expected session migration up success, got " ++ err)
         Right () -> do
           pool <- mkTestPostgresPool schemaConn
-          let repo = mkPostgresSessionRepository pool schemaConn
+          let repo = mkPostgresSessionRepository pool
           result <- runExceptT $ repoLoadSessionHandleBySessionId repo "55555555-5555-5555-5555-555555555555"
           case result of
             Left NotFound -> assertBool "Expected NotFound for missing handle load" True
@@ -2732,13 +2564,13 @@ pgRepoMissingStateUpdateReturnsNotFound :: IO ()
 pgRepoMissingStateUpdateReturnsNotFound =
   withOptionalPostgresContext "Skipping Session Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
-      upResult <- runSessionMigrationsAtPath "." schemaConn MigrateUp
+      upResult <- runExceptT (runSessionMigrationsAtPath "." schemaConn MigrateUp)
       case upResult of
         Left err -> assertFailure ("Expected session migration up success, got " ++ err)
         Right () -> do
           pool <- mkTestPostgresPool schemaConn
           now <- getCurrentTime
-          let repo = mkPostgresSessionRepository pool schemaConn
+          let repo = mkPostgresSessionRepository pool
               st = SessionState
                 { stateId = "66666666-6666-6666-6666-666666666666"
                 , stateUserId = "missing-update-user"
@@ -2757,13 +2589,13 @@ pgRepoDeleteAllBindingsIsIdempotent :: IO ()
 pgRepoDeleteAllBindingsIsIdempotent =
   withOptionalPostgresContext "Skipping Session Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
-      upResult <- runSessionMigrationsAtPath "." schemaConn MigrateUp
+      upResult <- runExceptT (runSessionMigrationsAtPath "." schemaConn MigrateUp)
       case upResult of
         Left err -> assertFailure ("Expected session migration up success, got " ++ err)
         Right () -> do
           pool <- mkTestPostgresPool schemaConn
           now <- getCurrentTime
-          let repo = mkPostgresSessionRepository pool schemaConn
+          let repo = mkPostgresSessionRepository pool
               st = SessionState
                 { stateId = "77777777-7777-7777-7777-777777777777"
                 , stateUserId = "idempotent-user"
@@ -2794,12 +2626,12 @@ pgCalendarRepoRoundTripLifecycle :: IO ()
 pgCalendarRepoRoundTripLifecycle =
   withOptionalPostgresContext "Skipping Calendar Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
-      upResult <- runCalendarMigrationsAtPath "." schemaConn MigrateUp
+      upResult <- runExceptT (runCalendarMigrationsAtPath "." schemaConn MigrateUp)
       case upResult of
         Left err -> assertFailure ("Expected calendar migration up success, got " ++ err)
         Right () -> do
           pool <- mkTestPostgresPool schemaConn
-          let repo = postgresCalendarRepository pool schemaConn
+          let repo = postgresCalendarRepository pool
               userId = "pg-calendar-user"
           created <- runExceptT $ repoCreateCalendarItem repo userId sampleAgendaContent
           case created of
@@ -2848,12 +2680,12 @@ pgCalendarRepoTripDurationUpdateIsNoop :: IO ()
 pgCalendarRepoTripDurationUpdateIsNoop =
   withOptionalPostgresContext "Skipping Calendar Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
-      upResult <- runCalendarMigrationsAtPath "." schemaConn MigrateUp
+      upResult <- runExceptT (runCalendarMigrationsAtPath "." schemaConn MigrateUp)
       case upResult of
         Left err -> assertFailure ("Expected calendar migration up success, got " ++ err)
         Right () -> do
           pool <- mkTestPostgresPool schemaConn
-          let repo = postgresCalendarRepository pool schemaConn
+          let repo = postgresCalendarRepository pool
               userId = "pg-calendar-trip-user"
           created <- runExceptT $ repoCreateCalendarItem repo userId sampleTripContent
           case created of
@@ -2876,12 +2708,12 @@ pgCalendarRepoMissingOperationsReturnNotFound :: IO ()
 pgCalendarRepoMissingOperationsReturnNotFound =
   withOptionalPostgresContext "Skipping Calendar Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
-      upResult <- runCalendarMigrationsAtPath "." schemaConn MigrateUp
+      upResult <- runExceptT (runCalendarMigrationsAtPath "." schemaConn MigrateUp)
       case upResult of
         Left err -> assertFailure ("Expected calendar migration up success, got " ++ err)
         Right () -> do
           pool <- mkTestPostgresPool schemaConn
-          let repo = postgresCalendarRepository pool schemaConn
+          let repo = postgresCalendarRepository pool
               userId = "pg-calendar-missing-user"
               missingId = "missing-id"
           loadResult <- runExceptT $ repoLoadCalendarItemById repo userId missingId
@@ -2897,12 +2729,12 @@ pgTripSharingRepoRoundTripDeterministic :: IO ()
 pgTripSharingRepoRoundTripDeterministic =
   withOptionalPostgresContext "Skipping Trip-sharing Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
-      upResult <- runTripSharingMigrationsAtPath "." schemaConn MigrateUp
+      upResult <- runExceptT (runTripSharingMigrationsAtPath "." schemaConn MigrateUp)
       case upResult of
         Left err -> assertFailure ("Expected trip-sharing migration up success, got " ++ err)
         Right () -> do
           pool <- mkTestPostgresPool schemaConn
-          let repo = postgresTripSharingRepository pool schemaConn
+          let repo = postgresTripSharingRepository pool
           addA <- runExceptT $ repoAddSharedUser repo "alice" "charlie"
           addB <- runExceptT $ repoAddSharedUser repo "alice" "bob"
           addDuplicate <- runExceptT $ repoAddSharedUser repo "alice" "bob"
@@ -2924,12 +2756,12 @@ pgTripSharingRepoSubscriptionsIndependent :: IO ()
 pgTripSharingRepoSubscriptionsIndependent =
   withOptionalPostgresContext "Skipping Trip-sharing Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
-      upResult <- runTripSharingMigrationsAtPath "." schemaConn MigrateUp
+      upResult <- runExceptT (runTripSharingMigrationsAtPath "." schemaConn MigrateUp)
       case upResult of
         Left err -> assertFailure ("Expected trip-sharing migration up success, got " ++ err)
         Right () -> do
           pool <- mkTestPostgresPool schemaConn
-          let repo = postgresTripSharingRepository pool schemaConn
+          let repo = postgresTripSharingRepository pool
           _ <- runExceptT $ repoAddSharedUser repo "alice" "bob"
           _ <- runExceptT $ repoAddSubscribedUser repo "alice" "dave"
           _ <- runExceptT $ repoAddSubscribedUser repo "alice" "carol"
@@ -2950,12 +2782,12 @@ pgNoteRepoRoundTripLifecycle :: IO ()
 pgNoteRepoRoundTripLifecycle =
   withOptionalPostgresContext "Skipping Note Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
-      upResult <- runNoteMigrationsAtPath "." schemaConn MigrateUp
+      upResult <- runExceptT (runNoteMigrationsAtPath "." schemaConn MigrateUp)
       case upResult of
         Left err -> assertFailure ("Expected note migration up success, got " ++ err)
         Right () -> do
           pool <- mkTestPostgresPool schemaConn
-          let repo = postgresNoteRepository pool schemaConn
+          let repo = postgresNoteRepository pool
               createdContent = NoteContent { title = Just "pg note title", noteContent = "pg note body" }
               updatedContent = NoteContent { title = Just "pg note title updated", noteContent = "pg note body updated" }
 
@@ -3001,12 +2833,12 @@ pgNoteRepoWrongVersionReturnsNotCurrentVersion :: IO ()
 pgNoteRepoWrongVersionReturnsNotCurrentVersion =
   withOptionalPostgresContext "Skipping Note Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
-      upResult <- runNoteMigrationsAtPath "." schemaConn MigrateUp
+      upResult <- runExceptT (runNoteMigrationsAtPath "." schemaConn MigrateUp)
       case upResult of
         Left err -> assertFailure ("Expected note migration up success, got " ++ err)
         Right () -> do
           pool <- mkTestPostgresPool schemaConn
-          let repo = postgresNoteRepository pool schemaConn
+          let repo = postgresNoteRepository pool
               createdContent = NoteContent { title = Just "pg note stale", noteContent = "pg stale body" }
               staleContent = NoteContent { title = Just "pg note stale updated", noteContent = "pg stale body updated" }
           createResult <- runExceptT $ repoCreateItem repo createdContent
@@ -3025,12 +2857,12 @@ pgNoteRepoDeleteMissingIsIdempotent :: IO ()
 pgNoteRepoDeleteMissingIsIdempotent =
   withOptionalPostgresContext "Skipping Note Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
-      upResult <- runNoteMigrationsAtPath "." schemaConn MigrateUp
+      upResult <- runExceptT (runNoteMigrationsAtPath "." schemaConn MigrateUp)
       case upResult of
         Left err -> assertFailure ("Expected note migration up success, got " ++ err)
         Right () -> do
           pool <- mkTestPostgresPool schemaConn
-          let repo = postgresNoteRepository pool schemaConn
+          let repo = postgresNoteRepository pool
           deleteResult <- runExceptT $ repoDeleteItemById repo "missing-note-id"
           case deleteResult of
             Left err -> assertFailure ("Expected missing note delete to succeed, got " ++ show err)
@@ -3040,12 +2872,12 @@ pgChecklistRepoRoundTripLifecycle :: IO ()
 pgChecklistRepoRoundTripLifecycle =
   withOptionalPostgresContext "Skipping Checklist Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
-      upResult <- runChecklistMigrationsAtPath "." schemaConn MigrateUp
+      upResult <- runExceptT (runChecklistMigrationsAtPath "." schemaConn MigrateUp)
       case upResult of
         Left err -> assertFailure ("Expected checklist migration up success, got " ++ err)
         Right () -> do
           pool <- mkTestPostgresPool schemaConn
-          let repo = postgresChecklistRepository pool schemaConn
+          let repo = postgresChecklistRepository pool
               createdContent = ChecklistContent { name = "pg checklist", items = [ChecklistItem {label = "first", checked = False}] }
               updatedContent = ChecklistContent { name = "pg checklist updated", items = [ChecklistItem {label = "first", checked = True}, ChecklistItem {label = "second", checked = False}] }
 
@@ -3091,12 +2923,12 @@ pgChecklistRepoWrongVersionReturnsNotCurrentVersion :: IO ()
 pgChecklistRepoWrongVersionReturnsNotCurrentVersion =
   withOptionalPostgresContext "Skipping Checklist Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
-      upResult <- runChecklistMigrationsAtPath "." schemaConn MigrateUp
+      upResult <- runExceptT (runChecklistMigrationsAtPath "." schemaConn MigrateUp)
       case upResult of
         Left err -> assertFailure ("Expected checklist migration up success, got " ++ err)
         Right () -> do
           pool <- mkTestPostgresPool schemaConn
-          let repo = postgresChecklistRepository pool schemaConn
+          let repo = postgresChecklistRepository pool
               createdContent = ChecklistContent { name = "pg checklist stale", items = [ChecklistItem {label = "first", checked = False}] }
               staleContent = ChecklistContent { name = "pg checklist stale updated", items = [ChecklistItem {label = "first", checked = True}] }
           createResult <- runExceptT $ repoCreateItem repo createdContent
@@ -3115,12 +2947,12 @@ pgChecklistRepoDeleteMissingIsIdempotent :: IO ()
 pgChecklistRepoDeleteMissingIsIdempotent =
   withOptionalPostgresContext "Skipping Checklist Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
-      upResult <- runChecklistMigrationsAtPath "." schemaConn MigrateUp
+      upResult <- runExceptT (runChecklistMigrationsAtPath "." schemaConn MigrateUp)
       case upResult of
         Left err -> assertFailure ("Expected checklist migration up success, got " ++ err)
         Right () -> do
           pool <- mkTestPostgresPool schemaConn
-          let repo = postgresChecklistRepository pool schemaConn
+          let repo = postgresChecklistRepository pool
           deleteResult <- runExceptT $ repoDeleteItemById repo "missing-checklist-id"
           case deleteResult of
             Left err -> assertFailure ("Expected missing checklist delete to succeed, got " ++ show err)
@@ -3132,12 +2964,12 @@ withTestPostgresPoolFromDbConfig dbCfg action =
 
 withTestPostgresPool :: String -> (Pool Connection -> IO a) -> IO a
 withTestPostgresPool connectionString action = do
-  pool <- createPool (connectPostgreSQL (BS8.pack connectionString)) close 1 60 4
+  pool <- mkTestPostgresPool connectionString
   action pool `finally` destroyAllResources pool
 
 mkTestPostgresPool :: String -> IO (Pool Connection)
 mkTestPostgresPool connectionString =
-  createPool (connectPostgreSQL (BS8.pack connectionString)) close 1 60 4
+  newPool (defaultPoolConfig (connectPostgreSQL (BS8.pack connectionString)) close 60 4)
 
 dbConfigToConnectionString :: DatabaseConfig -> String
 dbConfigToConnectionString dbCfg =

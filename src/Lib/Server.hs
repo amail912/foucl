@@ -1,0 +1,977 @@
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE FlexibleContexts #-}
+
+module Lib.Server
+  ( apiController
+  , homePage
+  , serveStaticResource
+  , log
+  ) where
+
+import Prelude hiding (log)
+import Control.Concurrent.MVar (MVar, modifyMVar)
+import Control.Monad (foldM, join, mplus, msum)
+import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad.Trans.Class (lift)
+import Control.Monad.Trans.Except (ExceptT, runExceptT)
+import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
+import Data.Aeson (FromJSON(parseJSON), ToJSON(toJSON), decode, decode', encode, object, withObject, (.:), (.=))
+import Data.ByteString.Char8 (unpack)
+import Data.Char (toLower)
+import Data.Int (Int64)
+import Data.List (isPrefixOf, sortOn)
+import Data.Maybe (Maybe(..), catMaybes, mapMaybe)
+import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
+import Data.Time.Format (defaultTimeLocale, parseTimeM)
+import Data.Time.Format.ISO8601 (iso8601ParseM)
+import Data.Time.LocalTime (LocalTime)
+import Happstack.Server (CookieLife(Expired, Session), FilterMonad, Method(DELETE, GET, POST, PUT), Response, RqBody, ServerPartT, addCookie, askRq, defaultBodyPolicy, dir, getHeaderM, guessContentTypeM, internalServerError, look, method, mimeTypes, mkCookie, notFound, nullDir, ok, path, requestEntityTooLarge, serveFileFrom, takeRequestBody, toResponse, unauthorized, unBody, uriRest, setResponseCode)
+import qualified Happstack.Server as HServer
+import Happstack.Server.Internal.Cookie (Cookie(..), SameSite(..))
+import Happstack.Server.Internal.MessageWrap (BodyPolicy, bodyInput)
+import qualified AgendaModel as Agenda
+import Auth (AuthError(..), AuthRepository, AuthRequest(..), AuthRequestError(..), AuthenticatedProfile(..), approveUser, createUserWithBootstrapAdmin, deleteApprovedUser, deletePendingUser, isApprovedAdmin, listApprovedUsers, listPendingUsers, loadAuthenticatedProfile, signinUser, userExists)
+import CalendarRepository (CalendarRepository(..))
+import Crud
+import CrudStorage (createItem, deleteItem, modifyItem)
+import Lib.Config (AppConfig(..))
+import Model (Content, Identifiable(..))
+import NotesChecklistRepository (ChecklistRepository, NoteRepository, NotesChecklistRepository(..))
+import Repository (RepositoryError(..))
+import Session (SessionConfig(..), SessionPrincipal(..), SessionStore(..), signSessionId, verifyAndExtractSessionId)
+import System.Directory (getCurrentDirectory)
+import System.FilePath ((</>))
+import System.IO (hFlush, stdout)
+import TripSharingRepository (TripSharingRepository(..))
+
+newtype AppContext = AppContext
+  { sessionPrincipal :: SessionPrincipal }
+
+newtype TripPlace = TripPlace
+  { tripPlaceName :: String
+  }
+
+newtype TripSharingUser = TripSharingUser
+  { tripSharingUsername :: String
+  }
+
+newtype PendingSignupApproval = PendingSignupApproval
+  { pendingSignupApprovalUsername :: String
+  }
+
+data PeriodTripsUser = PeriodTripsUser
+  { periodTripsUsername :: !String
+  , periodTripsItems :: ![Agenda.CalendarItem]
+  }
+
+data StoredTripItem = StoredTripItem
+  { storedTripStart :: !LocalTime
+  , storedTripCalendarItem :: !Agenda.CalendarItem
+  }
+
+instance ToJSON TripPlace where
+  toJSON (TripPlace placeName) = object ["name" .= placeName]
+
+instance ToJSON TripSharingUser where
+  toJSON (TripSharingUser username) = object ["username" .= username]
+
+instance ToJSON PendingSignupApproval where
+  toJSON (PendingSignupApproval username) = object ["username" .= username]
+
+instance ToJSON PeriodTripsUser where
+  toJSON (PeriodTripsUser username trips) =
+    object
+      [ "username" .= username
+      , "trips" .= trips
+      ]
+
+instance FromJSON TripSharingUser where
+  parseJSON = withObject "TripSharingUser" $ \value -> TripSharingUser
+    <$> value .: "username"
+
+instance FromJSON PendingSignupApproval where
+  parseJSON = withObject "PendingSignupApproval" $ \value -> PendingSignupApproval
+    <$> value .: "username"
+
+tripPlacesCatalog :: [TripPlace]
+tripPlacesCatalog =
+  [ TripPlace "Paris"
+  , TripPlace "Le Mesnil"
+  , TripPlace "St Clair"
+  ]
+
+data TripWriteValidation
+  = TripWriteValid
+  | TripWriteBadRequest !String
+  | TripWriteNotFound
+  | TripWriteTechnicalFailure
+
+tripPlaceNames :: [String]
+tripPlaceNames = map tripPlaceName tripPlacesCatalog
+
+validateTripWrite :: CalendarRepository -> String -> Maybe String -> Agenda.CalendarItemContent -> IO TripWriteValidation
+validateTripWrite calendarRepo principalUserId mCurrentItemId content =
+  case content of
+    Agenda.TripCalendarItemContent tripContent -> do
+      existingItemsResult <- runExceptT (repoListCalendarItemsForUser calendarRepo principalUserId)
+      pure $
+        case existingItemsResult of
+          Left _ -> TripWriteTechnicalFailure
+          Right existingItems -> validateTripContent tripPlaceNames existingItems mCurrentItemId tripContent
+    _ -> pure TripWriteValid
+
+validateTripContent :: [String] -> [Agenda.CalendarItem] -> Maybe String -> Agenda.TripItemContent -> TripWriteValidation
+validateTripContent validPlaceNames existingItems mCurrentItemId tripContent =
+  case validateTripWritePreconditions existingItems mCurrentItemId of
+    Just result -> result
+    Nothing ->
+      case tripInterval tripContent of
+        Nothing -> TripWriteBadRequest "windowStart and windowEnd must be valid ISO date-time strings"
+        Just interval
+          | Agenda.departurePlaceId tripContent `notElem` validPlaceNames ->
+              TripWriteBadRequest "departurePlaceId must reference an existing trip place"
+          | Agenda.arrivalPlaceId tripContent `notElem` validPlaceNames ->
+              TripWriteBadRequest "arrivalPlaceId must reference an existing trip place"
+          | Agenda.departurePlaceId tripContent == Agenda.arrivalPlaceId tripContent ->
+              TripWriteBadRequest "departurePlaceId and arrivalPlaceId must be different"
+          | not (tripIntervalHasPositiveDuration interval) ->
+              TripWriteBadRequest "windowEnd must be strictly after windowStart"
+          | otherwise ->
+              case storedTripIntervals existingItems mCurrentItemId of
+                Left () -> TripWriteTechnicalFailure
+                Right intervals
+                  | any (tripIntervalsOverlap interval) intervals ->
+                      TripWriteBadRequest "trip time window overlaps another trip"
+                  | otherwise -> TripWriteValid
+
+validateTripWritePreconditions :: [Agenda.CalendarItem] -> Maybe String -> Maybe TripWriteValidation
+validateTripWritePreconditions existingItems mCurrentItemId =
+  case mCurrentItemId of
+    Just currentItemId
+      | currentItemId `notElem` mapMaybe calendarItemId existingItems -> Just TripWriteNotFound
+    _ -> Nothing
+
+calendarItemId :: Agenda.CalendarItem -> Maybe String
+calendarItemId item =
+  case item of
+    Agenda.ServerCalendarItem { Agenda.itemId } -> Just itemId
+    Agenda.NewCalendarItem {} -> Nothing
+
+tripInterval :: Agenda.TripItemContent -> Maybe (LocalTime, LocalTime)
+tripInterval tripContent = do
+  start <- parseTripLocalTime (Agenda.tripWindowStart tripContent)
+  end <- parseTripLocalTime (Agenda.tripWindowEnd tripContent)
+  pure (start, end)
+
+parseTripLocalTime :: String -> Maybe LocalTime
+parseTripLocalTime raw =
+  iso8601ParseM raw `mplus` parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M" raw
+
+tripIntervalHasPositiveDuration :: (LocalTime, LocalTime) -> Bool
+tripIntervalHasPositiveDuration (start, end) = end > start
+
+-- Touching boundaries are allowed; only real interval intersection is rejected.
+tripIntervalsOverlap :: (LocalTime, LocalTime) -> (LocalTime, LocalTime) -> Bool
+tripIntervalsOverlap (startA, endA) (startB, endB) = startA < endB && startB < endA
+
+storedTripIntervals :: [Agenda.CalendarItem] -> Maybe String -> Either () [(LocalTime, LocalTime)]
+storedTripIntervals existingItems mCurrentItemId =
+  mapM storedTripInterval (filter isOtherStoredTrip existingItems)
+  where
+    isOtherStoredTrip item =
+      case item of
+        Agenda.ServerCalendarItem { Agenda.content = Agenda.TripCalendarItemContent {}, Agenda.itemId } ->
+          Just itemId /= mCurrentItemId
+        _ -> False
+
+    storedTripInterval item =
+      case item of
+        Agenda.ServerCalendarItem { Agenda.content = Agenda.TripCalendarItemContent tripContent } ->
+          maybe (Left ()) Right (tripInterval tripContent)
+        _ -> Left ()
+
+parsePeriodTripBounds :: Maybe String -> Maybe String -> Either String (LocalTime, LocalTime)
+parsePeriodTripBounds Nothing _ = Left "start is required"
+parsePeriodTripBounds _ Nothing = Left "end is required"
+parsePeriodTripBounds (Just rawStart) (Just rawEnd) =
+  case (parseTripLocalTime rawStart, parseTripLocalTime rawEnd) of
+    (Nothing, _) -> Left "start must be a valid ISO date-time string"
+    (_, Nothing) -> Left "end must be a valid ISO date-time string"
+    (Just start, Just end)
+      | end <= start -> Left "end must be strictly after start"
+      | otherwise -> Right (start, end)
+
+resolveVisiblePeriodTripUsers :: TripSharingRepository -> String -> IO (Either () [String])
+resolveVisiblePeriodTripUsers tripSharingRepo principalUserId = do
+  subscribedUsersResult <- runExceptT (repoListSubscribedUsers tripSharingRepo principalUserId)
+  case subscribedUsersResult of
+    Left _ -> pure (Left ())
+    Right subscribedUsers -> do
+      visibilityResults <- mapM isVisibleToPrincipal subscribedUsers
+      pure $ case sequence visibilityResults of
+        Left _ -> Left ()
+        Right visibleUsers -> Right [username | (username, True) <- visibleUsers]
+  where
+    isVisibleToPrincipal username = do
+      sharedUsersResult <- runExceptT (repoListSharedUsers tripSharingRepo username)
+      pure $ case sharedUsersResult of
+        Left _ -> Left ()
+        Right sharedUsers -> Right (username, principalUserId `elem` sharedUsers)
+
+loadPeriodTripsForUsers :: CalendarRepository -> [String] -> LocalTime -> LocalTime -> IO (Either () [PeriodTripsUser])
+loadPeriodTripsForUsers calendarRepo usernames periodStart periodEnd = do
+  groups <- mapM buildUserGroup usernames
+  pure $ fmap catMaybes (sequence groups)
+  where
+    buildUserGroup username = do
+      itemsResult <- runExceptT (repoListCalendarItemsForUser calendarRepo username)
+      pure $
+        case itemsResult of
+          Left _ -> Left ()
+          Right items ->
+            case selectPeriodTrips periodStart periodEnd items of
+              Left () -> Left ()
+              Right [] -> Right Nothing
+              Right trips -> Right (Just (PeriodTripsUser username trips))
+
+selectPeriodTrips :: LocalTime -> LocalTime -> [Agenda.CalendarItem] -> Either () [Agenda.CalendarItem]
+selectPeriodTrips periodStart periodEnd items = do
+  storedTrips <- storedTripItems items
+  let orderedTrips = sortOn storedTripStart storedTrips
+      seedTrip = case filter (\trip -> storedTripStart trip < periodStart) orderedTrips of
+        [] -> Nothing
+        earlierTrips -> Just (last earlierTrips)
+      periodTrips =
+        [ storedTripCalendarItem trip
+        | trip <- orderedTrips
+        , storedTripStart trip >= periodStart
+        , storedTripStart trip < periodEnd
+        ]
+  pure $
+    case seedTrip of
+      Nothing -> periodTrips
+      Just trip -> storedTripCalendarItem trip : periodTrips
+
+storedTripItems :: [Agenda.CalendarItem] -> Either () [StoredTripItem]
+storedTripItems items = catMaybes <$> mapM toStoredTripItem items
+  where
+    toStoredTripItem item =
+      case item of
+        Agenda.ServerCalendarItem { Agenda.content = Agenda.TripCalendarItemContent tripContent } ->
+          case parseTripLocalTime (Agenda.tripWindowStart tripContent) of
+            Nothing -> Left ()
+            Just tripStart -> Right (Just (StoredTripItem tripStart item))
+        _ -> Right Nothing
+
+badRequest :: FilterMonad Response m => String -> m Response
+badRequest = HServer.badRequest . jsonMessage
+
+jsonResponse :: ToJSON a => a -> Response
+jsonResponse = toResponse . encode
+
+jsonMessage :: String -> Response
+jsonMessage msg = jsonResponse $ object ["message" .= msg]
+
+emptyResponse :: Response
+emptyResponse = jsonResponse $ object []
+
+authInternalError :: Response
+authInternalError = jsonMessage "Unable to process authentication"
+
+class ToServerResponse e where
+  toServerResponse :: Monad m => e -> ServerPartT m Response
+
+instance ToServerResponse AuthError where
+  toServerResponse (BadRequest br) = badRequest errorStr
+    where errorStr = case br of
+                     EmptyUsername -> "Username cannot be empty"
+                     UsernameDoesNotRespectPattern -> "Username has forbidden characters"
+                     EmptyPassword -> "Password cannot be empty"
+                     PasswordTooShort -> "Password is too short"
+                     UsernameTooShort -> "Username is too short"
+                     UsernameTooLong -> "Username is too long"
+  toServerResponse UserAlreadyExists = badRequest "Unable to create user"
+  toServerResponse InvalidCredentials = unauthorized $ jsonMessage "Invalid credentials"
+  toServerResponse AccountPendingApproval = HServer.forbidden $ jsonMessage "Account pending approval"
+  toServerResponse ResourceNotFound = notFound $ jsonMessage "Not found"
+  toServerResponse (ResourceConflict message) = setResponseCode 409 >> pure (jsonMessage message)
+  toServerResponse (TechnicalError _) = internalServerError $ jsonMessage "Unable to process authentication"
+
+apiController :: AuthRepository -> CalendarRepository -> TripSharingRepository -> NoteRepository -> ChecklistRepository -> MVar [UTCTime] -> FilePath -> AppConfig -> SessionStore -> ServerPartT IO Response
+apiController authRepo calendarRepo tripSharingRepo noteRepo checklistRepo signupRateLimitState tmpDir appConfig sessionStore =
+  let sessionCfg = sessionConfig appConfig
+      bootstrapAdmin = bootstrapAdminUsername appConfig
+  in dir "api" $ msum [ signupController authRepo signupRateLimitState tmpDir bootstrapAdmin
+                      , signinController authRepo sessionCfg sessionStore
+                      , signoutController sessionCfg sessionStore
+                      , dir "auth" $ requireAuth sessionCfg sessionStore (authController authRepo)
+                      , dir "note" $ requireAuth sessionCfg sessionStore (noteController noteRepo)
+                      , dir "checklist" $ requireAuth sessionCfg sessionStore (checklistController checklistRepo)
+                      , dir "v1" $
+                          msum
+                            [ dir "trip-places" $ requireAuth sessionCfg sessionStore tripPlacesController
+                            , dir "trip-sharing" $ requireAuth sessionCfg sessionStore (tripSharingController authRepo tripSharingRepo calendarRepo)
+                            , dir "calendar-items" $ requireAuth sessionCfg sessionStore (agendaController calendarRepo)
+                            , dir "admin" $ requireAuth sessionCfg sessionStore (adminController authRepo bootstrapAdmin)
+                            ]
+                      ]
+
+homePage :: ServerPartT IO Response
+homePage = do
+    nullDir
+    cd <- liftIO getCurrentDirectory
+    serveFileFrom (cd </> "static/") (guessContentTypeM mimeTypes) "index.html"
+
+maxSignupBodyBytes :: Int64
+maxSignupBodyBytes = 4096
+
+signupBodyPolicy :: FilePath -> BodyPolicy
+signupBodyPolicy tmpDir = defaultBodyPolicy tmpDir 0 maxSignupBodyBytes maxSignupBodyBytes
+
+isTooLargeBodyError :: String -> Bool
+isTooLargeBodyError err = "x-www-form-urlencoded content longer than BodyPolicy.maxRAM=" `isPrefixOf` err
+
+signupController :: AuthRepository -> MVar [UTCTime] -> FilePath -> String -> ServerPartT IO Response
+signupController authRepo signupRateLimitState tmpDir bootstrapAdmin = dir "signup" $ do
+    nullDir
+    method POST
+    rq <- askRq
+    (_, mBodyErr) <- liftIO $ bodyInput (signupBodyPolicy tmpDir) rq
+    case mBodyErr of
+      Just bodyErr | isTooLargeBodyError bodyErr -> requestEntityTooLarge $ jsonMessage "Body too large"
+      Just _ -> badRequest "Unable to decode request body"
+      Nothing -> do
+        body <- askRq >>= takeRequestBody
+        maybe (badRequest "Empty body")
+              handleBody
+              body
+    where handleBody :: RqBody -> ServerPartT IO Response --AppM Response
+          handleBody body =
+            maybe (badRequest "Unable to decode the body as a SignupData")
+                  doCreateUser
+                  (decode $ unBody body)
+
+          doCreateUser :: AuthRequest -> ServerPartT IO Response --AppM Response
+          doCreateUser signupRequest = do
+            allowed <- liftIO $ allowSignupRequest signupRateLimitState
+            if not allowed
+              then tooManyRequests "Too many signup attempts. Please retry later."
+              else do
+                res <- liftIO $ runExceptT $ createUserWithBootstrapAdmin authRepo (Just bootstrapAdmin) signupRequest
+                either toServerResponse
+                       (const $ ok emptyResponse)
+                       res
+
+signinController :: AuthRepository -> SessionConfig -> SessionStore -> ServerPartT IO Response
+signinController authRepo sessionConfig sessionStore = dir "signin" $ do
+  nullDir
+  method POST
+  withBusinessHandlingAndInput (signinUser authRepo) $ \profile -> do
+    sid <- liftIO $ createSessionForUser sessionStore (authProfileUsername profile)
+    let cookieValue = signSessionId (sessionSecret sessionConfig) sid
+    addCookie Session (buildSessionCookie sessionConfig cookieValue)
+    ok (jsonResponse profile)
+
+signoutController :: SessionConfig -> SessionStore -> ServerPartT IO Response
+signoutController sessionConfig sessionStore = dir "signout" $ do
+  nullDir
+  method POST
+  revokeAll <- isSignoutAllRequested
+  mToken <- getSessionCookieValue sessionConfig
+  case mToken >>= verifyAndExtractSessionId (sessionSecret sessionConfig) of
+    Nothing -> unauthorized $ jsonMessage "Not authenticated"
+    Just sid -> do
+      _ <- liftIO $ if revokeAll then revokeAllForSession sessionStore sid else revokeSession sessionStore sid
+      addCookie Expired (buildSessionCookie sessionConfig "")
+      ok emptyResponse
+
+authController :: AuthRepository -> AppContext -> ServerPartT IO Response
+authController authRepo AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
+  dir "profile" $ do
+    nullDir
+    method GET
+    profileResult <- liftIO $ runExceptT $ loadAuthenticatedProfile authRepo principalUserId
+    either toServerResponse
+           (ok . jsonResponse)
+           profileResult
+
+isSignoutAllRequested :: ServerPartT IO Bool
+isSignoutAllRequested = do
+  mRaw <- (Just <$> look "all") `mplus` pure Nothing
+  pure $ case fmap (map toLower) mRaw of
+    Just "true" -> True
+    Just "1" -> True
+    Just "false" -> False
+    Just "0" -> False
+    _ -> False
+
+tooManyRequests :: FilterMonad Response m => String -> m Response
+tooManyRequests = HServer.badRequest . toResponse
+
+allowSignupRequest :: MVar [UTCTime] -> IO Bool
+allowSignupRequest state = do
+  now <- getCurrentTime
+  let windowStart = addUTCTime (-5) now
+      maxRequests = 7
+  modifyMVar state $ \timestamps -> do
+    let recent = filter (> windowStart) timestamps
+    pure $ if length recent >= maxRequests
+              then (recent, False)
+              else (now : recent, True)
+
+withBusinessHandling :: (FromJSON a, ToServerResponse e) => (a -> ExceptT e IO r) -> ServerPartT IO Response
+withBusinessHandling handle = do
+    body <- askRq >>= takeRequestBody
+    maybe (badRequest "Empty body")
+          handleBody
+          body
+    where handleBody :: RqBody -> ServerPartT IO Response --AppM Response
+          handleBody body = maybe (badRequest "Unable to decode the body as a SignupData")
+                                  (processDecodedBody handle)
+                                  (decode' $ unBody body)
+
+          processDecodedBody :: ToServerResponse e => (a -> ExceptT e IO r) -> a -> ServerPartT IO Response
+          processDecodedBody handle input = do
+            res <- liftIO $ runExceptT $ handle input
+            either toServerResponse
+                   (const $ ok emptyResponse)
+                   res
+
+
+withBusinessHandlingAndInput :: (FromJSON a, ToServerResponse e) => (a -> ExceptT e IO r) -> (r -> ServerPartT IO Response) -> ServerPartT IO Response
+withBusinessHandlingAndInput handle onSuccess = do
+    body <- askRq >>= takeRequestBody
+    maybe (badRequest "Empty body")
+          handleBody
+          body
+    where
+      handleBody :: RqBody -> ServerPartT IO Response
+      handleBody body = maybe (badRequest "Unable to decode the body as a SignupData")
+                             process
+                             (decode' $ unBody body)
+      process input = do
+        res <- liftIO $ runExceptT $ handle input
+        either toServerResponse
+               onSuccess
+               res
+
+buildSessionCookie :: SessionConfig -> String -> Cookie
+buildSessionCookie sessionConfig cookieValue =
+  (mkCookie (sessionCookieName sessionConfig) cookieValue)
+    { secure = sessionCookieSecure sessionConfig
+    , httpOnly = True
+    , sameSite = SameSiteLax
+    }
+
+getSessionCookieValue :: SessionConfig -> ServerPartT IO (Maybe String)
+getSessionCookieValue sessionConfig = do
+  mCookieHeader <- getHeaderM "cookie"
+  pure $ mCookieHeader >>= extractCookie (sessionCookieName sessionConfig) . unpack
+
+extractCookie :: String -> String -> Maybe String
+extractCookie cookieName rawCookieHeader =
+  let chunks = splitOn ';' rawCookieHeader
+      normalized = map trim chunks
+      targetPrefix = cookieName ++ "="
+      matches = filter (isPrefixOf targetPrefix) normalized
+  in case matches of
+       [] -> Nothing
+       (x:_) -> Just $ unquoteCookieValue $ drop (length targetPrefix) x
+
+unquoteCookieValue :: String -> String
+unquoteCookieValue value =
+  case value of
+    ('"':rest) | not (null rest) && last rest == '"' -> init rest
+    _ -> value
+
+splitOn :: Char -> String -> [String]
+splitOn sep s =
+  case break (== sep) s of
+    (before, []) -> [before]
+    (before, _:after) -> before : splitOn sep after
+
+trim :: String -> String
+trim = dropWhile (== ' ')
+
+requireAuth :: SessionConfig -> SessionStore -> (AppContext -> ServerPartT IO Response) -> ServerPartT IO Response
+requireAuth sessionConfig sessionStore handler = do
+  mToken <- getSessionCookieValue sessionConfig
+  let mSid = mToken >>= verifyAndExtractSessionId (sessionSecret sessionConfig)
+  case mSid of
+    Nothing -> unauthorized $ jsonMessage "Not authenticated"
+    Just sid -> do
+      mPrincipal <- liftIO $ resolveSession sessionStore sid
+      case mPrincipal of
+        Nothing -> unauthorized $ jsonMessage "Not authenticated"
+        Just principal -> handler AppContext { sessionPrincipal = principal }
+
+requireApprovedAdmin :: AuthRepository -> AppContext -> ServerPartT IO Response -> ServerPartT IO Response
+requireApprovedAdmin authRepo AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } handler = do
+  adminCheck <- liftIO $ isApprovedAdmin authRepo principalUserId
+  case adminCheck of
+    Left _ -> internalServerError authInternalError
+    Right False -> HServer.forbidden $ jsonMessage "Admin privileges required"
+    Right True -> handler
+
+
+noteController :: NoteRepository -> AppContext -> ServerPartT IO Response
+noteController = notesChecklistHandlers "note"
+
+checklistController :: ChecklistRepository -> AppContext -> ServerPartT IO Response
+checklistController = notesChecklistHandlers "checklist"
+
+notesChecklistHandlers :: Content a => String -> NotesChecklistRepository a -> AppContext -> ServerPartT IO Response
+notesChecklistHandlers crudTypeName repo _ =
+  msum
+    [ notesChecklistGet crudTypeName repo
+    , notesChecklistPost crudTypeName repo
+    , notesChecklistDelete crudTypeName repo
+    , notesChecklistPut crudTypeName repo
+    ]
+
+notesChecklistGet :: Content a => String -> NotesChecklistRepository a -> ServerPartT IO Response
+notesChecklistGet crudTypeName repo = do
+  nullDir
+  method GET
+  repoResult <- lift $ runExceptT (repoListItems repo)
+  case repoResult of
+    Left err -> genericInternalError ("Unexpected problem during retrieving all " ++ crudTypeName ++ "s:\n\t" ++ show err)
+    Right items -> ok (jsonResponse items)
+
+notesChecklistPost :: Content a => String -> NotesChecklistRepository a -> ServerPartT IO Response
+notesChecklistPost crudTypeName repo = do
+  nullDir
+  method POST
+  log ("crud POST on " ++ crudTypeName)
+  body <- askRq >>= takeRequestBody
+  let
+    handleBody :: RqBody -> ServerPartT IO Response
+    handleBody rqBody = do
+      let bodyBS = unBody rqBody
+          content = decode bodyBS
+      log ("Getting body bytestrings: " ++ show bodyBS)
+      log ("Getting deserialized content: " ++ show content)
+      fmap (createNotesChecklistContent crudTypeName repo) content `orElse` genericInternalError "Unexpected problem during note creation"
+  fmap handleBody body `orElse` ok emptyResponse
+
+createNotesChecklistContent :: String -> NotesChecklistRepository a -> a -> ServerPartT IO Response
+createNotesChecklistContent crudTypeName repo content = do
+  recover (logThenGenericInternalErrorName crudTypeName) (ok . jsonResponse) $ repoCreateItem repo content
+
+notesChecklistDelete :: String -> NotesChecklistRepository a -> ServerPartT IO Response
+notesChecklistDelete crudTypeName repo = do
+  method DELETE
+  log ("crud DELETE on " ++ crudTypeName)
+  path $ \pathId -> do
+    nullDir
+    recover (handleDeletionError pathId) (\() -> ok emptyResponse) $ repoDeleteItemById repo pathId
+
+notesChecklistPut :: Content a => String -> NotesChecklistRepository a -> ServerPartT IO Response
+notesChecklistPut crudTypeName repo = do
+  nullDir
+  method PUT
+  log ("crud PUT on " ++ crudTypeName)
+  body <- askRq >>= takeRequestBody
+  let
+    handleBody :: RqBody -> ServerPartT IO Response
+    handleBody rqBody = do
+      let bodyBS = unBody rqBody
+          update = decode bodyBS
+      log ("Getting body bytestrings: " ++ show bodyBS)
+      log ("Getting deserialized content: " ++ show update)
+      fmap (handleUpdateByRepository repo) update `orElse` genericInternalError "Unable to parse body as a NoteUpdate"
+  fmap handleBody body `orElse` ok emptyResponse
+
+handleUpdateByRepository :: Content a => NotesChecklistRepository a -> Identifiable a -> ServerPartT IO Response
+handleUpdateByRepository repo update =
+  recoverWith (const . notFound $ jsonMessage "Unable to find storage dir")
+              (ok . jsonResponse <$> repoUpdateItem repo update)
+
+tripPlacesController :: AppContext -> ServerPartT IO Response
+tripPlacesController _ = do
+  nullDir
+  method GET
+  ok (jsonResponse tripPlacesCatalog)
+
+adminController :: AuthRepository -> String -> AppContext -> ServerPartT IO Response
+adminController authRepo bootstrapAdminUsername appContext@AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
+  requireApprovedAdmin authRepo appContext $
+    msum [ dir "pending-signups" $
+             msum [ pendingSignupsList
+                  , pendingSignupApprove
+                  , pendingSignupDelete
+                  ]
+         , dir "users" $
+             msum [ approvedUsersList
+                  , approvedUserDelete
+                  ]
+         ]
+  where
+    pendingSignupsList = do
+      nullDir
+      method GET
+      pendingUsersResult <- liftIO $ listPendingUsers authRepo
+      case pendingUsersResult of
+        Left _ -> internalServerError authInternalError
+        Right pendingUsers -> ok (jsonResponse (map PendingSignupApproval pendingUsers))
+
+    pendingSignupApprove = do
+      dir "approve" $ do
+        nullDir
+        method POST
+        body <- askRq >>= takeRequestBody
+        maybe (badRequest "Empty body") handleBody body
+
+    pendingSignupDelete = do
+      path $ \username -> do
+        nullDir
+        method DELETE
+        result <- liftIO $ runExceptT $ deletePendingUser authRepo username
+        either toServerResponse
+               (const $ ok emptyResponse)
+               result
+
+    approvedUsersList = do
+      nullDir
+      method GET
+      approvedUsersResult <- liftIO $ listApprovedUsers authRepo
+      case approvedUsersResult of
+        Left _ -> internalServerError authInternalError
+        Right approvedUsers -> ok (jsonResponse approvedUsers)
+
+    approvedUserDelete = do
+      path $ \username -> do
+        nullDir
+        method DELETE
+        result <- liftIO $ runExceptT $ deleteApprovedUser authRepo bootstrapAdminUsername principalUserId username
+        either toServerResponse
+               (const $ ok emptyResponse)
+               result
+
+    handleBody :: RqBody -> ServerPartT IO Response
+    handleBody rqBody =
+      case decode' (unBody rqBody) :: Maybe PendingSignupApproval of
+        Nothing -> badRequest "Unable to decode the body as a PendingSignupApproval"
+        Just (PendingSignupApproval username)
+          | null username -> badRequest "username is required"
+          | otherwise -> do
+              result <- liftIO $ runExceptT $ approveUser authRepo username
+              either toServerResponse
+                     (const $ ok emptyResponse)
+                     result
+
+tripSharingController :: AuthRepository -> TripSharingRepository -> CalendarRepository -> AppContext -> ServerPartT IO Response
+tripSharingController authRepo tripSharingRepo calendarRepo AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
+  msum [ dir "shares" $ msum [ sharesList
+                             , sharesAdd
+                             , sharesDelete
+                             ]
+       , dir "subscriptions" $ msum [ subscriptionsList
+                                    , subscriptionsAdd
+                                    , subscriptionsDelete
+                                    ]
+       , dir "period-trips" periodTripsList
+       ]
+  where
+    periodTripsList = do
+      nullDir
+      method GET
+      mStart <- (Just <$> look "start") `mplus` pure Nothing
+      mEnd <- (Just <$> look "end") `mplus` pure Nothing
+      case parsePeriodTripBounds mStart mEnd of
+        Left message -> badRequest message
+        Right (periodStart, periodEnd) -> do
+          visibleUsersResult <- liftIO $ resolveVisiblePeriodTripUsers tripSharingRepo principalUserId
+          case visibleUsersResult of
+            Left () -> internalServerError emptyResponse
+            Right visibleUsers -> do
+              groupsResult <- liftIO $ loadPeriodTripsForUsers calendarRepo visibleUsers periodStart periodEnd
+              case groupsResult of
+                Left () -> internalServerError emptyResponse
+                Right groups -> ok (jsonResponse groups)
+
+    sharesList = do
+      nullDir
+      method GET
+      result <- liftIO $ runExceptT (repoListSharedUsers tripSharingRepo principalUserId)
+      case result of
+        Left _ -> internalServerError emptyResponse
+        Right usernames -> ok (jsonResponse (map TripSharingUser usernames))
+
+    sharesAdd = do
+      nullDir
+      method POST
+      body <- askRq >>= takeRequestBody
+      maybe (badRequest "Empty body") handleBody body
+      where
+        handleBody :: RqBody -> ServerPartT IO Response
+        handleBody rqBody =
+          case decode' (unBody rqBody) :: Maybe TripSharingUser of
+            Nothing -> badRequest "Unable to decode the body as a TripSharingUser"
+            Just (TripSharingUser username)
+              | null username -> badRequest "username is required"
+              | username == principalUserId -> badRequest "username must not be the authenticated user"
+              | otherwise -> do
+                  exists <- liftIO $ userExists authRepo username
+                  if not exists
+                    then badRequest "username must reference an existing user"
+                    else do
+                      result <- liftIO $ runExceptT (repoAddSharedUser tripSharingRepo principalUserId username)
+                      case result of
+                        Left _ -> internalServerError emptyResponse
+                        Right () -> ok emptyResponse
+
+    sharesDelete = do
+      method DELETE
+      path $ \username -> do
+        nullDir
+        result <- liftIO $ runExceptT (repoDeleteSharedUser tripSharingRepo principalUserId username)
+        case result of
+          Left _ -> internalServerError emptyResponse
+          Right () -> ok emptyResponse
+
+    subscriptionsList = do
+      nullDir
+      method GET
+      result <- liftIO $ runExceptT (repoListSubscribedUsers tripSharingRepo principalUserId)
+      case result of
+        Left _ -> internalServerError emptyResponse
+        Right usernames -> ok (jsonResponse (map TripSharingUser usernames))
+
+    subscriptionsAdd = do
+      nullDir
+      method POST
+      body <- askRq >>= takeRequestBody
+      maybe (badRequest "Empty body") handleBody body
+      where
+        handleBody :: RqBody -> ServerPartT IO Response
+        handleBody rqBody =
+          case decode' (unBody rqBody) :: Maybe TripSharingUser of
+            Nothing -> badRequest "Unable to decode the body as a TripSharingUser"
+            Just (TripSharingUser username)
+              | null username -> badRequest "username is required"
+              | username == principalUserId -> badRequest "username must not be the authenticated user"
+              | otherwise -> do
+                  exists <- liftIO $ userExists authRepo username
+                  if not exists
+                    then badRequest "username must reference an existing user"
+                    else do
+                      result <- liftIO $ runExceptT (repoAddSubscribedUser tripSharingRepo principalUserId username)
+                      case result of
+                        Left _ -> internalServerError emptyResponse
+                        Right () -> ok emptyResponse
+
+    subscriptionsDelete = do
+      method DELETE
+      path $ \username -> do
+        nullDir
+        result <- liftIO $ runExceptT (repoDeleteSubscribedUser tripSharingRepo principalUserId username)
+        case result of
+          Left _ -> internalServerError emptyResponse
+          Right () -> ok emptyResponse
+
+agendaController :: CalendarRepository -> AppContext -> ServerPartT IO Response
+agendaController calendarRepo AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
+  msum [ agendaList
+       , agendaCreate
+       , agendaDelete
+       ]
+  where
+    agendaList = do
+      nullDir
+      method GET
+      result <- liftIO $ runExceptT (repoListCalendarItemsForUser calendarRepo principalUserId)
+      case result of
+        Left _ -> internalServerError emptyResponse
+        Right items -> ok (jsonResponse items)
+
+    agendaCreate = do
+      nullDir
+      method POST
+      body <- askRq >>= takeRequestBody
+      maybe (badRequest "Empty body")
+            handleBody
+            body
+      where
+        handleBody :: RqBody -> ServerPartT IO Response
+        handleBody rqBody =
+          case decode' (unBody rqBody) :: Maybe Agenda.CalendarItem of
+            Just (Agenda.NewCalendarItem {Agenda.content}) -> do
+              validation <- liftIO $ validateTripWrite calendarRepo principalUserId Nothing content
+              case validation of
+                TripWriteValid -> do
+                  result <- liftIO $ runExceptT (repoCreateCalendarItem calendarRepo principalUserId content)
+                  case result of
+                    Left _ -> internalServerError emptyResponse
+                    Right created -> ok (jsonResponse created)
+                TripWriteBadRequest message -> badRequest message
+                TripWriteNotFound -> notFound emptyResponse
+                TripWriteTechnicalFailure -> internalServerError emptyResponse
+            Just (Agenda.ServerCalendarItem {Agenda.content, Agenda.itemId}) -> do
+              validation <- liftIO $ validateTripWrite calendarRepo principalUserId (Just itemId) content
+              case validation of
+                TripWriteValid -> do
+                  result <- liftIO $ runExceptT (repoUpdateCalendarItem calendarRepo principalUserId itemId content)
+                  case result of
+                    Left NotFound -> notFound emptyResponse
+                    Left _ -> internalServerError emptyResponse
+                    Right updated -> ok (jsonResponse updated)
+                TripWriteBadRequest message -> badRequest message
+                TripWriteNotFound -> notFound emptyResponse
+                TripWriteTechnicalFailure -> internalServerError emptyResponse
+            Nothing ->
+              case decode' (unBody rqBody) :: Maybe Agenda.ValidateRequest of
+                Nothing -> badRequest "Unable to decode the body as a CalendarItem or ValidateRequest"
+                Just (Agenda.ValidateRequest itemId minutes) -> do
+                  result <- liftIO $ runExceptT (repoUpdateCalendarItemDuration calendarRepo principalUserId itemId minutes)
+                  case result of
+                    Left NotFound -> notFound emptyResponse
+                    Left _ -> internalServerError emptyResponse
+                    Right _ -> ok emptyResponse
+
+    agendaDelete = do
+      method DELETE
+      path $ \itemId -> do
+        nullDir
+        result <- liftIO $ runExceptT (repoDeleteCalendarItemById calendarRepo principalUserId itemId)
+        case result of
+          Left NotFound -> notFound emptyResponse
+          Left _ -> internalServerError emptyResponse
+          Right () -> ok emptyResponse
+
+crudGet ::CRUDEngine crudType a => crudType -> ServerPartT IO Response
+crudGet crudConfig = do
+    nullDir
+    method GET
+    log ("crud GET on " ++ crudTypeDenomination crudConfig)
+    recover (\err -> genericInternalError $ "Unexpected problem during retrieving all " ++ crudTypeDenomination crudConfig ++ "s:\n\t" ++ show err) (successResponse . handlePotentialParsingErrors) $ getItems crudConfig
+
+successResponse :: ToJSON a => IO a -> ServerPartT IO Response
+successResponse action = do
+    a <- liftIO action
+    (ok . jsonResponse) a
+
+handlePotentialParsingErrors :: [ExceptT CrudReadException IO (Identifiable a)] -> IO [Identifiable a]
+handlePotentialParsingErrors = foldM accumulateSuccessOrLogError []
+
+accumulateSuccessOrLogError :: [Identifiable a] -> ExceptT CrudReadException IO (Identifiable a) -> IO [Identifiable a]
+accumulateSuccessOrLogError acc parsingResult = do
+    parsingTry <- runExceptT parsingResult
+    case parsingTry of
+        Left e -> do
+            log ("Unexpected parsing exception: " ++ show e)
+            return acc
+        Right succ -> return (succ:acc)
+
+crudPost ::CRUDEngine crudType a => crudType -> ServerPartT IO Response
+crudPost crudConfig = do
+    nullDir
+    method POST
+    log ("crud POST on " ++ crudTypeDenomination crudConfig)
+    body <- askRq >>= takeRequestBody
+    let
+        handleBody :: RqBody -> ServerPartT IO Response
+        handleBody rqBody = do
+            let bodyBS = unBody rqBody
+                noteContent = decode bodyBS :: Content a => Maybe a
+            log ("Getting body bytestrings: " ++ show bodyBS)
+            log ("Getting deserialized content: " ++ show noteContent)
+            fmap (createNoteContent crudConfig) noteContent `orElse` genericInternalError "Unexpected problem during note creation"
+    fmap handleBody body `orElse` ok emptyResponse
+
+createNoteContent :: CRUDEngine crudType a => crudType -> a -> ServerPartT IO Response
+createNoteContent crudConfig noteContent = do
+    recover (logThenGenericInternalError crudConfig) (ok . jsonResponse) $ createItem crudConfig noteContent
+
+logThenGenericInternalError :: (Show e, CRUDEngine crudType a) => crudType -> e -> ServerPartT IO Response
+logThenGenericInternalError crudConfig e = do
+    log ("Unexpected error during creation of " ++ crudTypeDenomination crudConfig ++ ": " ++ show e)
+    emptyInternalError
+
+logThenGenericInternalErrorName :: Show e => String -> e -> ServerPartT IO Response
+logThenGenericInternalErrorName crudTypeName e = do
+    log ("Unexpected error during creation of " ++ crudTypeName ++ ": " ++ show e)
+    emptyInternalError
+
+crudDelete :: CRUDEngine crudType a => crudType -> ServerPartT IO Response
+crudDelete crudConfig = do
+    method DELETE
+    log ("crud DELETE on " ++ crudTypeDenomination crudConfig)
+    path (\pathId -> do
+        nullDir
+        recover (handleDeletionError pathId) (\() -> ok emptyResponse) $ deleteItem crudConfig pathId)
+
+handleDeletionError :: String -> CrudWriteException -> ServerPartT IO Response
+handleDeletionError pathId err = do
+    logDeletionError pathId err
+    notFound emptyResponse
+
+logDeletionError pathId s = log ("Error while deleting item " ++ pathId ++ ": " ++ show s)
+
+crudPut :: CRUDEngine crudType a => crudType -> ServerPartT IO Response
+crudPut crudConfig = do
+    nullDir
+    method PUT
+    log ("crud PUT on " ++ crudTypeDenomination crudConfig)
+    body <- askRq >>= takeRequestBody
+    let
+        handleBody :: RqBody -> ServerPartT IO Response
+        handleBody rqBody = do
+            let bodyBS = unBody rqBody
+            let noteUpdate = decode bodyBS
+            log ("Getting body bytestrings: " ++ show bodyBS)
+            log ("Getting deserialized content: " ++ show noteUpdate)
+            fmap (handleUpdate crudConfig) noteUpdate `orElse` genericInternalError "Unable to parse body as a NoteUpdate"
+    fmap handleBody body `orElse` ok emptyResponse -- do not send back ok when there is no body
+
+handleUpdate :: CRUDEngine crudType a => crudType -> Identifiable a -> ServerPartT IO Response
+handleUpdate crudConfig update =
+    recoverWith (const . notFound $ jsonMessage "Unable to find storage dir")
+                (ok.jsonResponse <$> modifyItem crudConfig update)
+
+serveStaticResource :: ServerPartT IO Response
+serveStaticResource = do
+    method GET
+    log "Serving static resource"
+    dir "static" $ uriRest (\rest -> do
+        cd <- liftIO getCurrentDirectory -- replace with configuration data directory
+        case rest of
+          [] -> badRequest "toto"
+          [a] -> badRequest "toto"
+          (_:withoutFrontSlash) -> serveFileFrom (cd </> "static/") (guessContentTypeM mimeTypes) withoutFrontSlash) -- check serveFileFrom for filesystem attacks with ..
+
+orElse :: Maybe a -> a -> a
+(Just a) `orElse` _ = a
+_        `orElse` b = b
+
+recoverIO :: (MonadIO m, Monad m) => ExceptT e IO (m a) -> (e -> m a) -> m a
+recoverIO exceptT f = join $ liftIO $ fmap (either f id) (runExceptT exceptT)
+
+recoverWith :: (MonadIO m, Monad m) => (e -> m a) -> ExceptT e IO (m a) -> m a
+recoverWith = flip recoverIO
+
+orElseIO :: (MonadIO m, Monad m) => MaybeT IO (m a) -> m a -> m a
+orElseIO maybe alt = do
+    tmp <- liftIO $ runMaybeT maybe
+    tmp `orElse` alt
+
+withDefaultIO :: (MonadIO m, Monad m) => m a -> MaybeT IO (m a) -> m a
+withDefaultIO = flip orElseIO
+
+recover :: (e -> ServerPartT IO Response) -> (b -> ServerPartT IO Response) -> ExceptT e IO b -> ServerPartT IO Response
+recover errorHandler successHandler errorMonad = do
+    errorOrNot <- lift $ runExceptT errorMonad
+    either errorHandler successHandler errorOrNot
+
+genericInternalError :: String -> ServerPartT IO Response
+genericInternalError s = do
+    log ("Internal error: \n\t" ++ s)
+    emptyInternalError
+
+emptyInternalError :: ServerPartT IO Response
+emptyInternalError = internalServerError emptyResponse
+
+log :: (Show s, MonadIO m) => s -> m ()
+log s = do
+  liftIO $ print s >> hFlush stdout

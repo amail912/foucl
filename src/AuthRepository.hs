@@ -14,7 +14,6 @@ module AuthRepository
   ) where
 
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
-import Control.Monad.IO.Class (liftIO)
 import Data.Aeson
   ( FromJSON(parseJSON)
   , ToJSON(toJSON)
@@ -27,13 +26,14 @@ import Data.Aeson
   , (.:?)
   , (.=)
   )
+import Data.Function ((&))
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Char8 as BS8
 import Data.Password.Argon2 (Argon2, PasswordHash(..))
 import Data.Int (Int64)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Pool (Pool, withResource)
+import Data.Pool (Pool)
 import Database.PostgreSQL.Simple
   ( Connection
   , SqlError(..)
@@ -43,7 +43,7 @@ import Database.PostgreSQL.Simple
   , query_
   )
 import Repository (RepositoryError(..))
-import SqlTiming (timedTry)
+import Helpers (tryExcept, withPoolExceptHandled, withResourceMHandled)
 import System.Directory
   ( canonicalizePath
   , createDirectory
@@ -76,11 +76,11 @@ data PersistedUser = PersistedUser
   }
 
 data AuthRepository = AuthRepository
-  { repoCreateUser :: PersistedUser -> ExceptT RepositoryError IO ()
-  , repoLoadUserByUsername :: String -> ExceptT RepositoryError IO PersistedUser
-  , repoUpdateUser :: PersistedUser -> ExceptT RepositoryError IO ()
-  , repoDeleteUserByUsername :: String -> ExceptT RepositoryError IO ()
-  , repoListUsers :: ExceptT RepositoryError IO [PersistedUser]
+  { repoCreateUser :: !(PersistedUser -> ExceptT RepositoryError IO ())
+  , repoLoadUserByUsername :: !(String -> ExceptT RepositoryError IO PersistedUser)
+  , repoUpdateUser :: !(PersistedUser -> ExceptT RepositoryError IO ())
+  , repoDeleteUserByUsername :: !(String -> ExceptT RepositoryError IO ())
+  , repoListUsers :: !(ExceptT RepositoryError IO [PersistedUser])
   }
 
 instance ToJSON PersistedUser where
@@ -138,25 +138,22 @@ postgresAuthRepository pool = AuthRepository { repoCreateUser = pgCreateUser poo
                                              , repoListUsers = pgListUsers pool
                                              }
 
-verifyPostgresAuthStorage :: Pool Connection -> IO (Either String ())
-verifyPostgresAuthStorage pool = do
-  verifyResult <- Ex.try $ withResource pool $ \conn -> do
-      pingResult <- timedTry "SELECT ping-auth" (query_ conn "SELECT 1" :: IO [Only Int]) :: IO (Either Ex.SomeException [Only Int])
-      tableResult <- timedTry "SELECT auth-schema-check" (query_ conn "SELECT username, password_hash, role::text, approved FROM auth_users LIMIT 0" :: IO [(String, Text, Text, Bool)]) :: IO (Either Ex.SomeException [(String, Text, Text, Bool)])
-      enumResult <- timedTry "SELECT auth-enum-check" (query conn "SELECT EXISTS(SELECT 1 FROM pg_type WHERE typname = ?)" (Only ("auth_user_role" :: String)) :: IO [Only Bool]) :: IO (Either Ex.SomeException [Only Bool])
-      case pingResult of
-        Left err -> pure (Left ("Postgres ping query failed: " ++ show err))
-        Right _ ->
-          case tableResult of
-            Left err -> pure (Left ("Auth schema check failed: " ++ show err))
-            Right _ ->
-              case enumResult of
-                Left err -> pure (Left ("Auth enum check failed: " ++ show err))
-                Right [Only True] -> pure (Right ())
-                Right _ -> pure (Left "Auth schema check failed: enum auth_user_role is missing")
-  case verifyResult of
-    Left err -> pure (Left ("Unable to connect to Postgres: " ++ show (err :: Ex.SomeException)))
-    Right value -> pure value
+verifyPostgresAuthStorage :: Pool Connection -> ExceptT String IO ()
+verifyPostgresAuthStorage pool =
+  withResourceMHandled
+    (\err -> "Unable to connect to Postgres: " ++ show err)
+    pool
+    (\conn -> do
+      _ <- tryExcept (query_ conn "SELECT 1" :: IO [Only Int])
+                     (\err -> "Postgres ping query failed: " ++ show err)
+      _ <- tryExcept (query_ conn "SELECT username, password_hash, role::text, approved FROM auth_users LIMIT 0" :: IO [(String, Text, Text, Bool)])
+                     (\err -> "Auth schema check failed: " ++ show err)
+      enumResult <- tryExcept (query conn "SELECT EXISTS(SELECT 1 FROM pg_type WHERE typname = ?)" (Only ("auth_user_role" :: String)) :: IO [Only Bool])
+             (\err -> "Auth enum check failed: " ++ show err)
+      case enumResult of
+        [Only True] -> pure ()
+        _ -> throwError "Auth schema check failed: enum auth_user_role is missing"
+    )
 
 fsCreateUser :: PersistedUser -> ExceptT RepositoryError IO ()
 fsCreateUser persistedUser@PersistedUser {uname = username} = do
@@ -165,24 +162,19 @@ fsCreateUser persistedUser@PersistedUser {uname = username} = do
       profileFile = userDir </> "profile.json"
   safeUserDir <- ensureChild usersDir userDir
   safeProfile <- ensureChild usersDir profileFile
-  dirExists <- ioOr ReadFailure (doesDirectoryExist usersDir)
+  dirExists <- tryExcept (doesDirectoryExist usersDir) (const ReadFailure)
   if not dirExists
     then throwError StorageFailure
     else case (safeUserDir, safeProfile) of
       (Just realUserDir, Just realProfile) -> do
-        creationResult <- ioOr StorageFailure (Ex.try (createDirectory realUserDir) :: IO (Either Ex.IOException ()))
-        case creationResult of
-          Left ioErr
-            | isAlreadyExistsError ioErr -> throwError AlreadyExists
-            | otherwise -> throwError StorageFailure
-          Right () -> do
-            writeResult <- ioOr WriteFailure $ Ex.try $ do
-              setPermissions realUserDir (setOwnerSearchable True $ setOwnerWritable True $ setOwnerReadable True emptyPermissions)
-              BL.writeFile realProfile (encode persistedUser)
-              setPermissions realProfile (setOwnerWritable True $ setOwnerReadable True emptyPermissions)
-            case (writeResult :: Either Ex.IOException ()) of
-              Left _ -> throwError WriteFailure
-              Right () -> pure ()
+        _ <- tryExcept (createDirectory realUserDir) mapCreateDirectoryException
+        _ <- tryExcept
+          (do
+            setPermissions realUserDir (setOwnerSearchable True $ setOwnerWritable True $ setOwnerReadable True emptyPermissions)
+            BL.writeFile realProfile (encode persistedUser)
+            setPermissions realProfile (setOwnerWritable True $ setOwnerReadable True emptyPermissions))
+          (const WriteFailure)
+        pure ()
       _ -> throwError StorageFailure
 
 fsLoadUserByUsername :: String -> ExceptT RepositoryError IO PersistedUser
@@ -190,60 +182,48 @@ fsLoadUserByUsername username = do
   usersDir <- usersDirectory
   let profileFile = usersDir </> username </> "profile.json"
   safeProfile <- ensureChild usersDir profileFile
-  case safeProfile of
-    Nothing -> throwError NotFound
-    Just realProfile -> do
-      profileExists <- ioOr ReadFailure (doesFileExist realProfile)
-      if not profileExists
-        then throwError NotFound
-        else do
-          content <- ioOr ReadFailure (BL.readFile realProfile)
-          case decode content of
-            Nothing -> throwError ReadFailure
-            Just user -> pure user
+  safeProfile & maybe (throwError NotFound) (\realProfile -> do
+    profileExists <- tryExcept (doesFileExist realProfile) (const ReadFailure)
+    if not profileExists
+      then throwError NotFound
+      else do
+        content <- tryExcept (BL.readFile realProfile) (const ReadFailure)
+        maybe (throwError ReadFailure) pure (decode content))
 
 fsUpdateUser :: PersistedUser -> ExceptT RepositoryError IO ()
 fsUpdateUser persistedUser@PersistedUser {uname = username} = do
   usersDir <- usersDirectory
   let profileFile = usersDir </> username </> "profile.json"
   safeProfile <- ensureChild usersDir profileFile
-  case safeProfile of
-    Nothing -> throwError StorageFailure
-    Just realProfile -> do
-      profileExists <- ioOr ReadFailure (doesFileExist realProfile)
-      if not profileExists
-        then throwError NotFound
-        else do
-          writeRes <- ioOr WriteFailure (Ex.try (BL.writeFile realProfile (encode persistedUser)) :: IO (Either Ex.IOException ()))
-          case writeRes of
-            Left _ -> throwError WriteFailure
-            Right () -> pure ()
+  safeProfile & maybe (throwError StorageFailure) (\realProfile -> do
+    profileExists <- tryExcept (doesFileExist realProfile) (const ReadFailure)
+    if not profileExists
+      then throwError NotFound
+      else do
+        _ <- tryExcept (BL.writeFile realProfile (encode persistedUser)) (const WriteFailure)
+        pure ())
 
 fsDeleteUserByUsername :: String -> ExceptT RepositoryError IO ()
 fsDeleteUserByUsername username = do
   usersDir <- usersDirectory
   let userDir = usersDir </> username
   safeUserDir <- ensureChild usersDir userDir
-  case safeUserDir of
-    Nothing -> throwError StorageFailure
-    Just realUserDir -> do
-      exists <- ioOr ReadFailure (doesDirectoryExist realUserDir)
-      if not exists
-        then throwError NotFound
-        else do
-          deleteResult <- ioOr WriteFailure (Ex.try (removeDirectoryRecursive realUserDir) :: IO (Either Ex.IOException ()))
-          case deleteResult of
-            Left _ -> throwError WriteFailure
-            Right () -> pure ()
+  safeUserDir & maybe (throwError StorageFailure) (\realUserDir -> do
+    exists <- tryExcept (doesDirectoryExist realUserDir) (const ReadFailure)
+    if not exists
+      then throwError NotFound
+      else do
+        _ <- tryExcept (removeDirectoryRecursive realUserDir) (const WriteFailure)
+        pure ())
 
 fsListUsers :: ExceptT RepositoryError IO [PersistedUser]
 fsListUsers = do
   usersDir <- usersDirectory
-  dirExists <- ioOr ReadFailure (doesDirectoryExist usersDir)
+  dirExists <- tryExcept (doesDirectoryExist usersDir) (const ReadFailure)
   if not dirExists
     then throwError StorageFailure
     else do
-      usernames <- ioOr ReadFailure (listDirectory usersDir)
+      usernames <- tryExcept (listDirectory usersDir) (const ReadFailure)
       loaded <- mapM loadMaybe usernames
       pure (foldr maybeCons [] loaded)
   where
@@ -251,7 +231,7 @@ fsListUsers = do
     maybeCons (Just x) acc = x : acc
 
     loadMaybe username = do
-      result <- ioOr ReadFailure (runExceptT (fsLoadUserByUsername username))
+      result <- tryExcept (runExceptT (fsLoadUserByUsername username)) (const ReadFailure)
       case result of
         Left NotFound -> pure Nothing
         Left err -> throwError err
@@ -259,24 +239,23 @@ fsListUsers = do
 
 usersDirectory :: ExceptT RepositoryError IO FilePath
 usersDirectory = do
-  cd <- ioOr StorageFailure getCurrentDirectory
+  cd <- tryExcept getCurrentDirectory (const StorageFailure)
   pure (cd </> "data" </> "users")
 
 ensureChild :: FilePath -> FilePath -> ExceptT RepositoryError IO (Maybe FilePath)
 ensureChild parent child = do
-  parentCanonical <- ioOr StorageFailure (canonicalizePath parent)
-  childAbsolute <- ioOr StorageFailure (makeAbsolute (normalise child))
-  childParentCanonical <- ioOr StorageFailure (canonicalizePath (takeDirectory childAbsolute))
+  parentCanonical <- tryExcept (canonicalizePath parent) (const StorageFailure)
+  childAbsolute <- tryExcept (makeAbsolute (normalise child)) (const StorageFailure)
+  childParentCanonical <- tryExcept (canonicalizePath (takeDirectory childAbsolute)) (const StorageFailure)
   let childCanonical = childParentCanonical </> takeFileName childAbsolute
       parentPrefix = addTrailingPathSeparator parentCanonical
   pure $ if childCanonical == parentCanonical || parentPrefix `isPrefixOf` childCanonical then Just childCanonical else Nothing
 
-ioOr :: RepositoryError -> IO a -> ExceptT RepositoryError IO a
-ioOr err action = do
-  result <- liftIO $ Ex.try action
-  case result of
-    Left (_ :: Ex.IOException) -> throwError err
-    Right value -> pure value
+mapCreateDirectoryException :: Ex.SomeException -> RepositoryError
+mapCreateDirectoryException ex =
+  case Ex.fromException ex :: Maybe Ex.IOException of
+    Just ioErr | isAlreadyExistsError ioErr -> AlreadyExists
+    _ -> StorageFailure
 
 isPrefixOf :: String -> String -> Bool
 isPrefixOf [] _ = True
@@ -285,32 +264,29 @@ isPrefixOf (x:xs) (y:ys) = x == y && isPrefixOf xs ys
 
 pgCreateUser :: Pool Connection -> PersistedUser -> ExceptT RepositoryError IO ()
 pgCreateUser pool persistedUser =
-  withPgConnection pool StorageFailure $ \conn -> do
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
     let roleValue = userRoleToDb (userRole persistedUser)
         approvedValue = approvalStatusToDb (approvalStatus persistedUser)
-    writeResult <- liftIO (timedTry "INSERT auth-user"
+    writeResult <- tryExcept
       (execute
         conn
         "INSERT INTO auth_users (username, password_hash, role, approved) VALUES (?, ?, ?::auth_user_role, ?)"
         (uname persistedUser, unPasswordHash (passwordHash persistedUser), roleValue, approvedValue))
-      :: IO (Either Ex.SomeException Int64))
-    case writeResult of
-      Left err -> throwError (mapWriteException err)
-      Right _ -> pure ()
+        mapWriteException
+    pure ()
 
 pgLoadUserByUsername :: Pool Connection -> String -> ExceptT RepositoryError IO PersistedUser
 pgLoadUserByUsername pool username =
-  withPgConnection pool StorageFailure $ \conn -> do
-    readResult <- liftIO (timedTry "SELECT auth-user-by-username"
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    readResult <-tryExcept
       (query
         conn
         "SELECT username, password_hash, role::text, approved FROM auth_users WHERE username = ?"
         (Only username))
-      :: IO (Either Ex.SomeException [(String, Text, Text, Bool)]))
+        mapReadException
     case readResult of
-      Left err -> throwError (mapReadException err)
-      Right [] -> throwError NotFound
-      Right ((dbUsername, dbPasswordHash, dbRole, dbApproved):_) ->
+      [] -> throwError NotFound
+      ((dbUsername, dbPasswordHash, dbRole, dbApproved):_) ->
         case dbRoleToUserRole dbRole of
           Nothing -> throwError ReadFailure
           Just role ->
@@ -323,38 +299,32 @@ pgLoadUserByUsername pool username =
 
 pgUpdateUser :: Pool Connection -> PersistedUser -> ExceptT RepositoryError IO ()
 pgUpdateUser pool persistedUser =
-  withPgConnection pool StorageFailure $ \conn -> do
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
     let roleValue = userRoleToDb (userRole persistedUser)
         approvedValue = approvalStatusToDb (approvalStatus persistedUser)
-    writeResult <- liftIO (timedTry "UPDATE auth-user"
+    affected <- tryExcept
       (execute
         conn
         "UPDATE auth_users SET password_hash = ?, role = ?::auth_user_role, approved = ? WHERE username = ?"
         (unPasswordHash (passwordHash persistedUser), roleValue, approvedValue, uname persistedUser))
-      :: IO (Either Ex.SomeException Int64))
-    case writeResult of
-      Left err -> throwError (mapWriteException err)
-      Right affected -> when (affected == 0) (throwError NotFound)
+        mapWriteException
+    when (affected == 0) (throwError NotFound)
 
 pgDeleteUserByUsername :: Pool Connection -> String -> ExceptT RepositoryError IO ()
 pgDeleteUserByUsername pool username =
-  withPgConnection pool StorageFailure $ \conn -> do
-    writeResult <- liftIO (timedTry "DELETE auth-user"
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    affected <-tryExcept
       (execute conn "DELETE FROM auth_users WHERE username = ?" (Only username))
-      :: IO (Either Ex.SomeException Int64))
-    case writeResult of
-      Left err -> throwError (mapWriteException err)
-      Right affected -> when (affected == 0) (throwError NotFound)
+      mapWriteException
+    when (affected == 0) (throwError NotFound)
 
 pgListUsers :: Pool Connection -> ExceptT RepositoryError IO [PersistedUser]
 pgListUsers pool =
-  withPgConnection pool StorageFailure $ \conn -> do
-    readResult <- liftIO (timedTry "SELECT auth-users"
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    rows <- tryExcept
       (query_ conn "SELECT username, password_hash, role::text, approved FROM auth_users ORDER BY username" :: IO [(String, Text, Text, Bool)])
-      :: IO (Either Ex.SomeException [(String, Text, Text, Bool)]))
-    case readResult of
-      Left err -> throwError (mapReadException err)
-      Right rows -> mapM decodeRow rows
+      mapReadException
+    mapM decodeRow rows
   where
     decodeRow :: (String, Text, Text, Bool) -> ExceptT RepositoryError IO PersistedUser
     decodeRow (dbUsername, dbPasswordHash, dbRole, dbApproved) =
@@ -367,14 +337,6 @@ pgListUsers pool =
             , userRole = role
             , approvalStatus = dbToApprovalStatus dbApproved
             }
-
-withPgConnection :: forall a. Pool Connection -> RepositoryError -> (Connection -> ExceptT RepositoryError IO a) -> ExceptT RepositoryError IO a
-withPgConnection pool connectionError action = do
-  runResult <- liftIO (Ex.try (withResource pool (\conn -> runExceptT (action conn))) :: IO (Either Ex.SomeException (Either RepositoryError a)))
-  case runResult of
-    Left _ -> throwError connectionError
-    Right (Left err) -> throwError err
-    Right (Right value) -> pure value
 
 mapReadException :: Ex.SomeException -> RepositoryError
 mapReadException ex =

@@ -16,6 +16,8 @@ module PostgresMigrations
   ) where
 
 import Control.Monad (unless, when)
+import Control.Monad.Trans.Class (lift)
+import Control.Monad.Trans.Except (ExceptT(..), runExceptT, throwE, handleE)
 import Data.List (isInfixOf)
 import Data.Maybe (isJust)
 import System.Directory (findExecutable)
@@ -29,83 +31,78 @@ data MigrationDirection
   deriving (Eq, Show)
 
 data SqlMigration = SqlMigration
-  { migrationId :: String
-  , upSqlPath :: FilePath
-  , downSqlPath :: FilePath
+  { migrationId :: !String
+  , upSqlPath :: !FilePath
+  , downSqlPath :: !FilePath
   }
 
 data MigrationStats = MigrationStats
-  { statsApplied :: Int
-  , statsSkipped :: Int
+  { statsApplied :: !Int
+  , statsSkipped :: !Int
   }
 
-runAuthMigrations :: String -> MigrationDirection -> IO (Either String ())
+runAuthMigrations :: String -> MigrationDirection -> ExceptT String IO ()
 runAuthMigrations = runAuthMigrationsAtPath "."
 
-runAuthMigrationsAtPath :: FilePath -> String -> MigrationDirection -> IO (Either String ())
+runAuthMigrationsAtPath :: FilePath -> String -> MigrationDirection -> ExceptT String IO ()
 runAuthMigrationsAtPath basePath connectionUrl direction =
   runMigrationsAtPath "auth" basePath connectionUrl direction authMigrations
 
-runSessionMigrations :: String -> MigrationDirection -> IO (Either String ())
+runSessionMigrations :: String -> MigrationDirection -> ExceptT String IO ()
 runSessionMigrations = runSessionMigrationsAtPath "."
 
-runSessionMigrationsAtPath :: FilePath -> String -> MigrationDirection -> IO (Either String ())
+runSessionMigrationsAtPath :: FilePath -> String -> MigrationDirection -> ExceptT String IO ()
 runSessionMigrationsAtPath basePath connectionUrl direction =
   runMigrationsAtPath "session" basePath connectionUrl direction sessionMigrations
 
-runCalendarMigrations :: String -> MigrationDirection -> IO (Either String ())
+runCalendarMigrations :: String -> MigrationDirection -> ExceptT String IO ()
 runCalendarMigrations = runCalendarMigrationsAtPath "."
 
-runCalendarMigrationsAtPath :: FilePath -> String -> MigrationDirection -> IO (Either String ())
+runCalendarMigrationsAtPath :: FilePath -> String -> MigrationDirection -> ExceptT String IO ()
 runCalendarMigrationsAtPath basePath connectionUrl direction =
   runMigrationsAtPath "calendar" basePath connectionUrl direction calendarMigrations
 
-runTripSharingMigrations :: String -> MigrationDirection -> IO (Either String ())
+runTripSharingMigrations :: String -> MigrationDirection -> ExceptT String IO ()
 runTripSharingMigrations = runTripSharingMigrationsAtPath "."
 
-runTripSharingMigrationsAtPath :: FilePath -> String -> MigrationDirection -> IO (Either String ())
+runTripSharingMigrationsAtPath :: FilePath -> String -> MigrationDirection -> ExceptT String IO ()
 runTripSharingMigrationsAtPath basePath connectionUrl direction =
   runMigrationsAtPath "trip-sharing" basePath connectionUrl direction tripSharingMigrations
 
-runNoteMigrations :: String -> MigrationDirection -> IO (Either String ())
+runNoteMigrations :: String -> MigrationDirection -> ExceptT String IO ()
 runNoteMigrations = runNoteMigrationsAtPath "."
 
-runNoteMigrationsAtPath :: FilePath -> String -> MigrationDirection -> IO (Either String ())
+runNoteMigrationsAtPath :: FilePath -> String -> MigrationDirection -> ExceptT String IO ()
 runNoteMigrationsAtPath basePath connectionUrl direction =
   runMigrationsAtPath "note" basePath connectionUrl direction noteMigrations
 
-runChecklistMigrations :: String -> MigrationDirection -> IO (Either String ())
+runChecklistMigrations :: String -> MigrationDirection -> ExceptT String IO ()
 runChecklistMigrations = runChecklistMigrationsAtPath "."
 
-runChecklistMigrationsAtPath :: FilePath -> String -> MigrationDirection -> IO (Either String ())
+runChecklistMigrationsAtPath :: FilePath -> String -> MigrationDirection -> ExceptT String IO ()
 runChecklistMigrationsAtPath basePath connectionUrl direction =
   runMigrationsAtPath "checklist" basePath connectionUrl direction checklistMigrations
 
-runMigrationsAtPath :: String -> FilePath -> String -> MigrationDirection -> [SqlMigration] -> IO (Either String ())
+runMigrationsAtPath :: String -> FilePath -> String -> MigrationDirection -> [SqlMigration] -> ExceptT String IO ()
 runMigrationsAtPath domain basePath connectionUrl direction migrations = do
-  startedAt <- getCurrentTime
-  putStrLn ("[migrations] starting " ++ domain ++ " migrations direction=" ++ show direction)
-  available <- psqlAvailable
+  startedAt <- lift getCurrentTime
+  lift $ putStrLn ("[migrations] starting " ++ domain ++ " migrations direction=" ++ show direction)
+  available <- lift psqlAvailable
   if not available
-    then pure (Left "psql binary not found in PATH")
+    then throwE "psql binary not found in PATH"
     else do
       ensureResult <- ensureMigrationsTable connectionUrl
-      case ensureResult of
-        Left err -> pure (Left err)
-        Right () -> do
-          migrationResult <-
-            case direction of
-              MigrateUp -> applyAllUp basePath connectionUrl migrations
-              MigrateDown -> applyAllDown basePath connectionUrl (reverse migrations)
-          endedAt <- getCurrentTime
-          let elapsed = diffUTCTime endedAt startedAt
-          case migrationResult of
-            Left err -> do
-              putStrLn ("[migrations] " ++ domain ++ " migrations failed direction=" ++ show direction ++ " elapsed=" ++ show elapsed)
-              pure (Left err)
-            Right stats -> do
-              putStrLn ("[migrations] " ++ domain ++ " migrations completed direction=" ++ show direction ++ " applied=" ++ show (statsApplied stats) ++ " skipped=" ++ show (statsSkipped stats) ++ " elapsed=" ++ show elapsed)
-              pure (Right ())
+      stats <- handleE (\err -> do
+                          endedAt <- lift getCurrentTime
+                          let elapsed = diffUTCTime endedAt startedAt
+                          lift $ putStrLn ("[migrations] " ++ domain ++ " migrations failed direction=" ++ show direction ++ " elapsed=" ++ show elapsed)
+                          throwE err) $ case direction of
+                                          MigrateUp -> applyAllUp basePath connectionUrl migrations
+                                          MigrateDown -> applyAllDown basePath connectionUrl (reverse migrations)
+      endedAt <- lift getCurrentTime
+      let elapsed = diffUTCTime endedAt startedAt
+      lift $ putStrLn ("[migrations] " ++ domain ++ " migrations completed direction=" ++ show direction ++ " applied=" ++ show (statsApplied stats) ++ " skipped=" ++ show (statsSkipped stats) ++ " elapsed=" ++ show elapsed)
+      pure()
 
 psqlAvailable :: IO Bool
 psqlAvailable = do
@@ -166,99 +163,79 @@ checklistMigrations =
       }
   ]
 
-applyAllUp :: FilePath -> String -> [SqlMigration] -> IO (Either String MigrationStats)
-applyAllUp _ _ [] = pure (Right MigrationStats {statsApplied = 0, statsSkipped = 0})
+applyAllUp :: FilePath -> String -> [SqlMigration] -> ExceptT String IO MigrationStats
+applyAllUp _ _ [] = pure $ MigrationStats {statsApplied = 0, statsSkipped = 0}
 applyAllUp basePath connectionUrl (migration:rest) = do
   applied <- migrationAlreadyApplied connectionUrl (migrationId migration)
-  case applied of
-    Left err -> pure (Left err)
-    Right True -> do
-      putStrLn ("[migrations] skipping already applied migration id=" ++ migrationId migration)
-      restResult <- applyAllUp basePath connectionUrl rest
-      pure $ fmap (\stats -> stats {statsSkipped = statsSkipped stats + 1}) restResult
-    Right False -> do
-      putStrLn ("[migrations] applying migration id=" ++ migrationId migration ++ " file=" ++ upSqlPath migration)
-      execResult <- runSqlFile connectionUrl (basePath ++ "/" ++ upSqlPath migration)
-      case execResult of
-        Left err -> pure (Left err)
-        Right () -> do
-          markResult <- markMigrationApplied connectionUrl (migrationId migration)
-          case markResult of
-            Left err -> pure (Left err)
-            Right () -> do
-              putStrLn ("[migrations] applied migration id=" ++ migrationId migration)
-              restResult <- applyAllUp basePath connectionUrl rest
-              pure $ fmap (\stats -> stats {statsApplied = statsApplied stats + 1}) restResult
+  if applied
+    then do
+      lift $ putStrLn ("[migrations] skipping already applied migration id=" ++ migrationId migration)
+      stats <- applyAllUp basePath connectionUrl rest
+      pure $ stats {statsSkipped = statsSkipped stats + 1}
+    else do
+      lift $ putStrLn ("[migrations] applying migration id=" ++ migrationId migration ++ " file=" ++ upSqlPath migration)
+      runSqlFile connectionUrl (basePath ++ "/" ++ upSqlPath migration)
+      markMigrationApplied connectionUrl (migrationId migration)
+      lift $ putStrLn ("[migrations] applied migration id=" ++ migrationId migration)
+      stats <- applyAllUp basePath connectionUrl rest
+      pure $ stats {statsApplied = statsApplied stats + 1}
 
-applyAllDown :: FilePath -> String -> [SqlMigration] -> IO (Either String MigrationStats)
-applyAllDown _ _ [] = pure (Right MigrationStats {statsApplied = 0, statsSkipped = 0})
+applyAllDown :: FilePath -> String -> [SqlMigration] -> ExceptT String IO MigrationStats
+applyAllDown _ _ [] = pure $ MigrationStats {statsApplied = 0, statsSkipped = 0}
 applyAllDown basePath connectionUrl (migration:rest) = do
   applied <- migrationAlreadyApplied connectionUrl (migrationId migration)
-  case applied of
-    Left err -> pure (Left err)
-    Right False -> do
-      putStrLn ("[migrations] skipping not-applied migration id=" ++ migrationId migration)
-      restResult <- applyAllDown basePath connectionUrl rest
-      pure $ fmap (\stats -> stats {statsSkipped = statsSkipped stats + 1}) restResult
-    Right True -> do
-      putStrLn ("[migrations] rolling back migration id=" ++ migrationId migration ++ " file=" ++ downSqlPath migration)
-      execResult <- runSqlFile connectionUrl (basePath ++ "/" ++ downSqlPath migration)
-      case execResult of
-        Left err -> pure (Left err)
-        Right () -> do
-          unmarkResult <- unmarkMigrationApplied connectionUrl (migrationId migration)
-          case unmarkResult of
-            Left err -> pure (Left err)
-            Right () -> do
-              putStrLn ("[migrations] rolled back migration id=" ++ migrationId migration)
-              restResult <- applyAllDown basePath connectionUrl rest
-              pure $ fmap (\stats -> stats {statsApplied = statsApplied stats + 1}) restResult
+  if not applied
+    then do lift $ putStrLn ("[migrations] skipping not-applied migration id=" ++ migrationId migration)
+            stats <- applyAllDown basePath connectionUrl rest
+            pure $ stats {statsSkipped = statsSkipped stats + 1}
+    else do lift $ putStrLn ("[migrations] rolling back migration id=" ++ migrationId migration ++ " file=" ++ downSqlPath migration)
+            runSqlFile connectionUrl (basePath ++ "/" ++ downSqlPath migration)
+            unmarkMigrationApplied connectionUrl (migrationId migration)
+            lift $ putStrLn ("[migrations] rolled back migration id=" ++ migrationId migration)
+            stats <- applyAllDown basePath connectionUrl rest
+            pure $ stats {statsApplied = statsApplied stats + 1}
 
-ensureMigrationsTable :: String -> IO (Either String ())
+ensureMigrationsTable :: String -> ExceptT String IO ()
 ensureMigrationsTable connectionUrl =
   runSqlCommand connectionUrl "CREATE TABLE IF NOT EXISTS schema_migrations (migration_id TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
 
-migrationAlreadyApplied :: String -> String -> IO (Either String Bool)
+migrationAlreadyApplied :: String -> String -> ExceptT String IO Bool
 migrationAlreadyApplied connectionUrl name = do
   scalarResult <- runScalarQuery connectionUrl ("SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE migration_id = '" ++ sqlEscape name ++ "')")
-  case scalarResult of
-    Left err -> pure (Left err)
-    Right value
-      | "t" `isInfixOf` value -> pure (Right True)
-      | "f" `isInfixOf` value -> pure (Right False)
-      | otherwise -> pure (Left ("Unexpected EXISTS result: " ++ value))
+  if "t" `isInfixOf` scalarResult
+    then pure True
+    else if "f" `isInfixOf` scalarResult
+      then pure False
+      else throwE $ "Unexpected EXISTS result: " <> scalarResult
 
-markMigrationApplied :: String -> String -> IO (Either String ())
+markMigrationApplied :: String -> String -> ExceptT String IO ()
 markMigrationApplied connectionUrl name =
   runSqlCommand connectionUrl ("INSERT INTO schema_migrations (migration_id) VALUES ('" ++ sqlEscape name ++ "')")
 
-unmarkMigrationApplied :: String -> String -> IO (Either String ())
+unmarkMigrationApplied :: String -> String -> ExceptT String IO ()
 unmarkMigrationApplied connectionUrl name =
   runSqlCommand connectionUrl ("DELETE FROM schema_migrations WHERE migration_id = '" ++ sqlEscape name ++ "'")
 
-runSqlFile :: String -> FilePath -> IO (Either String ())
+runSqlFile :: String -> FilePath -> ExceptT String IO ()
 runSqlFile connectionUrl filePath = do
-  (exitCode, _stdout, stderr) <- readProcessWithExitCode "psql" ["--dbname", connectionUrl, "-v", "ON_ERROR_STOP=1", "-f", filePath] ""
-  pure $
-    case exitCode of
-      ExitSuccess -> Right ()
-      ExitFailure _ -> Left stderr
+  (exitCode, _stdout, stderr) <- lift $ readProcessWithExitCode "psql" ["--dbname", connectionUrl, "-v", "ON_ERROR_STOP=1", "-f", filePath] ""
+  case exitCode of
+    ExitSuccess -> pure ()
+    ExitFailure _ -> throwE stderr
 
-runSqlCommand :: String -> String -> IO (Either String ())
+runSqlCommand :: String -> String -> ExceptT String IO ()
 runSqlCommand connectionUrl command = do
-  (exitCode, _stdout, stderr) <- readProcessWithExitCode "psql" ["--dbname", connectionUrl, "-v", "ON_ERROR_STOP=1", "-c", command] ""
-  pure $
-    case exitCode of
-      ExitSuccess -> Right ()
-      ExitFailure _ -> Left stderr
+  (exitCode, _stdout, stderr) <- lift $ readProcessWithExitCode "psql" ["--dbname", connectionUrl, "-v", "ON_ERROR_STOP=1", "-c", command] ""
+  case exitCode of
+    ExitSuccess -> pure ()
+    ExitFailure _ -> throwE stderr
 
-runScalarQuery :: String -> String -> IO (Either String String)
+runScalarQuery :: String -> String -> ExceptT String IO String
 runScalarQuery connectionUrl querySql = do
-  (exitCode, stdout, stderr) <- readProcessWithExitCode "psql" ["--dbname", connectionUrl, "-tA", "-c", querySql] ""
-  pure $
-    case exitCode of
-      ExitSuccess -> Right stdout
-      ExitFailure _ -> Left stderr
+  (exitCode, stdout, stderr) <- lift $ readProcessWithExitCode "psql" ["--dbname", connectionUrl, "-tA", "-c", querySql] ""
+  case exitCode of
+    ExitSuccess -> pure stdout
+    ExitFailure _ -> throwE stderr
 
 sqlEscape :: String -> String
 sqlEscape = concatMap escapeChar

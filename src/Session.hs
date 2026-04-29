@@ -36,7 +36,7 @@ import Data.Time.Clock (UTCTime, NominalDiffTime, addUTCTime, getCurrentTime)
 import Data.UUID (toString)
 import Data.UUID.V4 (nextRandom)
 import Data.Int (Int64)
-import Data.Pool (Pool, withResource)
+import Data.Pool (Pool)
 import qualified Data.ByteString.Char8 as BS8
 import Database.PostgreSQL.Simple
   ( Connection
@@ -47,7 +47,7 @@ import Database.PostgreSQL.Simple
   , query_
   )
 import Repository (RepositoryError(..))
-import SqlTiming (timedTry)
+import Helpers (tryExcept, withPoolExceptHandled, withResourceMHandled)
 import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile, renameFile)
 import System.FilePath ((</>), takeDirectory)
 import System.IO (openTempFile, hClose)
@@ -214,28 +214,22 @@ mkPostgresSessionRepository pool =
     , repoDeleteAllUserStateBindingsForUser = pgDeleteAllUserStateBindingsForUser pool
     }
 
-verifyPostgresSessionStorage :: Pool Connection -> IO (Either String ())
-verifyPostgresSessionStorage pool = do
-  verifyResult <- Ex.try $ withResource pool $ \conn -> do
-      pingResult <- timedTry "SELECT ping-session" (query_ conn "SELECT 1" :: IO [Only Int]) :: IO (Either Ex.SomeException [Only Int])
-      statesResult <- timedTry "SELECT session-states-schema-check" (query_ conn "SELECT state_id::text, user_id, created_at, expires_at, idle_expires_at, revoked_at FROM session_states LIMIT 0" :: IO [(String, String, UTCTime, UTCTime, UTCTime, Maybe UTCTime)]) :: IO (Either Ex.SomeException [(String, String, UTCTime, UTCTime, UTCTime, Maybe UTCTime)])
-      handlesResult <- timedTry "SELECT session-handles-schema-check" (query_ conn "SELECT session_id::text, state_id::text, issued_at, revoked_at FROM session_handles LIMIT 0" :: IO [(String, String, UTCTime, Maybe UTCTime)]) :: IO (Either Ex.SomeException [(String, String, UTCTime, Maybe UTCTime)])
-      bindingsResult <- timedTry "SELECT session-bindings-schema-check" (query_ conn "SELECT user_id, state_id::text FROM session_user_bindings LIMIT 0" :: IO [(String, String)]) :: IO (Either Ex.SomeException [(String, String)])
-      case pingResult of
-        Left err -> pure (Left ("Postgres ping query failed: " ++ show err))
-        Right _ ->
-          case statesResult of
-            Left err -> pure (Left ("Session schema check failed for session_states: " ++ show err))
-            Right _ ->
-              case handlesResult of
-                Left err -> pure (Left ("Session schema check failed for session_handles: " ++ show err))
-                Right _ ->
-                  case bindingsResult of
-                    Left err -> pure (Left ("Session schema check failed for session_user_bindings: " ++ show err))
-                    Right _ -> pure (Right ())
-  case verifyResult of
-    Left err -> pure (Left ("Unable to connect to Postgres: " ++ show (err :: Ex.SomeException)))
-    Right value -> pure value
+verifyPostgresSessionStorage :: Pool Connection -> ExceptT String IO ()
+verifyPostgresSessionStorage pool =
+  withResourceMHandled
+    (\err -> "Unable to connect to Postgres: " ++ show err)
+    pool
+    (\conn -> do
+      _ <- tryExcept (query_ conn "SELECT 1" :: IO [Only Int])
+                     (\err -> "Postgres ping query failed: " ++ show err)
+      _ <- tryExcept (query_ conn "SELECT state_id::text, user_id, created_at, expires_at, idle_expires_at, revoked_at FROM session_states LIMIT 0" :: IO [(String, String, UTCTime, UTCTime, UTCTime, Maybe UTCTime)])
+                     (\err -> "Session schema check failed for session_states: " ++ show err)
+      _ <- tryExcept (query_ conn "SELECT session_id::text, state_id::text, issued_at, revoked_at FROM session_handles LIMIT 0" :: IO [(String, String, UTCTime, Maybe UTCTime)])
+                     (\err -> "Session schema check failed for session_handles: " ++ show err)
+      _ <- tryExcept (query_ conn "SELECT user_id, state_id::text FROM session_user_bindings LIMIT 0" :: IO [(String, String)])
+                     (\err -> "Session schema check failed for session_user_bindings: " ++ show err)
+      pure ()
+    )
 
 createSessionForUserImpl :: SessionRepository -> SessionConfig -> String -> IO String
 createSessionForUserImpl repo config userId = do
@@ -389,10 +383,10 @@ loadStateByIdMaybe repo stId = do
 fsCreateSessionHandle :: FilePath -> SessionHandle -> ExceptT RepositoryError IO ()
 fsCreateSessionHandle baseDir handle = do
   let path = handlePath baseDir (handleSessionId handle)
-  exists <- ioOr ReadFailure (doesFileExist path)
+  exists <- tryExcept (doesFileExist path) (const ReadFailure)
   if exists
     then throwError AlreadyExists
-    else ioOr WriteFailure (writeJsonAtomic path handle)
+    else tryExcept (writeJsonAtomic path handle) (const WriteFailure)
 
 fsLoadSessionHandleBySessionId :: FilePath -> String -> ExceptT RepositoryError IO SessionHandle
 fsLoadSessionHandleBySessionId baseDir sid =
@@ -401,10 +395,10 @@ fsLoadSessionHandleBySessionId baseDir sid =
 fsUpdateSessionHandle :: FilePath -> SessionHandle -> ExceptT RepositoryError IO ()
 fsUpdateSessionHandle baseDir handle = do
   let path = handlePath baseDir (handleSessionId handle)
-  exists <- ioOr ReadFailure (doesFileExist path)
+  exists <- tryExcept (doesFileExist path) (const ReadFailure)
   if not exists
     then throwError NotFound
-    else ioOr WriteFailure (writeJsonAtomic path handle)
+    else tryExcept (writeJsonAtomic path handle) (const WriteFailure)
 
 fsDeleteSessionHandleBySessionId :: FilePath -> String -> ExceptT RepositoryError IO ()
 fsDeleteSessionHandleBySessionId baseDir sid =
@@ -413,10 +407,10 @@ fsDeleteSessionHandleBySessionId baseDir sid =
 fsCreateSessionState :: FilePath -> SessionState -> ExceptT RepositoryError IO ()
 fsCreateSessionState baseDir st = do
   let path = statePath baseDir (stateId st)
-  exists <- ioOr ReadFailure (doesFileExist path)
+  exists <- tryExcept (doesFileExist path) (const ReadFailure)
   if exists
     then throwError AlreadyExists
-    else ioOr WriteFailure (writeJsonAtomic path st)
+    else tryExcept (writeJsonAtomic path st) (const WriteFailure)
 
 fsLoadSessionStateByStateId :: FilePath -> String -> ExceptT RepositoryError IO SessionState
 fsLoadSessionStateByStateId baseDir stId =
@@ -425,10 +419,10 @@ fsLoadSessionStateByStateId baseDir stId =
 fsUpdateSessionState :: FilePath -> SessionState -> ExceptT RepositoryError IO ()
 fsUpdateSessionState baseDir st = do
   let path = statePath baseDir (stateId st)
-  exists <- ioOr ReadFailure (doesFileExist path)
+  exists <- tryExcept (doesFileExist path) (const ReadFailure)
   if not exists
     then throwError NotFound
-    else ioOr WriteFailure (writeJsonAtomic path st)
+    else tryExcept (writeJsonAtomic path st) (const WriteFailure)
 
 fsDeleteSessionStateByStateId :: FilePath -> String -> ExceptT RepositoryError IO ()
 fsDeleteSessionStateByStateId baseDir stId =
@@ -437,10 +431,10 @@ fsDeleteSessionStateByStateId baseDir stId =
 fsCreateUserStateBinding :: FilePath -> String -> UserStateBinding -> ExceptT RepositoryError IO ()
 fsCreateUserStateBinding baseDir userId binding = do
   let path = userBindingPath baseDir userId
-  exists <- ioOr ReadFailure (doesFileExist path)
+  exists <- tryExcept (doesFileExist path) (const ReadFailure)
   if exists
     then throwError AlreadyExists
-    else ioOr WriteFailure (writeJsonAtomic path binding)
+    else tryExcept (writeJsonAtomic path binding) (const WriteFailure)
 
 fsLoadUserStateBindingByUserId :: FilePath -> String -> ExceptT RepositoryError IO UserStateBinding
 fsLoadUserStateBindingByUserId baseDir userId =
@@ -453,7 +447,7 @@ fsDeleteUserStateBindingByUserId baseDir userId =
 fsDeleteAllUserStateBindingsForUser :: FilePath -> String -> ExceptT RepositoryError IO ()
 fsDeleteAllUserStateBindingsForUser baseDir userId = do
   let path = userBindingPath baseDir userId
-  exists <- ioOr ReadFailure (doesFileExist path)
+  exists <- tryExcept (doesFileExist path) (const ReadFailure)
   when exists $ deleteFileOrNotFound path
 
 handlePath :: FilePath -> String -> FilePath
@@ -467,30 +461,27 @@ userBindingPath baseDir userId = baseDir </> "users" </> userId ++ ".json"
 
 readJsonFileOrNotFound :: FromJSON a => FilePath -> ExceptT RepositoryError IO a
 readJsonFileOrNotFound fp = do
-  exists <- ioOr ReadFailure (doesFileExist fp)
+  exists <- tryExcept (doesFileExist fp) (const ReadFailure)
   if not exists
     then throwError NotFound
     else do
-      content <- ioOr ReadFailure (BL.readFile fp)
+      content <- tryExcept (BL.readFile fp) (const ReadFailure)
       case decode content of
         Nothing -> throwError ReadFailure
         Just parsed -> pure parsed
 
 deleteFileOrNotFound :: FilePath -> ExceptT RepositoryError IO ()
 deleteFileOrNotFound fp = do
-  deleteResult <- liftIO $ Ex.try (removeFile fp) :: ExceptT RepositoryError IO (Either Ex.IOException ())
-  case deleteResult of
-    Left err
-      | isDoesNotExistError err -> throwError NotFound
-      | otherwise -> throwError WriteFailure
-    Right () -> pure ()
+  _ <- tryExcept (removeFile fp) mapDeleteFileException
+  pure ()
 
-ioOr :: RepositoryError -> IO a -> ExceptT RepositoryError IO a
-ioOr err action = do
-  result <- liftIO (Ex.try action)
-  case result of
-    Left (_ :: Ex.IOException) -> throwError err
-    Right value -> pure value
+mapDeleteFileException :: Ex.SomeException -> RepositoryError
+mapDeleteFileException ex =
+  case Ex.fromException ex :: Maybe Ex.IOException of
+    Just ioErr
+      | isDoesNotExistError ioErr -> NotFound
+      | otherwise -> WriteFailure
+    Nothing -> WriteFailure
 
 writeJsonAtomic :: ToJSON a => FilePath -> a -> IO ()
 writeJsonAtomic path value = do
@@ -501,40 +492,29 @@ writeJsonAtomic path value = do
   hClose h
   renameFile tmpPath path
 
-withPgConnection :: forall a. Pool Connection -> RepositoryError -> (Connection -> ExceptT RepositoryError IO a) -> ExceptT RepositoryError IO a
-withPgConnection pool connectionError action = do
-  runResult <- liftIO (Ex.try (withResource pool (\conn -> runExceptT (action conn))) :: IO (Either Ex.SomeException (Either RepositoryError a)))
-  case runResult of
-    Left _ -> throwError connectionError
-    Right (Left err) -> throwError err
-    Right (Right value) -> pure value
-
 pgCreateSessionHandle :: Pool Connection -> SessionHandle -> ExceptT RepositoryError IO ()
 pgCreateSessionHandle pool SessionHandle {handleSessionId, handleStateId, handleIssuedAt, handleRevokedAt} =
-  withPgConnection pool StorageFailure $ \conn -> do
-    writeResult <- liftIO (timedTry "INSERT session-handle"
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    writeResult <- tryExcept
       (execute
         conn
         "INSERT INTO session_handles (session_id, state_id, issued_at, revoked_at) VALUES (?::uuid, ?::uuid, ?, ?)"
         (handleSessionId, handleStateId, handleIssuedAt, handleRevokedAt))
-      :: IO (Either Ex.SomeException Int64))
-    case writeResult of
-      Left err -> throwError (mapWriteException err)
-      Right _ -> pure ()
+        mapWriteException
+    pure ()
 
 pgLoadSessionHandleBySessionId :: Pool Connection -> String -> ExceptT RepositoryError IO SessionHandle
 pgLoadSessionHandleBySessionId pool sid =
-  withPgConnection pool StorageFailure $ \conn -> do
-    readResult <- liftIO (timedTry "SELECT session-handle-by-id"
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    readResult <-tryExcept
       (query
         conn
         "SELECT session_id::text, state_id::text, issued_at, revoked_at FROM session_handles WHERE session_id = ?::uuid"
         (Only sid))
-      :: IO (Either Ex.SomeException [(String, String, UTCTime, Maybe UTCTime)]))
+        mapReadException
     case readResult of
-      Left err -> throwError (mapReadException err)
-      Right [] -> throwError NotFound
-      Right ((dbSessionId, dbStateId, dbIssuedAt, dbRevokedAt):_) ->
+      [] -> throwError NotFound
+      ((dbSessionId, dbStateId, dbIssuedAt, dbRevokedAt):_) ->
         pure SessionHandle
           { handleSessionId = dbSessionId
           , handleStateId = dbStateId
@@ -544,53 +524,46 @@ pgLoadSessionHandleBySessionId pool sid =
 
 pgUpdateSessionHandle :: Pool Connection -> SessionHandle -> ExceptT RepositoryError IO ()
 pgUpdateSessionHandle pool SessionHandle {handleSessionId, handleStateId, handleIssuedAt, handleRevokedAt} =
-  withPgConnection pool StorageFailure $ \conn -> do
-    writeResult <- liftIO (timedTry "UPDATE session-handle"
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    affected <- tryExcept
       (execute
         conn
         "UPDATE session_handles SET state_id = ?::uuid, issued_at = ?, revoked_at = ? WHERE session_id = ?::uuid"
         (handleStateId, handleIssuedAt, handleRevokedAt, handleSessionId))
-      :: IO (Either Ex.SomeException Int64))
-    case writeResult of
-      Left err -> throwError (mapWriteException err)
-      Right affected -> when (affected == 0) $ throwError NotFound
+        mapWriteException
+    when (affected == 0) $ throwError NotFound
 
 pgDeleteSessionHandleBySessionId :: Pool Connection -> String -> ExceptT RepositoryError IO ()
 pgDeleteSessionHandleBySessionId pool sid =
-  withPgConnection pool StorageFailure $ \conn -> do
-    writeResult <- liftIO (timedTry "DELETE session-handle"
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    affected <-tryExcept
       (execute conn "DELETE FROM session_handles WHERE session_id = ?::uuid" (Only sid))
-      :: IO (Either Ex.SomeException Int64))
-    case writeResult of
-      Left err -> throwError (mapWriteException err)
-      Right affected -> when (affected == 0) $ throwError NotFound
+      mapWriteException
+    when (affected == 0) $ throwError NotFound
 
 pgCreateSessionState :: Pool Connection -> SessionState -> ExceptT RepositoryError IO ()
 pgCreateSessionState pool SessionState {stateId, stateUserId, stateCreatedAt, stateExpiresAt, stateIdleExpiresAt, stateRevokedAt} =
-  withPgConnection pool StorageFailure $ \conn -> do
-    writeResult <- liftIO (timedTry "INSERT session-state"
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    writeResult <- tryExcept
       (execute
         conn
         "INSERT INTO session_states (state_id, user_id, created_at, expires_at, idle_expires_at, revoked_at) VALUES (?::uuid, ?, ?, ?, ?, ?)"
         (stateId, stateUserId, stateCreatedAt, stateExpiresAt, stateIdleExpiresAt, stateRevokedAt))
-      :: IO (Either Ex.SomeException Int64))
-    case writeResult of
-      Left err -> throwError (mapWriteException err)
-      Right _ -> pure ()
+        mapWriteException
+    pure ()
 
 pgLoadSessionStateByStateId :: Pool Connection -> String -> ExceptT RepositoryError IO SessionState
 pgLoadSessionStateByStateId pool stId =
-  withPgConnection pool StorageFailure $ \conn -> do
-    readResult <- liftIO (timedTry "SELECT session-state-by-id"
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    readResult <-tryExcept
       (query
         conn
         "SELECT state_id::text, user_id, created_at, expires_at, idle_expires_at, revoked_at FROM session_states WHERE state_id = ?::uuid"
         (Only stId))
-      :: IO (Either Ex.SomeException [(String, String, UTCTime, UTCTime, UTCTime, Maybe UTCTime)]))
+        mapReadException
     case readResult of
-      Left err -> throwError (mapReadException err)
-      Right [] -> throwError NotFound
-      Right ((dbStateId, dbUserId, dbCreatedAt, dbExpiresAt, dbIdleExpiresAt, dbRevokedAt):_) ->
+      [] -> throwError NotFound
+      ((dbStateId, dbUserId, dbCreatedAt, dbExpiresAt, dbIdleExpiresAt, dbRevokedAt):_) ->
         pure SessionState
           { stateId = dbStateId
           , stateUserId = dbUserId
@@ -602,73 +575,62 @@ pgLoadSessionStateByStateId pool stId =
 
 pgUpdateSessionState :: Pool Connection -> SessionState -> ExceptT RepositoryError IO ()
 pgUpdateSessionState pool SessionState {stateId, stateUserId, stateCreatedAt, stateExpiresAt, stateIdleExpiresAt, stateRevokedAt} =
-  withPgConnection pool StorageFailure $ \conn -> do
-    writeResult <- liftIO (timedTry "UPDATE session-state"
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    affected <- tryExcept
       (execute
         conn
         "UPDATE session_states SET user_id = ?, created_at = ?, expires_at = ?, idle_expires_at = ?, revoked_at = ? WHERE state_id = ?::uuid"
         (stateUserId, stateCreatedAt, stateExpiresAt, stateIdleExpiresAt, stateRevokedAt, stateId))
-      :: IO (Either Ex.SomeException Int64))
-    case writeResult of
-      Left err -> throwError (mapWriteException err)
-      Right affected -> when (affected == 0) $ throwError NotFound
+        mapWriteException
+    when (affected == 0) $ throwError NotFound
 
 pgDeleteSessionStateByStateId :: Pool Connection -> String -> ExceptT RepositoryError IO ()
 pgDeleteSessionStateByStateId pool stId =
-  withPgConnection pool StorageFailure $ \conn -> do
-    writeResult <- liftIO (timedTry "DELETE session-state"
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    affected <-tryExcept
       (execute conn "DELETE FROM session_states WHERE state_id = ?::uuid" (Only stId))
-      :: IO (Either Ex.SomeException Int64))
-    case writeResult of
-      Left err -> throwError (mapWriteException err)
-      Right affected -> when (affected == 0) $ throwError NotFound
+      mapWriteException
+    when (affected == 0) $ throwError NotFound
 
 pgCreateUserStateBinding :: Pool Connection -> String -> UserStateBinding -> ExceptT RepositoryError IO ()
 pgCreateUserStateBinding pool userId UserStateBinding {boundStateId} =
-  withPgConnection pool StorageFailure $ \conn -> do
-    writeResult <- liftIO (timedTry "INSERT session-user-binding"
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    writeResult <- tryExcept
       (execute
         conn
         "INSERT INTO session_user_bindings (user_id, state_id) VALUES (?, ?::uuid)"
         (userId, boundStateId))
-      :: IO (Either Ex.SomeException Int64))
-    case writeResult of
-      Left err -> throwError (mapWriteException err)
-      Right _ -> pure ()
+        mapWriteException
+    pure ()
 
 pgLoadUserStateBindingByUserId :: Pool Connection -> String -> ExceptT RepositoryError IO UserStateBinding
 pgLoadUserStateBindingByUserId pool userId =
-  withPgConnection pool StorageFailure $ \conn -> do
-    readResult <- liftIO (timedTry "SELECT session-user-binding-by-user"
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    readResult <-tryExcept
       (query
         conn
         "SELECT state_id::text FROM session_user_bindings WHERE user_id = ?"
         (Only userId))
-      :: IO (Either Ex.SomeException [Only String]))
+        mapReadException
     case readResult of
-      Left err -> throwError (mapReadException err)
-      Right [] -> throwError NotFound
-      Right (Only dbStateId:_) -> pure UserStateBinding {boundStateId = dbStateId}
+      [] -> throwError NotFound
+      (Only dbStateId:_) -> pure UserStateBinding {boundStateId = dbStateId}
 
 pgDeleteUserStateBindingByUserId :: Pool Connection -> String -> ExceptT RepositoryError IO ()
 pgDeleteUserStateBindingByUserId pool userId =
-  withPgConnection pool StorageFailure $ \conn -> do
-    writeResult <- liftIO (timedTry "DELETE session-user-binding"
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    affected <-tryExcept
       (execute conn "DELETE FROM session_user_bindings WHERE user_id = ?" (Only userId))
-      :: IO (Either Ex.SomeException Int64))
-    case writeResult of
-      Left err -> throwError (mapWriteException err)
-      Right affected -> when (affected == 0) $ throwError NotFound
+      mapWriteException
+    when (affected == 0) $ throwError NotFound
 
 pgDeleteAllUserStateBindingsForUser :: Pool Connection -> String -> ExceptT RepositoryError IO ()
 pgDeleteAllUserStateBindingsForUser pool userId =
-  withPgConnection pool StorageFailure $ \conn -> do
-    writeResult <- liftIO (timedTry "DELETE session-user-bindings-for-user"
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    writeResult <-tryExcept
       (execute conn "DELETE FROM session_user_bindings WHERE user_id = ?" (Only userId))
-      :: IO (Either Ex.SomeException Int64))
-    case writeResult of
-      Left err -> throwError (mapWriteException err)
-      Right _ -> pure ()
+      mapWriteException
+    pure ()
 
 mapReadException :: Ex.SomeException -> RepositoryError
 mapReadException ex =

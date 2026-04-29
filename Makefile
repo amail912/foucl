@@ -77,19 +77,14 @@ _write-postgres-config:
 	printf '%s\n' \
 	'{' \
 	'  "auth": {' \
-	'    "bootstrapAdminUsername": "admin",' \
-	'    "authBackend": "postgres"' \
+	'    "bootstrapAdminUsername": "admin"' \
 	'  },' \
 	'  "session": {' \
 	'    "cookieName": "foucl_session",' \
 	'    "absoluteTtlSeconds": 604800,' \
-	'    "idleTtlSeconds": 86400,' \
-	'    "sessionBackend": "postgres"' \
+	'    "idleTtlSeconds": 86400' \
 	'  },' \
-	'  "calendarBackend": "postgres",' \
-	'  "tripSharingBackend": "postgres",' \
-	'  "noteBackend": "postgres",' \
-	'  "checklistBackend": "postgres",' \
+	'  "backend": "postgres",' \
 	'  "database": {' \
 	'    "host": "127.0.0.1",' \
 	'    "port": 5432,' \

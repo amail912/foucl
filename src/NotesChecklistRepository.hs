@@ -30,7 +30,7 @@ import Data.Aeson (encode, eitherDecode)
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy.Char8 as BL8
 import Data.Int (Int64)
-import Data.Pool (Pool, withResource)
+import Data.Pool (Pool)
 import Data.String (fromString)
 import Data.Time.Clock (getCurrentTime, diffUTCTime, UTCTime)
 import Data.UUID (toString)
@@ -48,15 +48,15 @@ import CrudStorage (createItem, deleteItem, getAllItems, modifyItem)
 import Model (ChecklistContent, Content, Identifiable(..), NoteContent, StorageId(..), hash)
 import NoteCrud (NoteServiceConfig, defaultNoteServiceConfig)
 import System.IO (hFlush, stdout)
-import SqlTiming (timedTry)
+import Helpers (tryExcept, withPoolExceptHandled, withResourceMHandled)
 import Text.Printf (printf)
 import qualified Control.Exception as Ex
 
 data NotesChecklistRepository a = NotesChecklistRepository
-  { repoCreateItem :: a -> ExceptT CrudWriteException IO StorageId
-  , repoListItems :: ExceptT CrudReadException IO [Identifiable a]
-  , repoDeleteItemById :: String -> ExceptT CrudWriteException IO ()
-  , repoUpdateItem :: Identifiable a -> ExceptT CrudModificationException IO StorageId
+  { repoCreateItem :: !(a -> ExceptT CrudWriteException IO StorageId)
+  , repoListItems :: !(ExceptT CrudReadException IO [Identifiable a])
+  , repoDeleteItemById :: !(String -> ExceptT CrudWriteException IO ())
+  , repoUpdateItem :: !(Identifiable a -> ExceptT CrudModificationException IO StorageId)
   }
 
 type NoteRepository = NotesChecklistRepository NoteContent
@@ -93,10 +93,10 @@ postgresNoteRepository pool = postgresNotesChecklistRepository pool "note_items"
 postgresChecklistRepository :: Pool Connection -> ChecklistRepository
 postgresChecklistRepository pool = postgresNotesChecklistRepository pool "checklist_items"
 
-verifyPostgresNoteStorage :: Pool Connection -> IO (Either String ())
+verifyPostgresNoteStorage :: Pool Connection -> ExceptT String IO ()
 verifyPostgresNoteStorage pool = verifyPostgresStorageTable pool "note_items"
 
-verifyPostgresChecklistStorage :: Pool Connection -> IO (Either String ())
+verifyPostgresChecklistStorage :: Pool Connection -> ExceptT String IO ()
 verifyPostgresChecklistStorage pool = verifyPostgresStorageTable pool "checklist_items"
 
 listItemsIgnoringParsingFailures
@@ -123,62 +123,43 @@ postgresNotesChecklistRepository pool tableName =
     , repoUpdateItem = pgUpdateItem pool tableName
     }
 
-verifyPostgresStorageTable :: Pool Connection -> String -> IO (Either String ())
-verifyPostgresStorageTable pool tableName = do
-  verifyResult <- Ex.try $ withResource pool $ \conn -> do
-      pingResult <- timedTry ("SELECT ping-" ++ tableName) (query_ conn "SELECT 1" :: IO [Only Int]) :: IO (Either Ex.SomeException [Only Int])
-      schemaResult <- timedTry ("SELECT schema-check-" ++ tableName)
-        (query_ conn (buildSchemaCheckQuery tableName) :: IO [(String, String, String)])
-        :: IO (Either Ex.SomeException [(String, String, String)])
-      case pingResult of
-        Left err -> pure (Left ("Postgres ping query failed: " ++ show err))
-        Right _ ->
-          case schemaResult of
-            Left err -> pure (Left ("Schema check failed for " ++ tableName ++ ": " ++ show err))
-            Right _ -> pure (Right ())
-  case verifyResult of
-    Left err -> pure (Left ("Unable to connect to Postgres: " ++ show (err :: Ex.SomeException)))
-    Right value -> pure value
+verifyPostgresStorageTable :: Pool Connection -> String -> ExceptT String IO ()
+verifyPostgresStorageTable pool tableName =
+  withResourceMHandled
+    (\err -> "Unable to connect to Postgres: " ++ show err)
+    pool
+    (\conn -> do
+      _ <- tryExcept (query_ conn "SELECT 1" :: IO [Only Int]) (\err -> "Postgres ping query failed: " ++ show err)
+      _ <- tryExcept (query_ conn (buildSchemaCheckQuery tableName) :: IO [(String, String, String)])
+                     (\err -> "Schema check failed for " ++ tableName ++ ": " ++ show err)
+      pure ())
 
 pgCreateItem :: Content a => Pool Connection -> String -> a -> ExceptT CrudWriteException IO StorageId
 pgCreateItem pool tableName content =
-  withPgConnection pool IOWriteException $ \conn -> do
+  withPoolExceptHandled (IOWriteException . userError . show) pool $ \conn -> do
     itemId <- liftIO (toString <$> nextRandom)
     let storeId = mkStorageId itemId content
-    writeResult <- liftIO (timedTry ("INSERT " ++ tableName)
+    writeResult <- tryExcept
       (execute conn
         (buildInsertQuery tableName)
         ( itemId
         , version storeId
         , BL8.unpack (encode content)
         ))
-      :: IO (Either Ex.SomeException Int64))
-    case writeResult of
-      Left err -> throwError (mapWriteException err)
-      Right _ -> pure storeId
+        mapWriteException
+    pure storeId
 
 pgListItems :: Content a => Pool Connection -> String -> ExceptT CrudReadException IO [Identifiable a]
 pgListItems pool tableName = do
-  checkoutStartedAt <- liftIO getCurrentTime
-  queryAndRows <- liftIO (Ex.try (withResource pool $ \conn -> do
-      checkoutEndedAt <- getCurrentTime
-      queryStartedAt <- getCurrentTime
-      readResult <- timedTry ("SELECT " ++ tableName)
+  withPoolExceptHandled
+    (IOReadException . userError . show)
+    pool
+    (\conn -> do
+      rows <- tryExcept
         (query_ conn (buildListQuery tableName) :: IO [(String, String, String)])
-        :: IO (Either Ex.SomeException [(String, String, String)])
-      queryEndedAt <- getCurrentTime
-      pure (checkoutEndedAt, queryStartedAt, queryEndedAt, readResult)
-    ) :: IO (Either Ex.SomeException (UTCTime, UTCTime, UTCTime, Either Ex.SomeException [(String, String, String)])))
-  case queryAndRows of
-    Left err -> throwError (IOReadException (userError (show err)))
-    Right (checkoutEndedAt, queryStartedAt, queryEndedAt, readResult) -> do
-      case readResult of
-        Left err -> throwError (mapReadException err)
-        Right rows -> do
-          decodeStartedAt <- liftIO getCurrentTime
-          decoded <- reverse <$> foldM accumulate [] rows
-          decodeEndedAt <- liftIO getCurrentTime
-          pure decoded
+        mapReadException
+      reverse <$> foldM accumulate [] rows
+    )
   where
     accumulate acc (itemId, itemVersion, rawContent) =
       case eitherDecode (BL8.pack rawContent) of
@@ -190,19 +171,17 @@ pgListItems pool tableName = do
 
 pgDeleteItem :: Pool Connection -> String -> String -> ExceptT CrudWriteException IO ()
 pgDeleteItem pool tableName itemId =
-  withPgConnection pool IOWriteException $ \conn -> do
-    writeResult <- liftIO (timedTry ("DELETE " ++ tableName)
+  withPoolExceptHandled (IOWriteException . userError . show) pool $ \conn -> do
+    writeResult <-tryExcept
       (execute conn (buildDeleteQuery tableName) (Only itemId))
-      :: IO (Either Ex.SomeException Int64))
-    case writeResult of
-      Left err -> throwError (mapWriteException err)
-      Right _ -> pure ()
+      mapWriteException
+    pure ()
 
 pgUpdateItem :: Content a => Pool Connection -> String -> Identifiable a -> ExceptT CrudModificationException IO StorageId
 pgUpdateItem pool tableName (Identifiable targetStorageId@StorageId {id = targetId, version = targetVersion} newContent) =
-  withPgConnection pool mapConnectionError $ \conn -> do
+  withPoolExceptHandled (mapConnectionError . userError . show) pool $ \conn -> do
     let newVersion = hash newContent
-    writeResult <- liftIO (timedTry ("UPDATE " ++ tableName)
+    affected <- tryExcept
       (execute conn
         (buildUpdateQuery tableName)
         ( newVersion
@@ -210,19 +189,15 @@ pgUpdateItem pool tableName (Identifiable targetStorageId@StorageId {id = target
         , targetId
         , targetVersion
         ))
-      :: IO (Either Ex.SomeException Int64))
-    case writeResult of
-      Left err -> throwError (mapWriteToModificationException err)
-      Right affected
-        | affected > 0 -> pure targetStorageId {version = newVersion}
-        | otherwise -> do
-            latestResult <- liftIO (timedTry ("SELECT latest-version-" ++ tableName)
-              (query conn (buildLookupVersionQuery tableName) (Only targetId) :: IO [Only String])
-              :: IO (Either Ex.SomeException [Only String]))
-            case latestResult of
-              Left err -> throwError (CrudModificationReadingException (mapReadException err))
-              Right [] -> throwError (CrudModificationReadingException (IOReadException (userError "Missing item id")))
-              Right _ -> throwError (NotCurrentVersion targetStorageId)
+        mapWriteToModificationException
+    if affected > 0
+      then pure targetStorageId {version = newVersion}
+      else do
+        latestResult <- tryExcept (query conn (buildLookupVersionQuery tableName) (Only targetId) :: IO [Only String])
+                                  (CrudModificationReadingException . mapReadException)
+        case latestResult of
+          [] -> throwError (CrudModificationReadingException (IOReadException (userError "Missing item id")))
+          _ -> throwError (NotCurrentVersion targetStorageId)
 
 buildSchemaCheckQuery :: String -> Query
 buildSchemaCheckQuery tableName =
@@ -261,30 +236,17 @@ mkStorageId itemId contentToStore =
     , version = hash contentToStore
     }
 
-withPgConnection
-  :: forall e a. Pool Connection
-  -> (IOError -> e)
-  -> (Connection -> ExceptT e IO a)
-  -> ExceptT e IO a
-withPgConnection pool mapConnectionErr action = do
-  runResult <- liftIO (Ex.try (withResource pool (\conn -> runExceptT (action conn))) :: IO (Either Ex.SomeException (Either e a)))
-  case runResult of
-    Left err -> throwError (mapConnectionErr (userError (show err)))
-    Right (Left e) -> throwError e
-    Right (Right value) -> pure value
-
 mapReadException :: Ex.SomeException -> CrudReadException
 mapReadException ex = IOReadException (userError (renderSqlError ex))
 
 mapWriteException :: Ex.SomeException -> CrudWriteException
-mapWriteException ex = IOWriteException (userError (renderSqlError ex))
+mapWriteException = IOWriteException . userError . renderSqlError
 
 mapConnectionError :: IOError -> CrudModificationException
-mapConnectionError ioErr = CrudModificationReadingException (IOReadException ioErr)
+mapConnectionError = CrudModificationReadingException . IOReadException
 
 mapWriteToModificationException :: Ex.SomeException -> CrudModificationException
-mapWriteToModificationException ex =
-  CrudModificationWritingException (mapWriteException ex)
+mapWriteToModificationException = CrudModificationWritingException . mapWriteException
 
 renderSqlError :: Ex.SomeException -> String
 renderSqlError ex =

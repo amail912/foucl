@@ -36,7 +36,10 @@ library
       , Session
   other-modules:
       Paths_foucl
-      , SqlTiming
+      , Helpers
+      , Lib.Config
+      , Lib.Server
+      , Lib.Startup
   hs-source-dirs:
       src
   build-depends:

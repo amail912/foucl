@@ -15,7 +15,7 @@ module Session
   , mkFilesystemSessionRepository
   , mkPostgresSessionRepository
   , mkFileSessionStore
-  , verifyPostgresSessionStorage
+  , sessionPostgresHealthChecks
   , signSessionId
   , verifyAndExtractSessionId
   ) where
@@ -37,17 +37,15 @@ import Data.UUID (toString)
 import Data.UUID.V4 (nextRandom)
 import Data.Int (Int64)
 import Data.Pool (Pool)
-import qualified Data.ByteString.Char8 as BS8
 import Database.PostgreSQL.Simple
   ( Connection
-  , SqlError(..)
   , Only(..)
   , execute
   , query
   , query_
   )
 import Repository (RepositoryError(..))
-import Helpers (tryExcept, withPoolExceptHandled, withResourceMHandled)
+import Helpers (tryExcept, withPoolExceptHandled, withResourceMHandled, mapSqlReadException, mapSqlWriteException)
 import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile, renameFile)
 import System.FilePath ((</>), takeDirectory)
 import System.IO (openTempFile, hClose)
@@ -214,22 +212,15 @@ mkPostgresSessionRepository pool =
     , repoDeleteAllUserStateBindingsForUser = pgDeleteAllUserStateBindingsForUser pool
     }
 
-verifyPostgresSessionStorage :: Pool Connection -> ExceptT String IO ()
-verifyPostgresSessionStorage pool =
-  withResourceMHandled
-    (\err -> "Unable to connect to Postgres: " ++ show err)
-    pool
-    (\conn -> do
-      _ <- tryExcept (query_ conn "SELECT 1" :: IO [Only Int])
-                     (\err -> "Postgres ping query failed: " ++ show err)
-      _ <- tryExcept (query_ conn "SELECT state_id::text, user_id, created_at, expires_at, idle_expires_at, revoked_at FROM session_states LIMIT 0" :: IO [(String, String, UTCTime, UTCTime, UTCTime, Maybe UTCTime)])
-                     (\err -> "Session schema check failed for session_states: " ++ show err)
-      _ <- tryExcept (query_ conn "SELECT session_id::text, state_id::text, issued_at, revoked_at FROM session_handles LIMIT 0" :: IO [(String, String, UTCTime, Maybe UTCTime)])
-                     (\err -> "Session schema check failed for session_handles: " ++ show err)
-      _ <- tryExcept (query_ conn "SELECT user_id, state_id::text FROM session_user_bindings LIMIT 0" :: IO [(String, String)])
-                     (\err -> "Session schema check failed for session_user_bindings: " ++ show err)
-      pure ()
-    )
+sessionPostgresHealthChecks :: Connection -> ExceptT String IO ()
+sessionPostgresHealthChecks conn = do
+  tryExcept (query_ conn "SELECT state_id::text, user_id, created_at, expires_at, idle_expires_at, revoked_at FROM session_states LIMIT 0" :: IO [(String, String, UTCTime, UTCTime, UTCTime, Maybe UTCTime)])
+            (\err -> "Session schema check failed for session_states: " ++ show err)
+  tryExcept (query_ conn "SELECT session_id::text, state_id::text, issued_at, revoked_at FROM session_handles LIMIT 0" :: IO [(String, String, UTCTime, Maybe UTCTime)])
+            (\err -> "Session schema check failed for session_handles: " ++ show err)
+  tryExcept (query_ conn "SELECT user_id, state_id::text FROM session_user_bindings LIMIT 0" :: IO [(String, String)])
+            (\err -> "Session schema check failed for session_user_bindings: " ++ show err)
+  pure ()
 
 createSessionForUserImpl :: SessionRepository -> SessionConfig -> String -> IO String
 createSessionForUserImpl repo config userId = do
@@ -500,7 +491,7 @@ pgCreateSessionHandle pool SessionHandle {handleSessionId, handleStateId, handle
         conn
         "INSERT INTO session_handles (session_id, state_id, issued_at, revoked_at) VALUES (?::uuid, ?::uuid, ?, ?)"
         (handleSessionId, handleStateId, handleIssuedAt, handleRevokedAt))
-        mapWriteException
+        mapSqlWriteException
     pure ()
 
 pgLoadSessionHandleBySessionId :: Pool Connection -> String -> ExceptT RepositoryError IO SessionHandle
@@ -511,7 +502,7 @@ pgLoadSessionHandleBySessionId pool sid =
         conn
         "SELECT session_id::text, state_id::text, issued_at, revoked_at FROM session_handles WHERE session_id = ?::uuid"
         (Only sid))
-        mapReadException
+        mapSqlReadException
     case readResult of
       [] -> throwError NotFound
       ((dbSessionId, dbStateId, dbIssuedAt, dbRevokedAt):_) ->
@@ -530,7 +521,7 @@ pgUpdateSessionHandle pool SessionHandle {handleSessionId, handleStateId, handle
         conn
         "UPDATE session_handles SET state_id = ?::uuid, issued_at = ?, revoked_at = ? WHERE session_id = ?::uuid"
         (handleStateId, handleIssuedAt, handleRevokedAt, handleSessionId))
-        mapWriteException
+        mapSqlWriteException
     when (affected == 0) $ throwError NotFound
 
 pgDeleteSessionHandleBySessionId :: Pool Connection -> String -> ExceptT RepositoryError IO ()
@@ -538,7 +529,7 @@ pgDeleteSessionHandleBySessionId pool sid =
   withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
     affected <-tryExcept
       (execute conn "DELETE FROM session_handles WHERE session_id = ?::uuid" (Only sid))
-      mapWriteException
+      mapSqlWriteException
     when (affected == 0) $ throwError NotFound
 
 pgCreateSessionState :: Pool Connection -> SessionState -> ExceptT RepositoryError IO ()
@@ -549,7 +540,7 @@ pgCreateSessionState pool SessionState {stateId, stateUserId, stateCreatedAt, st
         conn
         "INSERT INTO session_states (state_id, user_id, created_at, expires_at, idle_expires_at, revoked_at) VALUES (?::uuid, ?, ?, ?, ?, ?)"
         (stateId, stateUserId, stateCreatedAt, stateExpiresAt, stateIdleExpiresAt, stateRevokedAt))
-        mapWriteException
+        mapSqlWriteException
     pure ()
 
 pgLoadSessionStateByStateId :: Pool Connection -> String -> ExceptT RepositoryError IO SessionState
@@ -560,7 +551,7 @@ pgLoadSessionStateByStateId pool stId =
         conn
         "SELECT state_id::text, user_id, created_at, expires_at, idle_expires_at, revoked_at FROM session_states WHERE state_id = ?::uuid"
         (Only stId))
-        mapReadException
+        mapSqlReadException
     case readResult of
       [] -> throwError NotFound
       ((dbStateId, dbUserId, dbCreatedAt, dbExpiresAt, dbIdleExpiresAt, dbRevokedAt):_) ->
@@ -581,7 +572,7 @@ pgUpdateSessionState pool SessionState {stateId, stateUserId, stateCreatedAt, st
         conn
         "UPDATE session_states SET user_id = ?, created_at = ?, expires_at = ?, idle_expires_at = ?, revoked_at = ? WHERE state_id = ?::uuid"
         (stateUserId, stateCreatedAt, stateExpiresAt, stateIdleExpiresAt, stateRevokedAt, stateId))
-        mapWriteException
+        mapSqlWriteException
     when (affected == 0) $ throwError NotFound
 
 pgDeleteSessionStateByStateId :: Pool Connection -> String -> ExceptT RepositoryError IO ()
@@ -589,7 +580,7 @@ pgDeleteSessionStateByStateId pool stId =
   withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
     affected <-tryExcept
       (execute conn "DELETE FROM session_states WHERE state_id = ?::uuid" (Only stId))
-      mapWriteException
+      mapSqlWriteException
     when (affected == 0) $ throwError NotFound
 
 pgCreateUserStateBinding :: Pool Connection -> String -> UserStateBinding -> ExceptT RepositoryError IO ()
@@ -600,7 +591,7 @@ pgCreateUserStateBinding pool userId UserStateBinding {boundStateId} =
         conn
         "INSERT INTO session_user_bindings (user_id, state_id) VALUES (?, ?::uuid)"
         (userId, boundStateId))
-        mapWriteException
+        mapSqlWriteException
     pure ()
 
 pgLoadUserStateBindingByUserId :: Pool Connection -> String -> ExceptT RepositoryError IO UserStateBinding
@@ -611,7 +602,7 @@ pgLoadUserStateBindingByUserId pool userId =
         conn
         "SELECT state_id::text FROM session_user_bindings WHERE user_id = ?"
         (Only userId))
-        mapReadException
+        mapSqlReadException
     case readResult of
       [] -> throwError NotFound
       (Only dbStateId:_) -> pure UserStateBinding {boundStateId = dbStateId}
@@ -621,7 +612,7 @@ pgDeleteUserStateBindingByUserId pool userId =
   withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
     affected <-tryExcept
       (execute conn "DELETE FROM session_user_bindings WHERE user_id = ?" (Only userId))
-      mapWriteException
+      mapSqlWriteException
     when (affected == 0) $ throwError NotFound
 
 pgDeleteAllUserStateBindingsForUser :: Pool Connection -> String -> ExceptT RepositoryError IO ()
@@ -629,32 +620,8 @@ pgDeleteAllUserStateBindingsForUser pool userId =
   withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
     writeResult <-tryExcept
       (execute conn "DELETE FROM session_user_bindings WHERE user_id = ?" (Only userId))
-      mapWriteException
+      mapSqlWriteException
     pure ()
-
-mapReadException :: Ex.SomeException -> RepositoryError
-mapReadException ex =
-  case Ex.fromException ex :: Maybe SqlError of
-    Just sqlErr ->
-      if isStorageSqlError sqlErr
-        then StorageFailure
-        else ReadFailure
-    Nothing -> StorageFailure
-
-mapWriteException :: Ex.SomeException -> RepositoryError
-mapWriteException ex =
-  case Ex.fromException ex :: Maybe SqlError of
-    Just sqlErr
-      | isUniqueViolation sqlErr -> AlreadyExists
-      | isStorageSqlError sqlErr -> StorageFailure
-      | otherwise -> WriteFailure
-    Nothing -> StorageFailure
-
-isUniqueViolation :: SqlError -> Bool
-isUniqueViolation sqlErr = sqlState sqlErr == BS8.pack "23505"
-
-isStorageSqlError :: SqlError -> Bool
-isStorageSqlError sqlErr = "08" `BS8.isPrefixOf` sqlState sqlErr
 
 signSessionId :: String -> String -> String
 signSessionId secret sid = sid ++ "." ++ signature

@@ -40,6 +40,13 @@ library
       , Lib.Config
       , Lib.Server
       , Lib.Startup
+      , Lib.Startup.Migrations
+      , Lib.Startup.Import.Auth
+      , Lib.Startup.Import.Common
+      , Lib.Startup.Import.Calendar
+      , Lib.Startup.Import.Session
+      , Lib.Startup.Import.NotesChecklist
+      , Lib.Startup.Import.TripSharing
   hs-source-dirs:
       src
   build-depends:

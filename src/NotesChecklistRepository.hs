@@ -11,8 +11,8 @@ module NotesChecklistRepository
   , filesystemChecklistRepository
   , postgresNoteRepository
   , postgresChecklistRepository
-  , verifyPostgresNoteStorage
-  , verifyPostgresChecklistStorage
+  , notePostgresHealthChecks
+  , checklistPostgresHealthChecks
   ) where
 
 import Prelude hiding (id)
@@ -93,12 +93,6 @@ postgresNoteRepository pool = postgresNotesChecklistRepository pool "note_items"
 postgresChecklistRepository :: Pool Connection -> ChecklistRepository
 postgresChecklistRepository pool = postgresNotesChecklistRepository pool "checklist_items"
 
-verifyPostgresNoteStorage :: Pool Connection -> ExceptT String IO ()
-verifyPostgresNoteStorage pool = verifyPostgresStorageTable pool "note_items"
-
-verifyPostgresChecklistStorage :: Pool Connection -> ExceptT String IO ()
-verifyPostgresChecklistStorage pool = verifyPostgresStorageTable pool "checklist_items"
-
 listItemsIgnoringParsingFailures
   :: ExceptT CrudReadException IO [ExceptT CrudReadException IO (Identifiable a)]
   -> ExceptT CrudReadException IO [Identifiable a]
@@ -123,16 +117,17 @@ postgresNotesChecklistRepository pool tableName =
     , repoUpdateItem = pgUpdateItem pool tableName
     }
 
-verifyPostgresStorageTable :: Pool Connection -> String -> ExceptT String IO ()
-verifyPostgresStorageTable pool tableName =
-  withResourceMHandled
-    (\err -> "Unable to connect to Postgres: " ++ show err)
-    pool
-    (\conn -> do
-      _ <- tryExcept (query_ conn "SELECT 1" :: IO [Only Int]) (\err -> "Postgres ping query failed: " ++ show err)
-      _ <- tryExcept (query_ conn (buildSchemaCheckQuery tableName) :: IO [(String, String, String)])
-                     (\err -> "Schema check failed for " ++ tableName ++ ": " ++ show err)
-      pure ())
+checklistPostgresHealthChecks :: Connection -> ExceptT String IO ()
+checklistPostgresHealthChecks conn = do
+  tryExcept (query_ conn "SELECT item_id, item_version, item_content::text FROM checklist_items LIMIT 0" :: IO [(String, String, String)])
+            (\err -> "Schema check failed for checklist_items: " ++ show err)
+  pure ()
+
+notePostgresHealthChecks :: Connection -> ExceptT String IO ()
+notePostgresHealthChecks conn = do
+  tryExcept (query_ conn "SELECT item_id, item_version, item_content::text FROM note_items LIMIT 0" :: IO [(String, String, String)])
+            (\err -> "Schema check failed for note_items: " ++ show err)
+  pure ()
 
 pgCreateItem :: Content a => Pool Connection -> String -> a -> ExceptT CrudWriteException IO StorageId
 pgCreateItem pool tableName content =
@@ -198,11 +193,6 @@ pgUpdateItem pool tableName (Identifiable targetStorageId@StorageId {id = target
         case latestResult of
           [] -> throwError (CrudModificationReadingException (IOReadException (userError "Missing item id")))
           _ -> throwError (NotCurrentVersion targetStorageId)
-
-buildSchemaCheckQuery :: String -> Query
-buildSchemaCheckQuery tableName =
-  fromString
-    ("SELECT item_id, item_version, item_content::text FROM " ++ tableName ++ " LIMIT 0")
 
 buildInsertQuery :: String -> Query
 buildInsertQuery tableName =

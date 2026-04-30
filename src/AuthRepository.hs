@@ -10,7 +10,7 @@ module AuthRepository
   , ApprovalStatus(..)
   , defaultAuthRepository
   , postgresAuthRepository
-  , verifyPostgresAuthStorage
+  , authPostgresHealthChecks
   ) where
 
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
@@ -28,7 +28,6 @@ import Data.Aeson
   )
 import Data.Function ((&))
 import qualified Data.ByteString.Lazy as BL
-import qualified Data.ByteString.Char8 as BS8
 import Data.Password.Argon2 (Argon2, PasswordHash(..))
 import Data.Int (Int64)
 import Data.Text (Text)
@@ -36,14 +35,13 @@ import qualified Data.Text as Text
 import Data.Pool (Pool)
 import Database.PostgreSQL.Simple
   ( Connection
-  , SqlError(..)
   , Only(..)
   , execute
   , query
   , query_
   )
 import Repository (RepositoryError(..))
-import Helpers (tryExcept, withPoolExceptHandled, withResourceMHandled)
+import Helpers (tryExcept, withPoolExceptHandled, withResourceMHandled, mapSqlReadException, mapSqlWriteException)
 import System.Directory
   ( canonicalizePath
   , createDirectory
@@ -138,22 +136,15 @@ postgresAuthRepository pool = AuthRepository { repoCreateUser = pgCreateUser poo
                                              , repoListUsers = pgListUsers pool
                                              }
 
-verifyPostgresAuthStorage :: Pool Connection -> ExceptT String IO ()
-verifyPostgresAuthStorage pool =
-  withResourceMHandled
-    (\err -> "Unable to connect to Postgres: " ++ show err)
-    pool
-    (\conn -> do
-      _ <- tryExcept (query_ conn "SELECT 1" :: IO [Only Int])
-                     (\err -> "Postgres ping query failed: " ++ show err)
-      _ <- tryExcept (query_ conn "SELECT username, password_hash, role::text, approved FROM auth_users LIMIT 0" :: IO [(String, Text, Text, Bool)])
-                     (\err -> "Auth schema check failed: " ++ show err)
-      enumResult <- tryExcept (query conn "SELECT EXISTS(SELECT 1 FROM pg_type WHERE typname = ?)" (Only ("auth_user_role" :: String)) :: IO [Only Bool])
-             (\err -> "Auth enum check failed: " ++ show err)
-      case enumResult of
-        [Only True] -> pure ()
-        _ -> throwError "Auth schema check failed: enum auth_user_role is missing"
-    )
+authPostgresHealthChecks :: Connection -> ExceptT String IO ()
+authPostgresHealthChecks conn = do
+   tryExcept (query_ conn "SELECT username, password_hash, role::text, approved FROM auth_users LIMIT 0" :: IO [(String, Text, Text, Bool)])
+             (\err -> "Auth schema check failed: " ++ show err)
+   enumResult <- tryExcept (query conn "SELECT EXISTS(SELECT 1 FROM pg_type WHERE typname = ?)" (Only ("auth_user_role" :: String)) :: IO [Only Bool])
+                           (\err -> "Auth enum check failed: " ++ show err)
+   case enumResult of
+     [Only True] -> pure ()
+     _ -> throwError "Auth schema check failed: enum auth_user_role is missing"
 
 fsCreateUser :: PersistedUser -> ExceptT RepositoryError IO ()
 fsCreateUser persistedUser@PersistedUser {uname = username} = do
@@ -272,7 +263,7 @@ pgCreateUser pool persistedUser =
         conn
         "INSERT INTO auth_users (username, password_hash, role, approved) VALUES (?, ?, ?::auth_user_role, ?)"
         (uname persistedUser, unPasswordHash (passwordHash persistedUser), roleValue, approvedValue))
-        mapWriteException
+        mapSqlWriteException
     pure ()
 
 pgLoadUserByUsername :: Pool Connection -> String -> ExceptT RepositoryError IO PersistedUser
@@ -283,7 +274,7 @@ pgLoadUserByUsername pool username =
         conn
         "SELECT username, password_hash, role::text, approved FROM auth_users WHERE username = ?"
         (Only username))
-        mapReadException
+        mapSqlReadException
     case readResult of
       [] -> throwError NotFound
       ((dbUsername, dbPasswordHash, dbRole, dbApproved):_) ->
@@ -307,7 +298,7 @@ pgUpdateUser pool persistedUser =
         conn
         "UPDATE auth_users SET password_hash = ?, role = ?::auth_user_role, approved = ? WHERE username = ?"
         (unPasswordHash (passwordHash persistedUser), roleValue, approvedValue, uname persistedUser))
-        mapWriteException
+        mapSqlWriteException
     when (affected == 0) (throwError NotFound)
 
 pgDeleteUserByUsername :: Pool Connection -> String -> ExceptT RepositoryError IO ()
@@ -315,7 +306,7 @@ pgDeleteUserByUsername pool username =
   withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
     affected <-tryExcept
       (execute conn "DELETE FROM auth_users WHERE username = ?" (Only username))
-      mapWriteException
+      mapSqlWriteException
     when (affected == 0) (throwError NotFound)
 
 pgListUsers :: Pool Connection -> ExceptT RepositoryError IO [PersistedUser]
@@ -323,7 +314,7 @@ pgListUsers pool =
   withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
     rows <- tryExcept
       (query_ conn "SELECT username, password_hash, role::text, approved FROM auth_users ORDER BY username" :: IO [(String, Text, Text, Bool)])
-      mapReadException
+      mapSqlReadException
     mapM decodeRow rows
   where
     decodeRow :: (String, Text, Text, Bool) -> ExceptT RepositoryError IO PersistedUser
@@ -337,30 +328,6 @@ pgListUsers pool =
             , userRole = role
             , approvalStatus = dbToApprovalStatus dbApproved
             }
-
-mapReadException :: Ex.SomeException -> RepositoryError
-mapReadException ex =
-  case Ex.fromException ex :: Maybe SqlError of
-    Just sqlErr ->
-      if isStorageSqlError sqlErr
-        then StorageFailure
-        else ReadFailure
-    Nothing -> StorageFailure
-
-mapWriteException :: Ex.SomeException -> RepositoryError
-mapWriteException ex =
-  case Ex.fromException ex :: Maybe SqlError of
-    Just sqlErr
-      | isUniqueViolation sqlErr -> AlreadyExists
-      | isStorageSqlError sqlErr -> StorageFailure
-      | otherwise -> WriteFailure
-    Nothing -> StorageFailure
-
-isUniqueViolation :: SqlError -> Bool
-isUniqueViolation sqlErr = sqlState sqlErr == BS8.pack "23505"
-
-isStorageSqlError :: SqlError -> Bool
-isStorageSqlError sqlErr = "08" `BS8.isPrefixOf` sqlState sqlErr
 
 userRoleToDb :: UserRole -> Text
 userRoleToDb AdminRole = "admin"

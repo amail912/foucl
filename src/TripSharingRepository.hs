@@ -6,7 +6,7 @@ module TripSharingRepository
   , defaultTripSharingRepository
   , filesystemTripSharingRepository
   , postgresTripSharingRepository
-  , verifyPostgresTripSharingStorage
+  , tripSharingPostgresHealthChecks
   ) where
 
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
@@ -14,17 +14,15 @@ import Control.Monad.IO.Class (liftIO)
 import Data.Int (Int64)
 import Data.List (sort)
 import Data.Pool (Pool)
-import qualified Data.ByteString.Char8 as BS8
 import Database.PostgreSQL.Simple
   ( Connection
   , Only(..)
-  , SqlError(..)
   , execute
   , query
   , query_
   )
 import Repository (RepositoryError(..))
-import Helpers (tryExcept, withPoolExceptHandled, withResourceMHandled)
+import Helpers (tryExcept, withPoolExceptHandled, withResourceMHandled, mapSqlReadException, mapSqlWriteExceptionNoConflict)
 import TripSharingStorage
   ( TripShareStorageError(..)
   , TripShareStorageConfig
@@ -38,7 +36,6 @@ import TripSharingStorage
   , getSharedUsers
   , getSubscribedUsers
   )
-import qualified Control.Exception as Ex
 
 data TripSharingRepository = TripSharingRepository
   { repoListSharedUsers :: !(String -> ExceptT RepositoryError IO [String])
@@ -74,20 +71,13 @@ postgresTripSharingRepository pool =
     , repoDeleteSubscribedUser = pgDeleteSubscribedUser pool
     }
 
-verifyPostgresTripSharingStorage :: Pool Connection -> ExceptT String IO ()
-verifyPostgresTripSharingStorage pool =
-  withResourceMHandled
-    (\err -> "Unable to connect to Postgres: " ++ show err)
-    pool
-    (\conn -> do
-      _ <- tryExcept (query_ conn "SELECT 1" :: IO [Only Int])
-                     (\err -> "Postgres ping query failed: " ++ show err)
-      _ <- tryExcept (query_ conn "SELECT owner_user_id, target_username FROM trip_shares LIMIT 0" :: IO [(String, String)])
-                     (\err -> "Trip-sharing schema check failed for trip_shares: " ++ show err)
-      _ <- tryExcept (query_ conn "SELECT owner_user_id, target_username FROM trip_subscriptions LIMIT 0" :: IO [(String, String)])
-                     (\err -> "Trip-sharing schema check failed for trip_subscriptions: " ++ show err)
-      pure ()
-    )
+tripSharingPostgresHealthChecks :: Connection -> ExceptT String IO ()
+tripSharingPostgresHealthChecks conn = do
+  tryExcept (query_ conn "SELECT owner_user_id, target_username FROM trip_shares LIMIT 0" :: IO [(String, String)])
+            (\err -> "Trip-sharing schema check failed for trip_shares: " ++ show err)
+  tryExcept (query_ conn "SELECT owner_user_id, target_username FROM trip_subscriptions LIMIT 0" :: IO [(String, String)])
+            (\err -> "Trip-sharing schema check failed for trip_subscriptions: " ++ show err)
+  pure ()
 
 fsListSharedUsers :: TripShareStorageConfig -> String -> ExceptT RepositoryError IO [String]
 fsListSharedUsers shareConfig ownerUserId = do
@@ -128,7 +118,7 @@ pgListSharedUsers pool ownerUserId =
   withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
     usernames <-tryExcept
       (query conn "SELECT target_username FROM trip_shares WHERE owner_user_id = ? ORDER BY target_username" (Only ownerUserId))
-      mapReadException
+      mapSqlReadException
     pure (map fromOnly usernames)
 
 pgAddSharedUser :: Pool Connection -> String -> String -> ExceptT RepositoryError IO ()
@@ -138,7 +128,7 @@ pgAddSharedUser pool ownerUserId targetUsername =
       (execute conn
         "INSERT INTO trip_shares (owner_user_id, target_username) VALUES (?, ?) ON CONFLICT (owner_user_id, target_username) DO NOTHING"
         (ownerUserId, targetUsername))
-        mapWriteException
+        mapSqlWriteExceptionNoConflict
     pure ()
 
 pgDeleteSharedUser :: Pool Connection -> String -> String -> ExceptT RepositoryError IO ()
@@ -146,7 +136,7 @@ pgDeleteSharedUser pool ownerUserId targetUsername =
   withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
     writeResult <- tryExcept
       (execute conn "DELETE FROM trip_shares WHERE owner_user_id = ? AND target_username = ?" (ownerUserId, targetUsername))
-      mapWriteException
+      mapSqlWriteExceptionNoConflict
     pure ()
 
 pgListSubscribedUsers :: Pool Connection -> String -> ExceptT RepositoryError IO [String]
@@ -154,7 +144,7 @@ pgListSubscribedUsers pool ownerUserId =
   withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
     usernames <-tryExcept
       (query conn "SELECT target_username FROM trip_subscriptions WHERE owner_user_id = ? ORDER BY target_username" (Only ownerUserId))
-      mapReadException
+      mapSqlReadException
     pure (map fromOnly usernames)
 
 pgAddSubscribedUser :: Pool Connection -> String -> String -> ExceptT RepositoryError IO ()
@@ -164,7 +154,7 @@ pgAddSubscribedUser pool ownerUserId targetUsername =
       (execute conn
         "INSERT INTO trip_subscriptions (owner_user_id, target_username) VALUES (?, ?) ON CONFLICT (owner_user_id, target_username) DO NOTHING"
         (ownerUserId, targetUsername))
-        mapWriteException
+        mapSqlWriteExceptionNoConflict
     pure ()
 
 pgDeleteSubscribedUser :: Pool Connection -> String -> String -> ExceptT RepositoryError IO ()
@@ -172,25 +162,5 @@ pgDeleteSubscribedUser pool ownerUserId targetUsername =
   withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
     writeResult <- tryExcept
       (execute conn "DELETE FROM trip_subscriptions WHERE owner_user_id = ? AND target_username = ?" (ownerUserId, targetUsername))
-      mapWriteException
+      mapSqlWriteExceptionNoConflict
     pure ()
-
-mapReadException :: Ex.SomeException -> RepositoryError
-mapReadException ex =
-  case Ex.fromException ex :: Maybe SqlError of
-    Just sqlErr ->
-      if isStorageSqlError sqlErr
-        then StorageFailure
-        else ReadFailure
-    Nothing -> StorageFailure
-
-mapWriteException :: Ex.SomeException -> RepositoryError
-mapWriteException ex =
-  case Ex.fromException ex :: Maybe SqlError of
-    Just sqlErr
-      | isStorageSqlError sqlErr -> StorageFailure
-      | otherwise -> WriteFailure
-    Nothing -> StorageFailure
-
-isStorageSqlError :: SqlError -> Bool
-isStorageSqlError sqlErr = "08" `BS8.isPrefixOf` sqlState sqlErr

@@ -7,7 +7,7 @@ module CalendarRepository
   , defaultCalendarRepository
   , filesystemCalendarRepository
   , postgresCalendarRepository
-  , verifyPostgresCalendarStorage
+  , calendarPostgresHealthChecks
   ) where
 
 import AgendaStorage
@@ -28,19 +28,16 @@ import Data.List (sortOn)
 import Data.Pool (Pool)
 import Data.UUID (toString)
 import Data.UUID.V4 (nextRandom)
-import qualified Data.ByteString.Char8 as BS8
 import Database.PostgreSQL.Simple
   ( Connection
   , Only(..)
-  , SqlError(..)
   , execute
   , query
   , query_
   )
 import Database.PostgreSQL.Simple.Types (PGArray(..))
 import Repository (RepositoryError(..))
-import Helpers (tryExcept, withPoolExceptHandled, withResourceMHandled)
-import qualified Control.Exception as Ex
+import Helpers (tryExcept, withPoolExceptHandled, withResourceMHandled, mapSqlReadException, mapSqlWriteException)
 import Data.Int (Int64)
 
 
@@ -78,21 +75,13 @@ postgresCalendarRepository pool =
     , repoDeleteCalendarItemById = pgDeleteCalendarItemById pool
     }
 
-verifyPostgresCalendarStorage :: Pool Connection -> ExceptT String IO ()
-verifyPostgresCalendarStorage pool =
-  withResourceMHandled
-    (\err -> "Unable to connect to Postgres: " ++ show err)
-    pool
-    (\conn -> do
-      _ <- tryExcept (query_ conn "SELECT 1" :: IO [Only Int])
-                     (\err -> "Postgres ping query failed: " ++ show err)
-      _ <- tryExcept
-        (query_ conn
+calendarPostgresHealthChecks :: Connection -> ExceptT String IO ()
+calendarPostgresHealthChecks conn = do
+  tryExcept (query_ conn
           "SELECT user_id, item_id, item_kind, item_type, title, window_start, window_end, status, source_item_id, actual_duration_minutes, category, recurrence_rule_type, recurrence_interval_days, recurrence_exception_dates, trip_window_start, trip_window_end, trip_departure_place_id, trip_arrival_place_id FROM calendar_items LIMIT 0"
           :: IO [(String, String, String, Maybe String, Maybe String, Maybe String, Maybe String, Maybe String, Maybe String, Maybe Int, Maybe String, Maybe String, Maybe Int, PGArray String, Maybe String, Maybe String, Maybe String, Maybe String)])
-        (\err -> "Calendar schema check failed: " ++ show err)
-      pure ()
-    )
+             (\err -> "Calendar schema check failed: " ++ show err)
+  pure ()
 
 fsCreateCalendarItem :: CalendarStorageConfig -> String -> Agenda.CalendarItemContent -> ExceptT RepositoryError IO Agenda.CalendarItem
 fsCreateCalendarItem config userId content = tryExcept (createCalendarItem config userId content) (const WriteFailure)
@@ -171,7 +160,7 @@ pgCreateCalendarItem pool userId content =
         , dbTripDeparturePlaceId row
         , dbTripArrivalPlaceId row
         ))
-        mapWriteException
+        mapSqlWriteException
     pure Agenda.ServerCalendarItem {Agenda.content = content, Agenda.itemId = itemId}
 
 pgLoadCalendarItemById :: Pool Connection -> String -> String -> ExceptT RepositoryError IO Agenda.CalendarItem
@@ -181,7 +170,7 @@ pgLoadCalendarItemById pool userId itemId =
       (query conn
         "SELECT user_id, item_id, item_kind, item_type, title, window_start, window_end, status, source_item_id, actual_duration_minutes, category, recurrence_rule_type, recurrence_interval_days, recurrence_exception_dates, trip_window_start, trip_window_end, trip_departure_place_id, trip_arrival_place_id FROM calendar_items WHERE user_id = ? AND item_id = ?"
         (userId, itemId))
-        mapReadException
+        mapSqlReadException
     case readResult of
       [] -> throwError NotFound
       (row:_) ->
@@ -196,7 +185,7 @@ pgListCalendarItemsForUser pool userId =
       (query conn
         "SELECT user_id, item_id, item_kind, item_type, title, window_start, window_end, status, source_item_id, actual_duration_minutes, category, recurrence_rule_type, recurrence_interval_days, recurrence_exception_dates, trip_window_start, trip_window_end, trip_departure_place_id, trip_arrival_place_id FROM calendar_items WHERE user_id = ? ORDER BY item_id"
         (Only userId))
-        mapReadException
+        mapSqlReadException
     case mapM rowToCalendarItem rows of
       Nothing -> throwError ReadFailure
       Just items -> pure items
@@ -227,7 +216,7 @@ pgUpdateCalendarItem pool userId itemId content =
         , userId
         , itemId
         ))
-        mapWriteException
+        mapSqlWriteException
     when (affected == 0) (throwError NotFound)
     pure Agenda.ServerCalendarItem {Agenda.content = content, Agenda.itemId = itemId}
 
@@ -241,7 +230,7 @@ pgUpdateCalendarItemDuration pool userId itemId minutes = do
           (execute conn
             "UPDATE calendar_items SET actual_duration_minutes = ? WHERE user_id = ? AND item_id = ?"
             (minutes, userId, itemId))
-            mapWriteException
+            mapSqlWriteException
         when (affected == 0) (throwError NotFound)
       pgLoadCalendarItemById pool userId itemId
     _ -> pure loaded
@@ -251,7 +240,7 @@ pgDeleteCalendarItemById pool userId itemId =
   withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
     affected <- tryExcept
                      (execute conn "DELETE FROM calendar_items WHERE user_id = ? AND item_id = ?" (userId, itemId))
-                     mapWriteException
+                     mapSqlWriteException
     when (affected == 0) $ throwError NotFound
 
 data CalendarDbRow = CalendarDbRow
@@ -428,27 +417,3 @@ recurrenceFromDb (Just "MONTHLY") Nothing = Just (Just Agenda.RecurrenceMonthly)
 recurrenceFromDb (Just "YEARLY") Nothing = Just (Just Agenda.RecurrenceYearly)
 recurrenceFromDb (Just "EVERY_X_DAYS") (Just n) = Just (Just (Agenda.RecurrenceEveryXDays n))
 recurrenceFromDb _ _ = Nothing
-
-mapReadException :: Ex.SomeException -> RepositoryError
-mapReadException ex =
-  case Ex.fromException ex :: Maybe SqlError of
-    Just sqlErr ->
-      if isStorageSqlError sqlErr
-        then StorageFailure
-        else ReadFailure
-    Nothing -> StorageFailure
-
-mapWriteException :: Ex.SomeException -> RepositoryError
-mapWriteException ex =
-  case Ex.fromException ex :: Maybe SqlError of
-    Just sqlErr
-      | isUniqueViolation sqlErr -> AlreadyExists
-      | isStorageSqlError sqlErr -> StorageFailure
-      | otherwise -> WriteFailure
-    Nothing -> StorageFailure
-
-isUniqueViolation :: SqlError -> Bool
-isUniqueViolation sqlErr = sqlState sqlErr == BS8.pack "23505"
-
-isStorageSqlError :: SqlError -> Bool
-isStorageSqlError sqlErr = "08" `BS8.isPrefixOf` sqlState sqlErr

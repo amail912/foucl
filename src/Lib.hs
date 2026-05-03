@@ -4,6 +4,7 @@ module Lib
     , makePostgresSessionStore
     , makePostgresCalendarRepository
     , makePostgresTripSharingRepository
+    , makePostgresFinanceAccountRepository
     , makePostgresNoteRepository
     , makePostgresChecklistRepository
     , DatabaseConfig(..)

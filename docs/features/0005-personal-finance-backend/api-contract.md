@@ -10,9 +10,10 @@ This contract note captures the intended public API surface for the first iterat
 - All finance endpoints require authentication.
 - Every finance read and write is implicitly scoped to the authenticated user.
 - The backend does not expose multi-user collaboration or shared finance resources in this iteration.
+- Finance routes are mounted under `/api/v1/finance` at runtime.
 
 ## Accounts
-### `POST /accounts`
+### `POST /api/v1/finance/accounts`
 Creates a finance account.
 
 Request fields:
@@ -33,7 +34,7 @@ Rules:
 - duplicate account names return `409`.
 - success returns the current account projection state.
 
-### `GET /accounts`
+### `GET /api/v1/finance/accounts`
 Returns the authenticated user's finance accounts.
 
 Query parameters:
@@ -50,7 +51,7 @@ Response fields per account:
 - `name`
 - `status`
 
-### `POST /accounts/{id}/close`
+### `POST /api/v1/finance/accounts/{id}/close`
 Closes an account.
 
 Rules:

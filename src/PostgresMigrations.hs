@@ -8,6 +8,8 @@ module PostgresMigrations
   , runCalendarMigrationsAtPath
   , runTripSharingMigrations
   , runTripSharingMigrationsAtPath
+  , runFinanceMigrations
+  , runFinanceMigrationsAtPath
   , runNoteMigrations
   , runNoteMigrationsAtPath
   , runChecklistMigrations
@@ -68,6 +70,13 @@ runTripSharingMigrations = runTripSharingMigrationsAtPath "."
 runTripSharingMigrationsAtPath :: FilePath -> String -> MigrationDirection -> ExceptT String IO ()
 runTripSharingMigrationsAtPath basePath connectionUrl direction =
   runMigrationsAtPath "trip-sharing" basePath connectionUrl direction tripSharingMigrations
+
+runFinanceMigrations :: String -> MigrationDirection -> ExceptT String IO ()
+runFinanceMigrations = runFinanceMigrationsAtPath "."
+
+runFinanceMigrationsAtPath :: FilePath -> String -> MigrationDirection -> ExceptT String IO ()
+runFinanceMigrationsAtPath basePath connectionUrl direction =
+  runMigrationsAtPath "finance" basePath connectionUrl direction financeMigrations
 
 runNoteMigrations :: String -> MigrationDirection -> ExceptT String IO ()
 runNoteMigrations = runNoteMigrationsAtPath "."
@@ -142,6 +151,15 @@ tripSharingMigrations =
       { migrationId = "0001_trip_sharing_schema"
       , upSqlPath = "db/migrations/trip-sharing/0001_trip_sharing_schema.up.sql"
       , downSqlPath = "db/migrations/trip-sharing/0001_trip_sharing_schema.down.sql"
+      }
+  ]
+
+financeMigrations :: [SqlMigration]
+financeMigrations =
+  [ SqlMigration
+      { migrationId = "0001_finance_schema"
+      , upSqlPath = "db/migrations/finance/0001_finance_schema.up.sql"
+      , downSqlPath = "db/migrations/finance/0001_finance_schema.down.sql"
       }
   ]
 

@@ -145,7 +145,7 @@ parseBool raw =
 startupMigrationDomainsForBackend :: Backend -> [String]
 startupMigrationDomainsForBackend Filesystem = []
 startupMigrationDomainsForBackend Postgres =
-  ["auth", "session", "calendar", "trip-sharing", "note", "checklist"]
+  ["auth", "session", "calendar", "trip-sharing", "finance", "note", "checklist"]
 
 validateDatabaseConfig :: DatabaseConfigFile -> Either String DatabaseConfig
 validateDatabaseConfig DatabaseConfigFile {databaseHostFile, databasePortFile, databaseNameFile, databaseUserFile, databasePasswordFile}

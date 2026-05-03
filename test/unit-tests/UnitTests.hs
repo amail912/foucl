@@ -29,6 +29,7 @@ import qualified AgendaModel as Agenda (CalendarItem(..), CalendarItemContent(..
 import AgendaStorage
 import TripSharingStorage
 import CalendarRepository
+import FinanceAccountRepository
 import TripSharingRepository
 import NotesChecklistRepository
 import Auth
@@ -40,6 +41,7 @@ import Lib
   , makePostgresSessionStore
   , makePostgresCalendarRepository
   , makePostgresTripSharingRepository
+  , makePostgresFinanceAccountRepository
   , makePostgresNoteRepository
   , makePostgresChecklistRepository
   , DatabaseConfig(..)
@@ -51,6 +53,7 @@ import PostgresMigrations
   , runSessionMigrationsAtPath
   , runCalendarMigrationsAtPath
   , runTripSharingMigrationsAtPath
+  , runFinanceMigrationsAtPath
   , runNoteMigrationsAtPath
   , runChecklistMigrationsAtPath
   , psqlAvailable
@@ -67,7 +70,7 @@ import Database.PostgreSQL.Simple (Connection, close, connectPostgreSQL)
 import System.FilePath ((</>))
 
 runUnitTests :: IO ()
-runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, notesChecklistRepositoryContractTests, agendaStorageTests, tripSharingStorageTests, calendarRepositoryTests, tripSharingRepositoryTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionBackendConfigTests, calendarBackendConfigTests, tripSharingBackendConfigTests, noteBackendConfigTests, checklistBackendConfigTests, startupMigrationDomainSelectionTests, postgresMigrationTests, sessionTests, sessionFilesystemAdapterTests, sessionPostgresRepositoryTests, calendarPostgresRepositoryTests, tripSharingPostgresRepositoryTests, notePostgresRepositoryTests, checklistPostgresRepositoryTests]
+runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, notesChecklistRepositoryContractTests, agendaStorageTests, tripSharingStorageTests, calendarRepositoryTests, tripSharingRepositoryTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionBackendConfigTests, calendarBackendConfigTests, tripSharingBackendConfigTests, noteBackendConfigTests, checklistBackendConfigTests, startupMigrationDomainSelectionTests, postgresMigrationTests, sessionTests, sessionFilesystemAdapterTests, sessionPostgresRepositoryTests, calendarPostgresRepositoryTests, tripSharingPostgresRepositoryTests, financeAccountPostgresRepositoryTests, notePostgresRepositoryTests, checklistPostgresRepositoryTests]
 
 runTestTTAndExit tests = do
   c <- runTestTT tests
@@ -1525,7 +1528,7 @@ startupMigrationDomainsAllPostgres :: IO ()
 startupMigrationDomainsAllPostgres =
   assertEqual
     "Expected startup migration domains to include every domain in postgres mode"
-    ["auth", "session", "calendar", "trip-sharing", "note", "checklist"]
+    ["auth", "session", "calendar", "trip-sharing", "finance", "note", "checklist"]
     (startupMigrationDomainsForBackend Postgres)
 
 testSessionConfig :: SessionConfig
@@ -1559,6 +1562,9 @@ postgresMigrationTests = test
   , "Postgres trip-sharing migrations: up creates schema contract" ~: tripSharingMigrationUpCreatesSchema
   , "Postgres trip-sharing migrations: down removes schema objects" ~: tripSharingMigrationDownRemovesSchema
   , "Postgres trip-sharing migrations: up/down/up is repeatable" ~: tripSharingMigrationReapplyAfterDown
+  , "Postgres finance migrations: up creates schema contract" ~: financeMigrationUpCreatesSchema
+  , "Postgres finance migrations: down removes schema objects" ~: financeMigrationDownRemovesSchema
+  , "Postgres finance migrations: up/down/up is repeatable" ~: financeMigrationReapplyAfterDown
   , "Postgres note migrations: up creates schema contract" ~: noteMigrationUpCreatesSchema
   , "Postgres note migrations: down removes schema objects" ~: noteMigrationDownRemovesSchema
   , "Postgres note migrations: up/down/up is repeatable" ~: noteMigrationReapplyAfterDown
@@ -1901,6 +1907,84 @@ tripSharingMigrationReapplyAfterDown =
                   assertBool "Expected trip_shares table to exist after reapply" sharesExists
                   assertBool "Expected trip_subscriptions table to exist after reapply" subscriptionsExists
 
+financeMigrationUpCreatesSchema :: IO ()
+financeMigrationUpCreatesSchema =
+  withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchema ctx $ do
+      result <- runExceptT (runFinanceMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
+      case result of
+        Left err -> assertFailure ("Expected finance migration up success, got " ++ err)
+        Right () -> do
+          eventsTableExists <- fetchTableExists ctx "finance_account_events"
+          projectionTableExists <- fetchTableExists ctx "finance_accounts"
+          assertBool "Expected finance_account_events table to exist" eventsTableExists
+          assertBool "Expected finance_accounts table to exist" projectionTableExists
+
+          eventTypeType <- fetchColumnType ctx "finance_account_events" "event_type"
+          normalizedNameType <- fetchColumnType ctx "finance_accounts" "normalized_name"
+          statusType <- fetchColumnType ctx "finance_accounts" "status"
+          assertEqual "Expected finance_account_events.event_type to be text" (Just "text") eventTypeType
+          assertEqual "Expected finance_accounts.normalized_name to be text" (Just "text") normalizedNameType
+          assertEqual "Expected finance_accounts.status to be text" (Just "text") statusType
+
+          nameIndexExists <- fetchIndexExists ctx "finance_accounts_user_status_name_idx"
+          assertBool "Expected finance_accounts_user_status_name_idx to exist" nameIndexExists
+
+          insertAccount <- runSqlCommandCtx ctx "INSERT INTO finance_accounts (user_id, account_id, display_name, normalized_name, status) VALUES ('user-1', 'account-1', 'Wallet', 'wallet', 'active')"
+          case insertAccount of
+            Left err -> assertFailure ("Expected insert into finance_accounts success, got " ++ err)
+            Right () -> pure ()
+
+          duplicateName <- runSqlCommandCtx ctx "INSERT INTO finance_accounts (user_id, account_id, display_name, normalized_name, status) VALUES ('user-1', 'account-2', 'WALLET', 'wallet', 'active')"
+          assertBool "Expected duplicate normalized finance account name insert to fail by unique constraint" $
+            case duplicateName of
+              Left _ -> True
+              Right () -> False
+
+          invalidStatus <- runSqlCommandCtx ctx "INSERT INTO finance_accounts (user_id, account_id, display_name, normalized_name, status) VALUES ('user-2', 'account-3', 'Bad', 'bad', 'archived')"
+          assertBool "Expected invalid finance account status insert to fail due to CHECK constraint" $
+            case invalidStatus of
+              Left _ -> True
+              Right () -> False
+
+financeMigrationDownRemovesSchema :: IO ()
+financeMigrationDownRemovesSchema =
+  withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchema ctx $ do
+      upResult <- runExceptT (runFinanceMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
+      case upResult of
+        Left err -> assertFailure ("Expected finance migration up success, got " ++ err)
+        Right () -> do
+          downResult <- runExceptT (runFinanceMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown)
+          case downResult of
+            Left err -> assertFailure ("Expected finance migration down success, got " ++ err)
+            Right () -> do
+              eventsTableExists <- fetchTableExists ctx "finance_account_events"
+              projectionTableExists <- fetchTableExists ctx "finance_accounts"
+              assertBool "Expected finance_account_events table to be removed" (not eventsTableExists)
+              assertBool "Expected finance_accounts table to be removed" (not projectionTableExists)
+
+financeMigrationReapplyAfterDown :: IO ()
+financeMigrationReapplyAfterDown =
+  withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchema ctx $ do
+      firstUp <- runExceptT (runFinanceMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
+      case firstUp of
+        Left err -> assertFailure ("Expected first finance migration up success, got " ++ err)
+        Right () -> do
+          downResult <- runExceptT (runFinanceMigrationsAtPath "." (ctxConnUrl ctx) MigrateDown)
+          case downResult of
+            Left err -> assertFailure ("Expected finance migration down success, got " ++ err)
+            Right () -> do
+              secondUp <- runExceptT (runFinanceMigrationsAtPath "." (ctxConnUrl ctx) MigrateUp)
+              case secondUp of
+                Left err -> assertFailure ("Expected second finance migration up success, got " ++ err)
+                Right () -> do
+                  eventsTableExists <- fetchTableExists ctx "finance_account_events"
+                  projectionTableExists <- fetchTableExists ctx "finance_accounts"
+                  assertBool "Expected finance_account_events table to exist after reapply" eventsTableExists
+                  assertBool "Expected finance_accounts table to exist after reapply" projectionTableExists
+
 noteMigrationUpCreatesSchema :: IO ()
 noteMigrationUpCreatesSchema =
   withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
@@ -2195,6 +2279,12 @@ calendarPostgresRepositoryTests = test
 tripSharingPostgresRepositoryTests = test
   [ "Trip-sharing Postgres adapter should keep add/list/delete deterministic and idempotent" ~: pgTripSharingRepoRoundTripDeterministic
   , "Trip-sharing Postgres adapter should keep subscriptions independent from shares" ~: pgTripSharingRepoSubscriptionsIndependent
+  ]
+
+financeAccountPostgresRepositoryTests = test
+  [ "Finance account Postgres adapter should create and list active accounts with trimmed names" ~: pgFinanceAccountRepoCreateAndListActive
+  , "Finance account Postgres adapter should reject duplicate normalized names" ~: pgFinanceAccountRepoDuplicateNormalizedNameReturnsAlreadyExists
+  , "Finance account Postgres adapter should filter by status and keep users isolated" ~: pgFinanceAccountRepoStatusFilteringAndIsolation
   ]
 
 notePostgresRepositoryTests = test
@@ -2777,6 +2867,93 @@ pgTripSharingRepoSubscriptionsIndependent =
           case deleteSubscription of
             Right () -> assertBool "Expected missing subscription delete to remain idempotent" True
             Left err -> assertFailure ("Expected idempotent missing subscription delete, got " ++ show err)
+
+pgFinanceAccountRepoCreateAndListActive :: IO ()
+pgFinanceAccountRepoCreateAndListActive =
+  withOptionalPostgresContext "Skipping Finance Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runExceptT (runFinanceMigrationsAtPath "." schemaConn MigrateUp)
+      case upResult of
+        Left err -> assertFailure ("Expected finance migration up success, got " ++ err)
+        Right () -> do
+          pool <- mkTestPostgresPool schemaConn
+          let repo = postgresFinanceAccountRepository pool
+              userId = "finance-user"
+          created <- runExceptT $ repoCreateFinanceAccount repo userId "Cash Wallet"
+          case created of
+            Left err -> assertFailure ("Expected finance account create success, got " ++ show err)
+            Right account -> do
+              assertEqual "Expected created finance account name to match payload" "Cash Wallet" (financeAccountName account)
+              assertEqual "Expected created finance account status to be active" FinanceAccountActive (financeAccountStatus account)
+              listed <- runExceptT $ repoListFinanceAccounts repo userId FinanceAccountsActive
+              case listed of
+                Left err -> assertFailure ("Expected finance account list success, got " ++ show err)
+                Right [onlyAccount] -> assertEqual "Expected active account list to return the created account" account onlyAccount
+                Right accounts -> assertFailure ("Expected exactly one active finance account, got " ++ show (length accounts))
+
+pgFinanceAccountRepoDuplicateNormalizedNameReturnsAlreadyExists :: IO ()
+pgFinanceAccountRepoDuplicateNormalizedNameReturnsAlreadyExists =
+  withOptionalPostgresContext "Skipping Finance Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runExceptT (runFinanceMigrationsAtPath "." schemaConn MigrateUp)
+      case upResult of
+        Left err -> assertFailure ("Expected finance migration up success, got " ++ err)
+        Right () -> do
+          pool <- mkTestPostgresPool schemaConn
+          let repo = postgresFinanceAccountRepository pool
+              userId = "finance-dup-user"
+          first <- runExceptT $ repoCreateFinanceAccount repo userId "Main Account"
+          case first of
+            Left err -> assertFailure ("Expected first finance account create success, got " ++ show err)
+            Right _ -> pure ()
+          second <- runExceptT $ repoCreateFinanceAccount repo userId "main account"
+          case second of
+            Left AlreadyExists -> assertBool "Expected duplicate normalized finance account name to return AlreadyExists" True
+            Left err -> assertFailure ("Expected AlreadyExists, got " ++ show err)
+            Right _ -> assertFailure "Expected duplicate normalized finance account create to fail"
+
+pgFinanceAccountRepoStatusFilteringAndIsolation :: IO ()
+pgFinanceAccountRepoStatusFilteringAndIsolation =
+  withOptionalPostgresContext "Skipping Finance Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runExceptT (runFinanceMigrationsAtPath "." schemaConn MigrateUp)
+      case upResult of
+        Left err -> assertFailure ("Expected finance migration up success, got " ++ err)
+        Right () -> do
+          pool <- mkTestPostgresPool schemaConn
+          let repo = postgresFinanceAccountRepository pool
+          _ <- runExceptT $ repoCreateFinanceAccount repo "user-a" "Alpha"
+          _ <- runExceptT $ repoCreateFinanceAccount repo "user-b" "Beta"
+          closeResult <- do
+            result <- readProcessWithExitCode "psql" ["--dbname", schemaConn, "-v", "ON_ERROR_STOP=1", "-c", "UPDATE finance_accounts SET status = 'closed' WHERE user_id = 'user-a' AND display_name = 'Alpha'"] ""
+            pure $
+              case result of
+                (ExitSuccess, _, _) -> Right ()
+                (_, _, err) -> Left err
+          case closeResult of
+            Left err -> assertFailure ("Expected direct finance account close update success, got " ++ err)
+            Right () -> pure ()
+
+          activeA <- runExceptT $ repoListFinanceAccounts repo "user-a" FinanceAccountsActive
+          closedA <- runExceptT $ repoListFinanceAccounts repo "user-a" FinanceAccountsClosed
+          allA <- runExceptT $ repoListFinanceAccounts repo "user-a" FinanceAccountsAll
+          allB <- runExceptT $ repoListFinanceAccounts repo "user-b" FinanceAccountsAll
+
+          assertEqual "Expected user-a active accounts to be empty after closing the only account" (Right []) activeA
+          case closedA of
+            Right [closedAccount] -> assertEqual "Expected closed account status for user-a" FinanceAccountClosed (financeAccountStatus closedAccount)
+            Right accounts -> assertFailure ("Expected exactly one closed account for user-a, got " ++ show (length accounts))
+            Left err -> assertFailure ("Expected closed account list success for user-a, got " ++ show err)
+          case allA of
+            Right [allAccount] -> assertEqual "Expected all filter to include the closed account for user-a" FinanceAccountClosed (financeAccountStatus allAccount)
+            Right accounts -> assertFailure ("Expected exactly one account in all filter for user-a, got " ++ show (length accounts))
+            Left err -> assertFailure ("Expected all account list success for user-a, got " ++ show err)
+          case allB of
+            Right [onlyAccount] -> do
+              assertEqual "Expected user-b account status to remain active" FinanceAccountActive (financeAccountStatus onlyAccount)
+              assertEqual "Expected user-b account name to remain isolated" "Beta" (financeAccountName onlyAccount)
+            Right accounts -> assertFailure ("Expected exactly one isolated account for user-b, got " ++ show (length accounts))
+            Left err -> assertFailure ("Expected all account list success for user-b, got " ++ show err)
 
 pgNoteRepoRoundTripLifecycle :: IO ()
 pgNoteRepoRoundTripLifecycle =

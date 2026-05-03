@@ -9,6 +9,7 @@ module Lib.Startup
   , makePostgresSessionStore
   , makePostgresCalendarRepository
   , makePostgresTripSharingRepository
+  , makePostgresFinanceAccountRepository
   , makePostgresNoteRepository
   , makePostgresChecklistRepository
   ) where
@@ -32,6 +33,7 @@ import qualified AgendaModel as Agenda
 import Auth (AuthRepository, defaultAuthRepository)
 import qualified AuthRepository
 import CalendarRepository (CalendarRepository, defaultCalendarRepository, postgresCalendarRepository, calendarPostgresHealthChecks)
+import FinanceAccountRepository (FinanceAccountRepository, financeAccountPostgresHealthChecks, postgresFinanceAccountRepository)
 import Happstack.Server (Conf(..), askRq, nullConf, simpleHTTP)
 import Lib.Config
 import Lib.Server (apiController, homePage, log, serveStaticResource)
@@ -79,6 +81,7 @@ data CoreRepositories = CoreRepositories
 data DomainRepositories = DomainRepositories
   { domainCalendarRepo :: !CalendarRepository
   , domainTripSharingRepo :: !TripSharingRepository
+  , domainFinanceAccountRepo :: !FinanceAccountRepository
   , domainNoteRepo :: !NoteRepository
   , domainChecklistRepo :: !ChecklistRepository
   }
@@ -89,13 +92,7 @@ runAppStartup = do
   lift (logStartupContext ctx)
   case startupBackend ctx of
     Filesystem -> do
-      coreRepos <- wireFilesystemCoreRepositories ctx
-      let domainRepos = DomainRepositories { domainCalendarRepo = defaultCalendarRepository
-                                           , domainTripSharingRepo = defaultTripSharingRepository
-                                           , domainNoteRepo = defaultNoteRepository
-                                           , domainChecklistRepo = defaultChecklistRepository
-                                           }
-      lift (startHttpServer ctx coreRepos domainRepos)
+      throwE "Configuration backend=filesystem is no longer supported once finance is enabled; use backend=postgres"
     Postgres -> do
       dbCfg <- maybe (throwE "Configuration database is required when backend=postgres") pure (databaseConfig (startupAppConfig ctx))
       StartupMigrations.runStartupMigrations dbCfg
@@ -165,6 +162,11 @@ wirePostgresDomainRepositories sharedPool = do
                                     lift $ putStrLn "[startup] trip-sharing backend wiring failed for: postgres"
                                     throwE err)
   lift $ putStrLn "[startup] trip-sharing backend wiring ready: postgres"
+  domainFinanceAccountRepo <- catchE (makePostgresFinanceAccountRepository sharedPool)
+                                     (\err -> do
+                                       lift $ putStrLn "[startup] finance backend wiring failed for: postgres"
+                                       throwE err)
+  lift $ putStrLn "[startup] finance backend wiring ready: postgres"
   domainNoteRepo <- catchE (makePostgresNoteRepository sharedPool)
                            (\err -> do
                              lift $ putStrLn "[startup] note backend wiring failed for: postgres"
@@ -197,6 +199,7 @@ startHttpServer StartupContext {..} CoreRepositories {..} DomainRepositories {..
             coreAuthRepo
             domainCalendarRepo
             domainTripSharingRepo
+            domainFinanceAccountRepo
             domainNoteRepo
             domainChecklistRepo
             startupSignupRateLimitState
@@ -233,6 +236,11 @@ makePostgresTripSharingRepository :: Pool Connection -> ExceptT String IO TripSh
 makePostgresTripSharingRepository pool = do
   verifyPostgresStorage "trip-sharing" pool tripSharingPostgresHealthChecks
   pure (postgresTripSharingRepository pool)
+
+makePostgresFinanceAccountRepository :: Pool Connection -> ExceptT String IO FinanceAccountRepository
+makePostgresFinanceAccountRepository pool = do
+  verifyPostgresStorage "finance" pool financeAccountPostgresHealthChecks
+  pure (postgresFinanceAccountRepository pool)
 
 makePostgresNoteRepository :: Pool Connection -> ExceptT String IO NoteRepository
 makePostgresNoteRepository pool = do

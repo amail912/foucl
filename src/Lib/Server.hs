@@ -35,6 +35,7 @@ import Auth (AuthError(..), AuthRepository, AuthRequest(..), AuthRequestError(..
 import CalendarRepository (CalendarRepository(..))
 import Crud
 import CrudStorage (createItem, deleteItem, modifyItem)
+import FinanceAccountRepository (FinanceAccount(..), FinanceAccountCreateRequest(..), FinanceAccountRepository(..), FinanceAccountStatusFilter(..), normalizeFinanceAccountName, parseFinanceAccountStatusFilter)
 import Lib.Config (AppConfig(..))
 import Model (Content, Identifiable(..))
 import NotesChecklistRepository (ChecklistRepository, NoteRepository, NotesChecklistRepository(..))
@@ -298,8 +299,8 @@ instance ToServerResponse AuthError where
   toServerResponse (ResourceConflict message) = setResponseCode 409 >> pure (jsonMessage message)
   toServerResponse (TechnicalError _) = internalServerError $ jsonMessage "Unable to process authentication"
 
-apiController :: AuthRepository -> CalendarRepository -> TripSharingRepository -> NoteRepository -> ChecklistRepository -> MVar [UTCTime] -> FilePath -> AppConfig -> SessionStore -> ServerPartT IO Response
-apiController authRepo calendarRepo tripSharingRepo noteRepo checklistRepo signupRateLimitState tmpDir appConfig sessionStore =
+apiController :: AuthRepository -> CalendarRepository -> TripSharingRepository -> FinanceAccountRepository -> NoteRepository -> ChecklistRepository -> MVar [UTCTime] -> FilePath -> AppConfig -> SessionStore -> ServerPartT IO Response
+apiController authRepo calendarRepo tripSharingRepo financeAccountRepo noteRepo checklistRepo signupRateLimitState tmpDir appConfig sessionStore =
   let sessionCfg = sessionConfig appConfig
       bootstrapAdmin = bootstrapAdminUsername appConfig
   in dir "api" $ msum [ signupController authRepo signupRateLimitState tmpDir bootstrapAdmin
@@ -313,6 +314,7 @@ apiController authRepo calendarRepo tripSharingRepo noteRepo checklistRepo signu
                             [ dir "trip-places" $ requireAuth sessionCfg sessionStore tripPlacesController
                             , dir "trip-sharing" $ requireAuth sessionCfg sessionStore (tripSharingController authRepo tripSharingRepo calendarRepo)
                             , dir "calendar-items" $ requireAuth sessionCfg sessionStore (agendaController calendarRepo)
+                            , dir "finance" $ requireAuth sessionCfg sessionStore (financeController financeAccountRepo)
                             , dir "admin" $ requireAuth sessionCfg sessionStore (adminController authRepo bootstrapAdmin)
                             ]
                       ]
@@ -593,6 +595,45 @@ tripPlacesController _ = do
   nullDir
   method GET
   ok (jsonResponse tripPlacesCatalog)
+
+financeController :: FinanceAccountRepository -> AppContext -> ServerPartT IO Response
+financeController financeAccountRepo AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
+  dir "accounts" $
+    msum
+      [ financeAccountsList
+      , financeAccountsCreate
+      ]
+  where
+    financeAccountsList = do
+      nullDir
+      method GET
+      mStatus <- (Just <$> look "status") `mplus` pure Nothing
+      case parseFinanceAccountStatusFilter mStatus of
+        Nothing -> badRequest "status must be one of: active, closed, all"
+        Just statusFilter -> do
+          result <- liftIO $ runExceptT (repoListFinanceAccounts financeAccountRepo principalUserId statusFilter)
+          case result of
+            Left _ -> internalServerError emptyResponse
+            Right accounts -> ok (jsonResponse accounts)
+
+    financeAccountsCreate = do
+      nullDir
+      method POST
+      body <- askRq >>= takeRequestBody
+      maybe (badRequest "Empty body") handleBody body
+
+    handleBody rqBody =
+      case decode' (unBody rqBody) :: Maybe FinanceAccountCreateRequest of
+        Nothing -> badRequest "Unable to decode the body as a FinanceAccountCreateRequest"
+        Just FinanceAccountCreateRequest { financeAccountCreateName } ->
+          case normalizeFinanceAccountName financeAccountCreateName of
+            Nothing -> badRequest "name must not be empty"
+            Just normalizedName -> do
+              result <- liftIO $ runExceptT (repoCreateFinanceAccount financeAccountRepo principalUserId normalizedName)
+              case result of
+                Left AlreadyExists -> setResponseCode 409 >> pure (jsonMessage "Account already exists")
+                Left _ -> internalServerError emptyResponse
+                Right account -> ok (jsonResponse account)
 
 adminController :: AuthRepository -> String -> AppContext -> ServerPartT IO Response
 adminController authRepo bootstrapAdminUsername appContext@AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =

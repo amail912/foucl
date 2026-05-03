@@ -11,6 +11,7 @@ import PostgresMigrations
   , runAuthMigrationsAtPath
   , runCalendarMigrationsAtPath
   , runChecklistMigrationsAtPath
+  , runFinanceMigrationsAtPath
   , runNoteMigrationsAtPath
   , runSessionMigrationsAtPath
   , runTripSharingMigrationsAtPath
@@ -18,7 +19,7 @@ import PostgresMigrations
 
 runStartupMigrations :: DatabaseConfig -> ExceptT String IO ()
 runStartupMigrations dbCfg = do
-  let selectedDomains = ["auth", "session", "calendar", "trip-sharing", "note", "checklist"]
+  let selectedDomains = ["auth", "session", "calendar", "trip-sharing", "finance", "note", "checklist"]
       selectedRendered = intercalate "," selectedDomains
       selectedCount = length selectedDomains
   lift $ putStrLn
@@ -65,6 +66,7 @@ runDomainMigration basePath connectionString domain = do
             "session" -> runSessionMigrationsAtPath basePath connectionString MigrateUp
             "calendar" -> runCalendarMigrationsAtPath basePath connectionString MigrateUp
             "trip-sharing" -> runTripSharingMigrationsAtPath basePath connectionString MigrateUp
+            "finance" -> runFinanceMigrationsAtPath basePath connectionString MigrateUp
             "note" -> runNoteMigrationsAtPath basePath connectionString MigrateUp
             "checklist" -> runChecklistMigrationsAtPath basePath connectionString MigrateUp
             _ -> throwE $ "Unsupported migration domain: " <> domain)

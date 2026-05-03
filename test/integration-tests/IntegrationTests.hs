@@ -36,6 +36,7 @@ import Model
 
 noteEndpoint = "/note"
 checklistEndpoint = "/checklist"
+financeAccountsEndpoint = "/api/v1/finance/accounts"
 
 runIntegrationTests :: IO ()
 runIntegrationTests = do
@@ -357,6 +358,60 @@ runIntegrationTests = do
         unauthReq <- periodTripsRequest Nothing (Just "2025-03-10T00:00") (Just "2025-03-11T00:00")
         unauthResponse <- httpBS unauthReq
         assertStatusCode "Trip-sharing period-trips should require auth" 401 unauthResponse
+
+      it "should require auth for finance account list and create endpoints" $ do
+        listReq <- parseRequest "GET http://localhost:8081/api/v1/finance/accounts"
+        listResp <- httpJSON $ setRequestMethod "GET" listReq
+        assertStatusCode "Finance account list should require auth" 401 listResp
+        assertMessageResponse "Not authenticated" listResp
+
+        createReq <- parseRequest "POST http://localhost:8081/api/v1/finance/accounts"
+        createResp <- httpJSON $ setRequestMethod "POST"
+                                $ setRequestHeader "Content-Type" ["application/json"]
+                                $ setRequestBodyJSON (object ["name" .= ("Wallet" :: String)]) createReq
+        assertStatusCode "Finance account create should require auth" 401 createResp
+        assertMessageResponse "Not authenticated" createResp
+
+      it "should create and list finance accounts for the authenticated user" $ do
+        cookie <- signinOnly baseUsername basePassword
+        created <- createFinanceAccount cookie "  Cash Wallet  "
+        assertFinanceAccountNameAndStatus "Cash Wallet" "active" created
+
+        secondCreated <- createFinanceAccount cookie "Savings"
+        assertFinanceAccountNameAndStatus "Savings" "active" secondCreated
+
+        accounts <- getFinanceAccounts cookie Nothing
+        assertEqual "Expected default finance account list to return active accounts only" ["Cash Wallet", "Savings"] (map financeAccountNameValue accounts)
+
+        allAccounts <- getFinanceAccounts cookie (Just "all")
+        assertEqual "Expected all finance account list to include both active accounts" ["Cash Wallet", "Savings"] (map financeAccountNameValue allAccounts)
+
+      it "should reject blank, duplicate, and invalid finance account requests" $ do
+        cookie <- signinOnly baseUsername basePassword
+        blankResp <- createFinanceAccountExpectValue cookie "   "
+        assertStatusCode "Blank finance account name should return 400" 400 blankResp
+        assertMessageResponse "name must not be empty" blankResp
+
+        _ <- createFinanceAccount cookie "Primary"
+        duplicateResp <- createFinanceAccountExpectValue cookie " primary "
+        assertStatusCode "Duplicate finance account name should return 409" 409 duplicateResp
+        assertMessageResponse "Account already exists" duplicateResp
+
+        invalidStatusResp <- getFinanceAccountsExpectValue cookie "archived"
+        assertStatusCode "Invalid finance account status should return 400" 400 invalidStatusResp
+        assertMessageResponse "status must be one of: active, closed, all" invalidStatusResp
+
+      it "should keep finance account lists isolated per authenticated user" $ do
+        uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
+        let otherFinanceUsername = "finance-user-" ++ show uniquenessSuffix
+        ensureApprovedSandboxUser baseUsername otherFinanceUsername basePassword
+
+        baseCookie <- signinOnly baseUsername basePassword
+        otherCookie <- signinOnly otherFinanceUsername basePassword
+
+        _ <- createFinanceAccount baseCookie "Household"
+        otherAccounts <- getFinanceAccounts otherCookie Nothing
+        assertEqual "Expected other user finance account list to remain empty" [] otherAccounts
 
       it "should expose the fixed trip places catalog" $ do
         cookie <- signinOnly baseUsername basePassword
@@ -1557,3 +1612,59 @@ deleteAgendaItemExpectStatus cookie itemId expectedStatus = do
   resp <- httpNoBody $ setRequestMethod "DELETE"
                    $ setRequestHeader "Cookie" [BS.pack cookie] req
   assertStatusCode "Agenda delete should return expected status" expectedStatus resp
+
+createFinanceAccount :: String -> String -> IO Value
+createFinanceAccount cookie name = do
+  resp <- createFinanceAccountExpectValue cookie name
+  assertStatusCode "Finance account create should succeed" 200 resp
+  pure (getResponseBody resp)
+
+createFinanceAccountExpectValue :: String -> String -> IO (Response Value)
+createFinanceAccountExpectValue cookie name = do
+  req <- parseRequest ("POST http://localhost:8081" ++ financeAccountsEndpoint)
+  httpJSON $ setRequestMethod "POST"
+         $ setRequestHeader "Cookie" [BS.pack cookie]
+         $ setRequestHeader "Content-Type" ["application/json"]
+         $ setRequestBodyJSON (object ["name" .= name]) req
+
+getFinanceAccounts :: String -> Maybe String -> IO [Value]
+getFinanceAccounts cookie mStatus = do
+  req <- financeAccountsRequest cookie mStatus
+  resp <- httpJSON req
+  assertStatusCode "Finance account list should succeed" 200 (resp :: Response [Value])
+  pure (getResponseBody resp)
+
+getFinanceAccountsExpectValue :: String -> String -> IO (Response Value)
+getFinanceAccountsExpectValue cookie statusValue = do
+  req <- financeAccountsRequest cookie (Just statusValue)
+  httpJSON req
+
+financeAccountsRequest :: String -> Maybe String -> IO Request
+financeAccountsRequest cookie mStatus = do
+  req <- parseRequest ("GET http://localhost:8081" ++ financeAccountsEndpoint)
+  let query = maybe [] (\statusValue -> [("status", Just (BS.pack statusValue))]) mStatus
+  pure $ setRequestHeader "Cookie" [BS.pack cookie] $ setRequestMethod "GET" $ setRequestQueryString query req
+
+assertFinanceAccountNameAndStatus :: String -> String -> Value -> Assertion
+assertFinanceAccountNameAndStatus expectedName expectedStatus responseBody =
+  case responseBody of
+    Object value -> do
+      case parseMaybe (.: "name") value of
+        Just actualName -> assertEqual "Expected finance account name" expectedName (actualName :: String)
+        Nothing -> assertFailure "Expected finance account name"
+      case parseMaybe (.: "status") value of
+        Just actualStatus -> assertEqual "Expected finance account status" expectedStatus (actualStatus :: String)
+        Nothing -> assertFailure "Expected finance account status"
+      case parseMaybe (.: "id") value of
+        Just actualId -> assertBool "Expected finance account id to be non-empty" (not (null (actualId :: String)))
+        Nothing -> assertFailure "Expected finance account id"
+    _ -> assertFailure "Expected finance account response object"
+
+financeAccountNameValue :: Value -> String
+financeAccountNameValue responseBody =
+  case responseBody of
+    Object value ->
+      case parseMaybe (.: "name") value of
+        Just actualName -> actualName
+        Nothing -> error "Expected finance account name field"
+    _ -> error "Expected finance account response object"

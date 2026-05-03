@@ -21,7 +21,6 @@ Provide an authenticated personal finance backend for manual transaction entry, 
 ### To Refine
 
 ### Ready
-- [001a Open And List Accounts](ready/001a-open-and-list-accounts.md) - Define account creation, normalized per-user naming rules, and authenticated account listing behavior.
 - [001b Close Accounts And Block New Transactions](ready/001b-close-accounts-and-block-new-transactions.md) - Define account closure semantics and closed-account blocking for later transaction writes.
 - [002a Record Income And Expense Transactions](ready/002a-record-income-and-expense-transactions.md) - Define immutable manual money-entry creation, strict idempotency, and create-response semantics.
 - [002b List Transactions](ready/002b-list-transactions.md) - Define the projection-backed ledger read contract, shared transaction-row shape, and half-open time filtering.
@@ -35,6 +34,7 @@ Provide an authenticated personal finance backend for manual transaction entry, 
 - [008 Export Finance Data](ready/008-export-finance-data.md) - Define the versioned export wire contract with canonical events and convenience `views`.
 
 ### Done
+- [001a Open And List Accounts](done/001a-open-and-list-accounts.md) - Define account creation, normalized per-user naming rules, and authenticated account listing behavior.
 
 ### Canceled
 

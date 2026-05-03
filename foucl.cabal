@@ -29,6 +29,7 @@ library
       , TripSharingStorage
       , CalendarRepository
       , TripSharingRepository
+      , FinanceAccountRepository
       , Auth
       , AuthRepository
       , PostgresMigrations

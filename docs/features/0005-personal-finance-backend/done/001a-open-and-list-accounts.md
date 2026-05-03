@@ -15,10 +15,10 @@ As a user, I want to create and view my finance accounts, so transactions and ba
 - Account reads must remain scoped to the authenticated user only.
 
 ## Data And Contracts
-- Defines `POST /accounts` and `GET /accounts`.
-- `POST /accounts` request body contains `name` only in v1.
-- `POST /accounts` success response returns `id`, `name`, and `status`.
-- `GET /accounts` returns account rows with `id`, `name`, and `status`.
+- Defines `POST /api/v1/finance/accounts` and `GET /api/v1/finance/accounts`.
+- `POST /api/v1/finance/accounts` request body contains `name` only in v1.
+- `POST /api/v1/finance/accounts` success response returns `id`, `name`, and `status`.
+- `GET /api/v1/finance/accounts` returns account rows with `id`, `name`, and `status`.
 - Empty or whitespace-only names return `400`.
 - Duplicate account names for one user return `409`.
 
@@ -27,6 +27,7 @@ As a user, I want to create and view my finance accounts, so transactions and ba
 - Account-list reads should come from a projection rather than event replay on every request.
 - The account projection must support default active-only listing and explicit `status` filtering.
 - The implementation should use Postgres-backed event storage and projection tables only; no filesystem-backed storage should be introduced.
+- Runtime startup now requires `backend=postgres`; filesystem mode is no longer a valid runtime configuration once finance is enabled.
 
 ## Testing
 - Create account succeeds with a valid name.

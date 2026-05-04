@@ -18,7 +18,6 @@ import Data.Aeson (FromJSON(parseJSON), ToJSON(toJSON), Value, object, withObjec
 import Data.Int (Int64)
 import Data.Pool (Pool)
 import Data.Text (Text)
-import qualified Data.Text as Text
 import Data.Time.Clock (UTCTime)
 import Data.UUID (toString)
 import Data.UUID.V4 (nextRandom)
@@ -36,6 +35,7 @@ import Repository (RepositoryError(..))
 data FinanceTransactionRepository = FinanceTransactionRepository
   { repoCreateFinanceTransaction :: !(String -> FinanceTransactionWriteRequest -> ExceptT RepositoryError IO FinanceTransaction)
   , repoLoadFinanceTransactionById :: !(String -> String -> ExceptT RepositoryError IO FinanceTransaction)
+  , repoListFinanceTransactions :: !(String -> Maybe String -> Maybe UTCTime -> Maybe UTCTime -> ExceptT RepositoryError IO [FinanceTransaction])
   }
 
 data FinanceTransactionCreateRequest = FinanceTransactionCreateRequest
@@ -105,6 +105,7 @@ postgresFinanceTransactionRepository pool =
   FinanceTransactionRepository
     { repoCreateFinanceTransaction = pgCreateFinanceTransaction pool
     , repoLoadFinanceTransactionById = pgLoadFinanceTransactionById pool
+    , repoListFinanceTransactions = pgListFinanceTransactions pool
     }
 
 financeTransactionPostgresHealthChecks :: Connection -> ExceptT String IO ()
@@ -199,6 +200,47 @@ pgLoadFinanceTransactionByIdInConn conn userId transactionId = do
     [] -> throwError NotFound
     [row] -> decodeFinanceTransaction row
     _ -> throwError ReadFailure
+
+pgListFinanceTransactions :: Pool Connection -> String -> Maybe String -> Maybe UTCTime -> Maybe UTCTime -> ExceptT RepositoryError IO [FinanceTransaction]
+pgListFinanceTransactions pool userId mAccountId mFrom mTo =
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    rows <- tryExcept (runListQuery conn) mapSqlReadException
+    mapM decodeFinanceTransaction rows
+  where
+    runListQuery conn =
+      case (mAccountId, mFrom, mTo) of
+        (Nothing, Nothing, Nothing) ->
+          query conn
+            "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at FROM finance_transactions WHERE user_id = ? ORDER BY occurred_at DESC, transaction_id ASC"
+            (Only userId)
+        (Just accountId, Nothing, Nothing) ->
+          query conn
+            "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at FROM finance_transactions WHERE user_id = ? AND account_id = ? ORDER BY occurred_at DESC, transaction_id ASC"
+            (userId, accountId)
+        (Nothing, Just fromTs, Nothing) ->
+          query conn
+            "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at FROM finance_transactions WHERE user_id = ? AND occurred_at >= ? ORDER BY occurred_at DESC, transaction_id ASC"
+            (userId, fromTs)
+        (Nothing, Nothing, Just toTs) ->
+          query conn
+            "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at FROM finance_transactions WHERE user_id = ? AND occurred_at < ? ORDER BY occurred_at DESC, transaction_id ASC"
+            (userId, toTs)
+        (Just accountId, Just fromTs, Nothing) ->
+          query conn
+            "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at FROM finance_transactions WHERE user_id = ? AND account_id = ? AND occurred_at >= ? ORDER BY occurred_at DESC, transaction_id ASC"
+            (userId, accountId, fromTs)
+        (Just accountId, Nothing, Just toTs) ->
+          query conn
+            "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at FROM finance_transactions WHERE user_id = ? AND account_id = ? AND occurred_at < ? ORDER BY occurred_at DESC, transaction_id ASC"
+            (userId, accountId, toTs)
+        (Nothing, Just fromTs, Just toTs) ->
+          query conn
+            "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at FROM finance_transactions WHERE user_id = ? AND occurred_at >= ? AND occurred_at < ? ORDER BY occurred_at DESC, transaction_id ASC"
+            (userId, fromTs, toTs)
+        (Just accountId, Just fromTs, Just toTs) ->
+          query conn
+            "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at FROM finance_transactions WHERE user_id = ? AND account_id = ? AND occurred_at >= ? AND occurred_at < ? ORDER BY occurred_at DESC, transaction_id ASC"
+            (userId, accountId, fromTs, toTs)
 
 idempotencyMatches :: FinanceTransactionWriteRequest -> Text -> String -> Int64 -> Bool -> UTCTime -> Bool
 idempotencyMatches FinanceTransactionWriteRequest

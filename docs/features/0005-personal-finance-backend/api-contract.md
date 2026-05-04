@@ -114,7 +114,7 @@ Rules:
 
 ## Transactions
 ### Transaction Row Shape
-The v1 transaction row shape used by create-success responses and `GET /transactions` is:
+The v1 transaction row shape used by create-success responses and `GET /api/v1/finance/transactions` is:
 - `id`
 - `direction`
 - `accountId`
@@ -155,7 +155,7 @@ Shared transaction write rules:
 - new transactions cannot be created against closed accounts and return `409`
 - success responses return the created transaction row
 
-### `GET /transactions`
+### `GET /api/v1/finance/transactions`
 Returns projection-backed transaction history.
 
 Query parameters:
@@ -188,6 +188,9 @@ Read rules:
   - `text`
   - `createdAt`
   - `updatedAt`
+- unknown or foreign-scope `accountId` filters return an empty list
+- `from == to` returns an empty list
+- `from > to` returns `400`
 
 ## Snapshots And Reconciliation
 ### `POST /accounts/{id}/snapshots`

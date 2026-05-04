@@ -4,24 +4,23 @@
 As a user, I want to view my transaction history as a ledger, so I can inspect financial activity without reading raw events.
 
 ## Behavior And Business Rules
-- `GET /transactions` returns transactions owned by the authenticated user only.
+- `GET /api/v1/finance/transactions` returns transactions owned by the authenticated user only.
 - Transactions are ordered by `occurredAt` descending by default.
 - When multiple transactions share the same `occurredAt`, transaction `id` provides deterministic tie-break ordering.
 - `accountId` filters the ledger to one account.
 - `from` filters the ledger by `occurredAt` inclusively.
 - `to` filters the ledger by `occurredAt` exclusively.
+- Unknown or foreign-scope `accountId` filters return an empty list.
+- `from == to` returns an empty list.
+- `from > to` returns `400`.
 - No pagination is exposed in v1.
 - Transaction rows include the current transfer, category, split, and note summaries for each transaction.
 
 ## Data And Contracts
-- Defines `GET /transactions`.
+- Defines `GET /api/v1/finance/transactions`.
 - Supports optional query parameters `accountId`, `from`, and `to`.
 - Response rows use the v1 transaction-row shape: `id`, `direction`, `accountId`, `amount`, `occurredAt`, `recordedAt`, `transfer`, `category`, `splits`, and `notes`.
-- `transfer` returns the current transfer-link summary when present.
-- `category` returns the current whole-transaction category summary when present.
-- `splits` returns the current split summary when present.
-- `notes` returns the current append-ordered non-deleted note list for the transaction.
-- Each note object contains `id`, `text`, `createdAt`, and `updatedAt`.
+- In this implementation slice, `transfer` is `null`, `category` is `null`, `splits` is `[]`, and `notes` is `[]` until the later stories land.
 
 ## Technical Details
 - Read behavior should come from SQL projections rather than rebuilding transaction history on each request.

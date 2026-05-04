@@ -26,7 +26,7 @@ import           Test.Hspec.Runner (configRandomize, defaultConfig, hspecWith)
 import           Test.HUnit
 import           Control.Monad (when)
 import           Data.Time.Clock.POSIX (getPOSIXTime)
-import           Data.List (isInfixOf, sortOn)
+import           Data.List (isInfixOf, sort, sortOn)
 import           Data.Char (toLower)
 import           System.Environment (lookupEnv)
 import AgendaModel (ItemStatus(..), ItemType(..))
@@ -38,6 +38,7 @@ import Model
 noteEndpoint = "/note"
 checklistEndpoint = "/checklist"
 financeAccountsEndpoint = "/api/v1/finance/accounts"
+financeTransactionsEndpoint = "/api/v1/finance/transactions"
 financeTransactionsSentEndpoint = "/api/v1/finance/transactions/sent"
 financeTransactionsReceivedEndpoint = "/api/v1/finance/transactions/received"
 
@@ -394,6 +395,11 @@ runIntegrationTests = do
         assertStatusCode "Finance received transaction create should require auth" 401 receivedResp
         assertMessageResponse "Not authenticated" receivedResp
 
+        listTransactionsReq <- parseRequest "GET http://localhost:8081/api/v1/finance/transactions"
+        listTransactionsResp <- httpJSON $ setRequestMethod "GET" listTransactionsReq
+        assertStatusCode "Finance transaction list should require auth" 401 listTransactionsResp
+        assertMessageResponse "Not authenticated" listTransactionsResp
+
       it "should create and list finance accounts for the authenticated user" $ do
         cookie <- signinOnly baseUsername basePassword
         created <- createFinanceAccount cookie "  Cash Wallet  "
@@ -498,6 +504,69 @@ runIntegrationTests = do
         closedReceivedResp <- createFinanceTransactionExpectValue cookie financeTransactionsReceivedEndpoint "received-key-closed" (object ["accountId" .= accountId, "amount" .= (200 :: Int)])
         assertStatusCode "Closed account received transaction create should return 409" 409 closedReceivedResp
         assertMessageResponse "Closed accounts cannot accept new transactions" closedReceivedResp
+
+      it "should list finance transactions with deterministic ordering and half-open filters" $ do
+        uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
+        let ledgerUsername = "fin-ledger-" ++ show uniquenessSuffix
+        ensureApprovedSandboxUser baseUsername ledgerUsername basePassword
+        cookie <- signinOnly ledgerUsername basePassword
+        firstAccount <- createFinanceAccount cookie "Ledger Primary"
+        secondAccount <- createFinanceAccount cookie "Ledger Secondary"
+        firstAccountId <- requireObjectStringField "id" firstAccount
+        secondAccountId <- requireObjectStringField "id" secondAccount
+
+        _ <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "ledger-key-1" (object ["accountId" .= firstAccountId, "amount" .= (101 :: Int), "occurredAt" .= ("2026-04-01T10:00:00Z" :: String)])
+        _ <- createFinanceTransactionExpectValue cookie financeTransactionsReceivedEndpoint "ledger-key-2" (object ["accountId" .= secondAccountId, "amount" .= (202 :: Int), "occurredAt" .= ("2026-04-03T10:00:00Z" :: String)])
+        _ <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "ledger-key-3" (object ["accountId" .= firstAccountId, "amount" .= (303 :: Int), "occurredAt" .= ("2026-04-02T10:00:00Z" :: String)])
+        sameTimeAResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "ledger-key-4" (object ["accountId" .= firstAccountId, "amount" .= (404 :: Int), "occurredAt" .= ("2026-04-02T10:00:00Z" :: String)])
+        sameTimeBResp <- createFinanceTransactionExpectValue cookie financeTransactionsReceivedEndpoint "ledger-key-5" (object ["accountId" .= firstAccountId, "amount" .= (505 :: Int), "occurredAt" .= ("2026-04-02T10:00:00Z" :: String)])
+
+        allTransactions <- getFinanceTransactions cookie []
+        assertEqual "Expected newest transaction amount first" 202 (financeTransactionAmountValue (head allTransactions))
+        assertEqual "Expected oldest transaction amount last" 101 (financeTransactionAmountValue (last allTransactions))
+        let sameTimestampTransactions = Prelude.take 3 (Prelude.drop 1 allTransactions)
+            sameTimestampIds = map financeTransactionIdValue sameTimestampTransactions
+            sameTimestampAmounts = map financeTransactionAmountValue sameTimestampTransactions
+        assertEqual "Expected same-timestamp transaction ids to be ordered ascending as deterministic tie-breaker" (sort sameTimestampIds) sameTimestampIds
+        assertEqual "Expected same-timestamp group to contain the expected amounts" [303, 404, 505] (sort sameTimestampAmounts)
+        assertBool "Expected created same-timestamp transaction ids to appear in the sorted tie-break segment"
+          (all (`elem` sameTimestampIds) [financeTransactionIdValue (getResponseBody sameTimeAResp), financeTransactionIdValue (getResponseBody sameTimeBResp)])
+
+        firstAccountTransactions <- getFinanceTransactions cookie [("accountId", firstAccountId)]
+        assertEqual "Expected accountId filter to return only matching account transactions" [101, 303, 404, 505] (sort (map financeTransactionAmountValue firstAccountTransactions))
+
+        fromTransactions <- getFinanceTransactions cookie [("from", "2026-04-02T10:00:00Z")]
+        assertEqual "Expected from filter to include the boundary timestamp" [202, 303, 404, 505] (sort (map financeTransactionAmountValue fromTransactions))
+
+        toTransactions <- getFinanceTransactions cookie [("to", "2026-04-02T10:00:00Z")]
+        assertEqual "Expected to filter to exclude the boundary timestamp" [101] (map financeTransactionAmountValue toTransactions)
+
+        emptyBoundaryTransactions <- getFinanceTransactions cookie [("from", "2026-04-02T10:00:00Z"), ("to", "2026-04-02T10:00:00Z")]
+        assertEqual "Expected equal from/to boundary to return an empty ledger page" [] emptyBoundaryTransactions
+
+      it "should validate finance transaction list filters and treat unknown account filters as empty results" $ do
+        uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
+        let ledgerValidationUsername = "fin-val-" ++ show uniquenessSuffix
+        ensureApprovedSandboxUser baseUsername ledgerValidationUsername basePassword
+        cookie <- signinOnly ledgerValidationUsername basePassword
+        account <- createFinanceAccount cookie "Ledger Validation"
+        accountId <- requireObjectStringField "id" account
+        _ <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "ledger-validation-key" (object ["accountId" .= accountId, "amount" .= (123 :: Int), "occurredAt" .= ("2026-04-05T10:00:00Z" :: String)])
+
+        unknownAccountTransactions <- getFinanceTransactions cookie [("accountId", "missing-account")]
+        assertEqual "Expected unknown account filter to return an empty result set" [] unknownAccountTransactions
+
+        invalidFromResp <- getFinanceTransactionsExpectValue cookie [("from", "not-a-time")]
+        assertStatusCode "Invalid from timestamp should return 400" 400 invalidFromResp
+        assertMessageResponse "from must be a valid ISO date-time string" invalidFromResp
+
+        invalidToResp <- getFinanceTransactionsExpectValue cookie [("to", "not-a-time")]
+        assertStatusCode "Invalid to timestamp should return 400" 400 invalidToResp
+        assertMessageResponse "to must be a valid ISO date-time string" invalidToResp
+
+        invertedRangeResp <- getFinanceTransactionsExpectValue cookie [("from", "2026-04-06T10:00:00Z"), ("to", "2026-04-05T10:00:00Z")]
+        assertStatusCode "Inverted transaction list range should return 400" 400 invertedRangeResp
+        assertMessageResponse "from must be less than or equal to to" invertedRangeResp
 
       it "should keep finance account lists isolated per authenticated user" $ do
         uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
@@ -1782,6 +1851,24 @@ createFinanceTransactionMalformed cookie endpoint idempotencyKey = do
          $ setRequestHeader "Content-Type" ["application/json"]
          $ setRequestBodyJSON (object []) req
 
+getFinanceTransactions :: String -> [(String, String)] -> IO [Value]
+getFinanceTransactions cookie queryParams = do
+  req <- financeTransactionsRequest cookie queryParams
+  resp <- httpJSON req
+  assertStatusCode "Finance transaction list should succeed" 200 (resp :: Response [Value])
+  pure (getResponseBody resp)
+
+getFinanceTransactionsExpectValue :: String -> [(String, String)] -> IO (Response Value)
+getFinanceTransactionsExpectValue cookie queryParams = do
+  req <- financeTransactionsRequest cookie queryParams
+  httpJSON req
+
+financeTransactionsRequest :: String -> [(String, String)] -> IO Request
+financeTransactionsRequest cookie queryParams = do
+  req <- parseRequest ("GET http://localhost:8081" ++ financeTransactionsEndpoint)
+  let encodedQuery = map (\(k, v) -> (BS.pack k, Just (BS.pack v))) queryParams
+  pure $ setRequestHeader "Cookie" [BS.pack cookie] $ setRequestMethod "GET" $ setRequestQueryString encodedQuery req
+
 assertFinanceAccountNameAndStatus :: String -> String -> Value -> Assertion
 assertFinanceAccountNameAndStatus expectedName expectedStatus responseBody =
   case responseBody of
@@ -1832,3 +1919,21 @@ financeAccountNameValue responseBody =
         Just actualName -> actualName
         Nothing -> error "Expected finance account name field"
     _ -> error "Expected finance account response object"
+
+financeTransactionAmountValue :: Value -> Int
+financeTransactionAmountValue responseBody =
+  case responseBody of
+    Object value ->
+      case parseMaybe (.: "amount") value of
+        Just actualAmount -> actualAmount
+        Nothing -> error "Expected finance transaction amount field"
+    _ -> error "Expected finance transaction response object"
+
+financeTransactionIdValue :: Value -> String
+financeTransactionIdValue responseBody =
+  case responseBody of
+    Object value ->
+      case parseMaybe (.: "id") value of
+        Just actualId -> actualId
+        Nothing -> error "Expected finance transaction id field"
+    _ -> error "Expected finance transaction response object"

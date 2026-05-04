@@ -2323,6 +2323,7 @@ financeAccountPostgresRepositoryTests = test
 financeTransactionPostgresRepositoryTests = test
   [ "Finance transaction Postgres adapter should create sent and received rows and preserve idempotent retries" ~: pgFinanceTransactionRepoCreateAndIdempotency
   , "Finance transaction Postgres adapter should reject reused idempotency keys for different requests" ~: pgFinanceTransactionRepoRejectsIdempotencyConflicts
+  , "Finance transaction Postgres adapter should list deterministically with account and half-open time filters" ~: pgFinanceTransactionRepoListWithFilters
   ]
 
 notePostgresRepositoryTests = test
@@ -3099,6 +3100,80 @@ pgFinanceTransactionRepoRejectsIdempotencyConflicts =
               case (firstCreate, conflictingRetry) of
                 (Right _, Left AlreadyExists) -> assertBool "Expected conflicting idempotent retry to return AlreadyExists" True
                 results -> assertFailure ("Unexpected finance transaction idempotency results: " ++ show results)
+
+pgFinanceTransactionRepoListWithFilters :: IO ()
+pgFinanceTransactionRepoListWithFilters =
+  withOptionalPostgresContext "Skipping Finance transaction Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runExceptT (runFinanceMigrationsAtPath "." schemaConn MigrateUp)
+      case upResult of
+        Left err -> assertFailure ("Expected finance migration up success, got " ++ err)
+        Right () -> do
+          pool <- mkTestPostgresPool schemaConn
+          let accountRepo = postgresFinanceAccountRepository pool
+              transactionRepo = postgresFinanceTransactionRepository pool
+              userId = "finance-txn-list-user"
+          primaryAccount <- runExceptT $ repoCreateFinanceAccount accountRepo userId "Primary"
+          secondaryAccount <- runExceptT $ repoCreateFinanceAccount accountRepo userId "Secondary"
+          case (primaryAccount, secondaryAccount) of
+            (Right primary, Right secondary) -> do
+              _ <- runExceptT $ repoCreateFinanceTransaction transactionRepo userId FinanceTransactionWriteRequest
+                { financeTransactionWriteIdempotencyKey = "list-key-1"
+                , financeTransactionWriteDirection = FinanceTransactionSent
+                , financeTransactionWriteAccountId = financeAccountId primary
+                , financeTransactionWriteAmount = 101
+                , financeTransactionWriteOccurredAt = read "2026-04-01 10:00:00 UTC"
+                , financeTransactionWriteOccurredAtSupplied = True
+                }
+              _ <- runExceptT $ repoCreateFinanceTransaction transactionRepo userId FinanceTransactionWriteRequest
+                { financeTransactionWriteIdempotencyKey = "list-key-2"
+                , financeTransactionWriteDirection = FinanceTransactionReceived
+                , financeTransactionWriteAccountId = financeAccountId secondary
+                , financeTransactionWriteAmount = 202
+                , financeTransactionWriteOccurredAt = read "2026-04-03 10:00:00 UTC"
+                , financeTransactionWriteOccurredAtSupplied = True
+                }
+              _ <- runExceptT $ repoCreateFinanceTransaction transactionRepo userId FinanceTransactionWriteRequest
+                { financeTransactionWriteIdempotencyKey = "list-key-3"
+                , financeTransactionWriteDirection = FinanceTransactionSent
+                , financeTransactionWriteAccountId = financeAccountId primary
+                , financeTransactionWriteAmount = 303
+                , financeTransactionWriteOccurredAt = read "2026-04-02 10:00:00 UTC"
+                , financeTransactionWriteOccurredAtSupplied = True
+                }
+              firstSameTime <- runExceptT $ repoCreateFinanceTransaction transactionRepo userId FinanceTransactionWriteRequest
+                { financeTransactionWriteIdempotencyKey = "list-key-4"
+                , financeTransactionWriteDirection = FinanceTransactionSent
+                , financeTransactionWriteAccountId = financeAccountId primary
+                , financeTransactionWriteAmount = 404
+                , financeTransactionWriteOccurredAt = read "2026-04-02 10:00:00 UTC"
+                , financeTransactionWriteOccurredAtSupplied = True
+                }
+              secondSameTime <- runExceptT $ repoCreateFinanceTransaction transactionRepo userId FinanceTransactionWriteRequest
+                { financeTransactionWriteIdempotencyKey = "list-key-5"
+                , financeTransactionWriteDirection = FinanceTransactionReceived
+                , financeTransactionWriteAccountId = financeAccountId primary
+                , financeTransactionWriteAmount = 505
+                , financeTransactionWriteOccurredAt = read "2026-04-02 10:00:00 UTC"
+                , financeTransactionWriteOccurredAtSupplied = True
+                }
+              allListed <- runExceptT $ repoListFinanceTransactions transactionRepo userId Nothing Nothing Nothing
+              primaryListed <- runExceptT $ repoListFinanceTransactions transactionRepo userId (Just (financeAccountId primary)) Nothing Nothing
+              fromListed <- runExceptT $ repoListFinanceTransactions transactionRepo userId Nothing (Just (read "2026-04-02 10:00:00 UTC")) Nothing
+              toListed <- runExceptT $ repoListFinanceTransactions transactionRepo userId Nothing Nothing (Just (read "2026-04-02 10:00:00 UTC"))
+              unknownAccountListed <- runExceptT $ repoListFinanceTransactions transactionRepo userId (Just "missing-account") Nothing Nothing
+              case (firstSameTime, secondSameTime, allListed, primaryListed, fromListed, toListed, unknownAccountListed) of
+                (Right sameA, Right sameB, Right allTransactions, Right primaryTransactions, Right fromTransactions, Right toTransactions, Right unknownTransactions) -> do
+                  assertEqual "Expected all transactions to be ordered by occurredAt descending" [202, 303, 404, 505, 101] (map financeTransactionAmount allTransactions)
+                  let sameTimeIds = map financeTransactionId (take 2 (drop 2 allTransactions))
+                  assertEqual "Expected same-timestamp rows to be ordered by id ascending" (sort sameTimeIds) sameTimeIds
+                  assertEqual "Expected same-timestamp rows to match created ids" (sort [financeTransactionId sameA, financeTransactionId sameB]) sameTimeIds
+                  assertEqual "Expected account filter to keep only primary-account transactions" [303, 404, 505, 101] (map financeTransactionAmount primaryTransactions)
+                  assertEqual "Expected from filter to include the boundary timestamp" [202, 303, 404, 505] (map financeTransactionAmount fromTransactions)
+                  assertEqual "Expected to filter to exclude the boundary timestamp" [101] (map financeTransactionAmount toTransactions)
+                  assertEqual "Expected unknown account filter to return an empty list" [] unknownTransactions
+                results -> assertFailure ("Unexpected finance transaction list results: " ++ show results)
+            results -> assertFailure ("Expected finance account setup success for list test, got " ++ show results)
 
 pgNoteRepoRoundTripLifecycle :: IO ()
 pgNoteRepoRoundTripLifecycle =

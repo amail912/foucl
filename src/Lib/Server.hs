@@ -39,6 +39,7 @@ import FinanceAccountRepository (FinanceAccount(..), FinanceAccountCreateRequest
 import FinanceTransactionRepository
   ( FinanceTransactionCreateRequest(..)
   , FinanceTransactionDirection(..)
+  , FinanceTransaction
   , FinanceTransactionRepository(..)
   , FinanceTransactionWriteRequest(..)
   )
@@ -613,7 +614,8 @@ financeController financeAccountRepo financeTransactionRepo AppContext { session
           ]
     , dir "transactions" $
         msum
-          [ dir "sent" (financeTransactionsCreate FinanceTransactionSent)
+          [ financeTransactionsList
+          , dir "sent" (financeTransactionsCreate FinanceTransactionSent)
           , dir "received" (financeTransactionsCreate FinanceTransactionReceived)
           ]
     ]
@@ -712,6 +714,33 @@ financeController financeAccountRepo financeTransactionRepo AppContext { session
                           Left AlreadyExists -> setResponseCode 409 >> pure (jsonMessage "Idempotency key already used for a different request")
                           Left _ -> internalServerError emptyResponse
                           Right transaction -> ok (jsonResponse transaction)
+
+    financeTransactionsList = do
+      nullDir
+      method GET
+      mAccountId <- (Just <$> look "accountId") `mplus` pure Nothing
+      mFromRaw <- (Just <$> look "from") `mplus` pure Nothing
+      mToRaw <- (Just <$> look "to") `mplus` pure Nothing
+      case (parseQueryTime "from" mFromRaw, parseQueryTime "to" mToRaw) of
+        (Left message, _) -> badRequest message
+        (_, Left message) -> badRequest message
+        (Right mFrom, Right mTo) ->
+          case (mFrom, mTo) of
+            (Just fromTs, Just toTs)
+              | fromTs > toTs -> badRequest "from must be less than or equal to to"
+              | fromTs == toTs -> ok (jsonResponse ([] :: [FinanceTransaction]))
+            _ -> do
+              result <- liftIO $ runExceptT (repoListFinanceTransactions financeTransactionRepo principalUserId mAccountId mFrom mTo)
+              case result of
+                Left _ -> internalServerError emptyResponse
+                Right transactions -> ok (jsonResponse transactions)
+
+    parseQueryTime :: String -> Maybe String -> Either String (Maybe UTCTime)
+    parseQueryTime _ Nothing = Right Nothing
+    parseQueryTime fieldName (Just rawValue) =
+      case iso8601ParseM rawValue of
+        Nothing -> Left (fieldName ++ " must be a valid ISO date-time string")
+        Just parsed -> Right (Just parsed)
 
 adminController :: AuthRepository -> String -> AppContext -> ServerPartT IO Response
 adminController authRepo bootstrapAdminUsername appContext@AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =

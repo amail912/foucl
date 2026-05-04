@@ -21,7 +21,6 @@ Provide an authenticated personal finance backend for manual transaction entry, 
 ### To Refine
 
 ### Ready
-- [003b Categorize And Split Transactions](ready/003b-categorize-and-split-transactions.md) - Define replaceable classification state, split semantics, and report-facing Uncategorized behavior.
 - [004 Link Transfer Transactions](ready/004-link-transfer-transactions.md) - Define one-to-one transfer linking, invalid-pair rejection, and report exclusion for internal money movement.
 - [005a Append Transaction Notes](ready/005a-append-transaction-notes.md) - Define note creation, blank-text rejection, and current note exposure in transaction rows.
 - [005b Edit And Delete Transaction Notes](ready/005b-edit-and-delete-transaction-notes.md) - Define mutable note lifecycle, text validation, and soft-delete behavior on stable note ids.
@@ -35,6 +34,7 @@ Provide an authenticated personal finance backend for manual transaction entry, 
 - [002a Record Income And Expense Transactions](done/002a-record-income-and-expense-transactions.md) - Define immutable manual money-entry creation, strict idempotency, and create-response semantics.
 - [002b List Transactions](done/002b-list-transactions.md) - Define the projection-backed ledger read contract, shared transaction-row shape, and half-open time filtering.
 - [003a Manage Categories](done/003a-manage-categories.md) - Define the seeded built-in category tree, selection rules, and user-category management contract.
+- [003b Categorize And Split Transactions](done/003b-categorize-and-split-transactions.md) - Define replaceable classification state, split semantics, and report-facing Uncategorized behavior.
 
 ### Canceled
 

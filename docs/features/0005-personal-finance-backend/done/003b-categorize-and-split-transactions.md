@@ -9,7 +9,7 @@ As a user, I want to classify transactions fully or partially, so aggregate repo
 - Splits do not create new transactions.
 - Split amounts must sum exactly to the original transaction amount.
 - Split payloads must contain at least two rows.
-- Split rows may repeat the same category id within one split payload.
+- Split rows may repeat the same category slug within one split payload.
 - A whole-transaction category may be replaced by a later categorize request while no split is active.
 - A split supersedes any existing whole-transaction category in current state.
 - A later split replaces the current active split state.
@@ -18,11 +18,11 @@ As a user, I want to classify transactions fully or partially, so aggregate repo
 - Explicit `Uncategorized Expense` and `Uncategorized Income` remain valid selectable categories.
 
 ## Data And Contracts
-- Defines `POST /transactions/{id}/categorize` and `POST /transactions/{id}/split`.
-- `POST /transactions/{id}/categorize` accepts `categoryId`.
-- `POST /transactions/{id}/split` accepts `splits`, with each split row containing `categoryId` and `amount`.
-- `POST /transactions/{id}/categorize` returns `404` for unknown transactions or unknown category ids, `400` for non-selectable category ids, and `409` when a split is active.
-- `POST /transactions/{id}/split` returns `404` for unknown transactions or unknown category ids, `400` for non-selectable category ids, fewer than two split rows, or invalid split totals.
+- Defines `POST /api/v1/finance/transactions/{id}/categorize` and `POST /api/v1/finance/transactions/{id}/split`.
+- `POST /api/v1/finance/transactions/{id}/categorize` accepts `category` (slug).
+- `POST /api/v1/finance/transactions/{id}/split` accepts `splits`, with each split row containing `category` (slug) and `amount`.
+- `POST /api/v1/finance/transactions/{id}/categorize` returns `404` for unknown transactions or unknown category slugs, `400` for non-selectable category slugs, and `409` when a split is active.
+- `POST /api/v1/finance/transactions/{id}/split` returns `404` for unknown transactions or unknown category slugs, `400` for non-selectable category slugs, fewer than two split rows, or invalid split totals.
 - Success responses return the standard transaction row shape from the ledger contract.
 - Report-side `uncategorized` matching includes transactions with no active category state and transactions explicitly assigned the built-in Uncategorized categories, including split rows.
 
@@ -43,7 +43,7 @@ As a user, I want to classify transactions fully or partially, so aggregate repo
 - Categorize requests against transactions with an active split return `409`.
 - Splitting with totals that do not match the transaction amount returns `400`.
 - Splitting with fewer than two rows returns `400`.
-- Splitting with repeated category ids in separate rows succeeds.
+- Splitting with repeated category slugs in separate rows succeeds.
 - Report `uncategorized` matching includes transactions with no active category state and transactions explicitly assigned the built-in Uncategorized categories.
 
 ## Rollout And Compatibility

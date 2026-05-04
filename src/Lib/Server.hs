@@ -43,7 +43,9 @@ import FinanceCategoryRepository
   )
 import FinanceTransactionRepository
   ( FinanceTransactionCreateRequest(..)
+  , FinanceTransactionCategorizeRequest(..)
   , FinanceTransactionDirection(..)
+  , FinanceTransactionSplitRequest(..)
   , FinanceTransaction
   , FinanceTransactionRepository(..)
   , FinanceTransactionWriteRequest(..)
@@ -629,6 +631,8 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
           [ financeTransactionsList
           , dir "sent" (financeTransactionsCreate FinanceTransactionSent)
           , dir "received" (financeTransactionsCreate FinanceTransactionReceived)
+          , financeTransactionsCategorize
+          , financeTransactionsSplit
           ]
     ]
   where
@@ -746,6 +750,45 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
               case result of
                 Left _ -> internalServerError emptyResponse
                 Right transactions -> ok (jsonResponse transactions)
+
+    financeTransactionsCategorize = path $ \transactionId -> do
+      dir "categorize" $ do
+        nullDir
+        method POST
+        body <- askRq >>= takeRequestBody
+        maybe (badRequest "Empty body") (handleTransactionCategorizeBody transactionId) body
+
+    financeTransactionsSplit = path $ \transactionId -> do
+      dir "split" $ do
+        nullDir
+        method POST
+        body <- askRq >>= takeRequestBody
+        maybe (badRequest "Empty body") (handleTransactionSplitBody transactionId) body
+
+    handleTransactionCategorizeBody :: String -> RqBody -> ServerPartT IO Response
+    handleTransactionCategorizeBody transactionId rqBody =
+      case decode' (unBody rqBody) :: Maybe FinanceTransactionCategorizeRequest of
+        Nothing -> badRequest "Unable to decode the body as a FinanceTransactionCategorizeRequest"
+        Just FinanceTransactionCategorizeRequest { financeTransactionCategorizeCategory } -> do
+          result <- liftIO $ runExceptT (repoCategorizeFinanceTransaction financeTransactionRepo principalUserId transactionId financeTransactionCategorizeCategory)
+          case result of
+            Left NotFound -> notFound (jsonMessage "Transaction or category not found")
+            Left WriteFailure -> badRequest "category must reference a selectable category"
+            Left AlreadyExists -> setResponseCode 409 >> pure (jsonMessage "Transaction already has an active split")
+            Left _ -> internalServerError emptyResponse
+            Right transaction -> ok (jsonResponse transaction)
+
+    handleTransactionSplitBody :: String -> RqBody -> ServerPartT IO Response
+    handleTransactionSplitBody transactionId rqBody =
+      case decode' (unBody rqBody) :: Maybe FinanceTransactionSplitRequest of
+        Nothing -> badRequest "Unable to decode the body as a FinanceTransactionSplitRequest"
+        Just FinanceTransactionSplitRequest { financeTransactionSplitRows } -> do
+          result <- liftIO $ runExceptT (repoSplitFinanceTransaction financeTransactionRepo principalUserId transactionId financeTransactionSplitRows)
+          case result of
+            Left NotFound -> notFound (jsonMessage "Transaction or category not found")
+            Left WriteFailure -> badRequest "splits must contain at least two rows, sum to the transaction amount, and use selectable categories"
+            Left _ -> internalServerError emptyResponse
+            Right transaction -> ok (jsonResponse transaction)
 
     financeCategoriesList = do
       nullDir

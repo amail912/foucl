@@ -413,6 +413,20 @@ runIntegrationTests = do
         assertStatusCode "Finance transaction list should require auth" 401 listTransactionsResp
         assertMessageResponse "Not authenticated" listTransactionsResp
 
+        categorizeReq <- parseRequest "POST http://localhost:8081/api/v1/finance/transactions/missing/categorize"
+        categorizeResp <- httpJSON $ setRequestMethod "POST"
+                                    $ setRequestHeader "Content-Type" ["application/json"]
+                                    $ setRequestBodyJSON (object ["category" .= ("pets.food" :: String)]) categorizeReq
+        assertStatusCode "Finance transaction categorize should require auth" 401 categorizeResp
+        assertMessageResponse "Not authenticated" categorizeResp
+
+        splitReq <- parseRequest "POST http://localhost:8081/api/v1/finance/transactions/missing/split"
+        splitResp <- httpJSON $ setRequestMethod "POST"
+                              $ setRequestHeader "Content-Type" ["application/json"]
+                              $ setRequestBodyJSON (object ["splits" .= [object ["amount" .= (10 :: Int), "category" .= ("pets.food" :: String)], object ["amount" .= (10 :: Int), "category" .= ("personal.clothing" :: String)]]]) splitReq
+        assertStatusCode "Finance transaction split should require auth" 401 splitResp
+        assertMessageResponse "Not authenticated" splitResp
+
       it "should create and list finance accounts for the authenticated user" $ do
         cookie <- signinOnly baseUsername basePassword
         created <- createFinanceAccount cookie "  Cash Wallet  "
@@ -653,6 +667,73 @@ runIntegrationTests = do
         invertedRangeResp <- getFinanceTransactionsExpectValue cookie [("from", "2026-04-06T10:00:00Z"), ("to", "2026-04-05T10:00:00Z")]
         assertStatusCode "Inverted transaction list range should return 400" 400 invertedRangeResp
         assertMessageResponse "from must be less than or equal to to" invertedRangeResp
+
+      it "should categorize and split transactions with replace semantics and validation rules" $ do
+        uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
+        let classifyUsername = "fin-classify-" ++ show uniquenessSuffix
+        ensureApprovedSandboxUser baseUsername classifyUsername basePassword
+        cookie <- signinOnly classifyUsername basePassword
+
+        account <- createFinanceAccount cookie "Classification Account"
+        accountId <- requireObjectStringField "id" account
+
+        txResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "classify-key-1" (object ["accountId" .= accountId, "amount" .= (4500 :: Int), "occurredAt" .= ("2026-04-10T10:00:00Z" :: String)])
+        assertStatusCode "Transaction create should succeed" 200 txResp
+        let transaction = getResponseBody txResp
+        txId <- requireObjectStringField "id" transaction
+
+        firstCategorize <- categorizeFinanceTransactionExpectValue cookie txId "pets.food"
+        assertStatusCode "Categorize should succeed on uncategorized transaction" 200 firstCategorize
+        assertFinanceTransactionCategoryAndSplits (Just "pets.food") [] (getResponseBody firstCategorize)
+
+        secondCategorize <- categorizeFinanceTransactionExpectValue cookie txId "personal.clothing"
+        assertStatusCode "Second categorize should replace whole-transaction category" 200 secondCategorize
+        assertFinanceTransactionCategoryAndSplits (Just "personal.clothing") [] (getResponseBody secondCategorize)
+
+        splitResp <- splitFinanceTransactionExpectValue cookie txId [("pets.food", 3500), ("personal.clothing", 1000)]
+        assertStatusCode "Split should succeed with two rows summing to amount" 200 splitResp
+        assertFinanceTransactionCategoryAndSplits Nothing [("pets.food", 3500), ("personal.clothing", 1000)] (getResponseBody splitResp)
+
+        blockedCategorize <- categorizeFinanceTransactionExpectValue cookie txId "pets.food"
+        assertStatusCode "Categorize should return 409 when split is active" 409 blockedCategorize
+        assertMessageResponse "Transaction already has an active split" blockedCategorize
+
+        replaceSplitResp <- splitFinanceTransactionExpectValue cookie txId [("pets.food", 2000), ("pets.food", 2500)]
+        assertStatusCode "Second split should replace active split and allow repeated categories" 200 replaceSplitResp
+        assertFinanceTransactionCategoryAndSplits Nothing [("pets.food", 2000), ("pets.food", 2500)] (getResponseBody replaceSplitResp)
+
+        listed <- getFinanceTransactions cookie []
+        case listed of
+          [row] -> assertFinanceTransactionCategoryAndSplits Nothing [("pets.food", 2000), ("pets.food", 2500)] row
+          _ -> assertFailure "Expected one transaction in list for classification scenario"
+
+        invalidSplitCount <- splitFinanceTransactionExpectValue cookie txId [("pets.food", 4500)]
+        assertStatusCode "Split should fail with fewer than two rows" 400 invalidSplitCount
+        assertMessageResponse "splits must contain at least two rows, sum to the transaction amount, and use selectable categories" invalidSplitCount
+
+        invalidSplitSum <- splitFinanceTransactionExpectValue cookie txId [("pets.food", 2000), ("personal.clothing", 2000)]
+        assertStatusCode "Split should fail when row amounts do not match transaction amount" 400 invalidSplitSum
+        assertMessageResponse "splits must contain at least two rows, sum to the transaction amount, and use selectable categories" invalidSplitSum
+
+        nonSelectableCategory <- categorizeFinanceTransactionExpectValue cookie txId "income"
+        assertStatusCode "Categorize should fail for non-selectable top-level category" 400 nonSelectableCategory
+        assertMessageResponse "category must reference a selectable category" nonSelectableCategory
+
+        unknownCategoryCategorize <- categorizeFinanceTransactionExpectValue cookie txId "missing.category"
+        assertStatusCode "Categorize should fail for unknown category" 404 unknownCategoryCategorize
+        assertMessageResponse "Transaction or category not found" unknownCategoryCategorize
+
+        unknownCategorySplit <- splitFinanceTransactionExpectValue cookie txId [("pets.food", 2000), ("missing.category", 2500)]
+        assertStatusCode "Split should fail for unknown category" 404 unknownCategorySplit
+        assertMessageResponse "Transaction or category not found" unknownCategorySplit
+
+        unknownTransactionCategorize <- categorizeFinanceTransactionExpectValue cookie "missing-tx" "pets.food"
+        assertStatusCode "Categorize should fail for unknown transaction" 404 unknownTransactionCategorize
+        assertMessageResponse "Transaction or category not found" unknownTransactionCategorize
+
+        unknownTransactionSplit <- splitFinanceTransactionExpectValue cookie "missing-tx" [("pets.food", 2000), ("personal.clothing", 2500)]
+        assertStatusCode "Split should fail for unknown transaction" 404 unknownTransactionSplit
+        assertMessageResponse "Transaction or category not found" unknownTransactionSplit
 
       it "should keep finance account lists isolated per authenticated user" $ do
         uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
@@ -2012,6 +2093,23 @@ financeTransactionsRequest cookie queryParams = do
   let encodedQuery = map (\(k, v) -> (BS.pack k, Just (BS.pack v))) queryParams
   pure $ setRequestHeader "Cookie" [BS.pack cookie] $ setRequestMethod "GET" $ setRequestQueryString encodedQuery req
 
+categorizeFinanceTransactionExpectValue :: String -> String -> String -> IO (Response Value)
+categorizeFinanceTransactionExpectValue cookie transactionId categorySlug = do
+  req <- parseRequest ("POST http://localhost:8081" ++ financeTransactionsEndpoint ++ "/" ++ transactionId ++ "/categorize")
+  httpJSON $ setRequestMethod "POST"
+         $ setRequestHeader "Cookie" [BS.pack cookie]
+         $ setRequestHeader "Content-Type" ["application/json"]
+         $ setRequestBodyJSON (object ["category" .= categorySlug]) req
+
+splitFinanceTransactionExpectValue :: String -> String -> [(String, Int)] -> IO (Response Value)
+splitFinanceTransactionExpectValue cookie transactionId rows = do
+  req <- parseRequest ("POST http://localhost:8081" ++ financeTransactionsEndpoint ++ "/" ++ transactionId ++ "/split")
+  let splitRows = map (\(categorySlug, amount) -> object ["amount" .= amount, "category" .= categorySlug]) rows
+  httpJSON $ setRequestMethod "POST"
+         $ setRequestHeader "Cookie" [BS.pack cookie]
+         $ setRequestHeader "Content-Type" ["application/json"]
+         $ setRequestBodyJSON (object ["splits" .= splitRows]) req
+
 assertFinanceAccountNameAndStatus :: String -> String -> Value -> Assertion
 assertFinanceAccountNameAndStatus expectedName expectedStatus responseBody =
   case responseBody of
@@ -2080,6 +2178,31 @@ financeTransactionIdValue responseBody =
         Just actualId -> actualId
         Nothing -> error "Expected finance transaction id field"
     _ -> error "Expected finance transaction response object"
+
+financeTransactionCategoryValue :: Value -> Maybe String
+financeTransactionCategoryValue responseBody =
+  case responseBody of
+    Object value -> parseMaybe (.: "category") value
+    _ -> Nothing
+
+financeTransactionSplitsValue :: Value -> [(String, Int)]
+financeTransactionSplitsValue responseBody =
+  case responseBody of
+    Object value ->
+      case parseMaybe (.: "splits") value of
+        Just rows ->
+          [ (categorySlug, amount)
+          | Object splitRow <- (rows :: [Value])
+          , Just categorySlug <- [parseMaybe (.: "category") splitRow]
+          , Just amount <- [parseMaybe (.: "amount") splitRow]
+          ]
+        Nothing -> []
+    _ -> []
+
+assertFinanceTransactionCategoryAndSplits :: Maybe String -> [(String, Int)] -> Value -> Assertion
+assertFinanceTransactionCategoryAndSplits expectedCategory expectedSplits responseBody = do
+  assertEqual "Expected finance transaction category" expectedCategory (financeTransactionCategoryValue responseBody)
+  assertEqual "Expected finance transaction splits" expectedSplits (financeTransactionSplitsValue responseBody)
 
 financeCategoryIdValue :: Value -> String
 financeCategoryIdValue responseBody =

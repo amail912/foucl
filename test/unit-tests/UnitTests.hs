@@ -1925,12 +1925,18 @@ financeMigrationUpCreatesSchema =
           transactionsTableExists <- fetchTableExists ctx "finance_transactions"
           idempotencyTableExists <- fetchTableExists ctx "finance_transaction_idempotency"
           categoriesTableExists <- fetchTableExists ctx "finance_categories"
+          classificationEventsTableExists <- fetchTableExists ctx "finance_transaction_classification_events"
+          transactionCategoriesTableExists <- fetchTableExists ctx "finance_transaction_categories"
+          transactionSplitsTableExists <- fetchTableExists ctx "finance_transaction_splits"
           assertBool "Expected finance_account_events table to exist" eventsTableExists
           assertBool "Expected finance_accounts table to exist" projectionTableExists
           assertBool "Expected finance_transaction_events table to exist" transactionEventsTableExists
           assertBool "Expected finance_transactions table to exist" transactionsTableExists
           assertBool "Expected finance_transaction_idempotency table to exist" idempotencyTableExists
           assertBool "Expected finance_categories table to exist" categoriesTableExists
+          assertBool "Expected finance_transaction_classification_events table to exist" classificationEventsTableExists
+          assertBool "Expected finance_transaction_categories table to exist" transactionCategoriesTableExists
+          assertBool "Expected finance_transaction_splits table to exist" transactionSplitsTableExists
 
           eventTypeType <- fetchColumnType ctx "finance_account_events" "event_type"
           normalizedNameType <- fetchColumnType ctx "finance_accounts" "normalized_name"
@@ -1939,6 +1945,8 @@ financeMigrationUpCreatesSchema =
           idempotencyFlagType <- fetchColumnType ctx "finance_transaction_idempotency" "occurred_at_supplied"
           categoryOwnerType <- fetchColumnType ctx "finance_categories" "owner"
           categorySelectableType <- fetchColumnType ctx "finance_categories" "selectable"
+          classificationEventTypeType <- fetchColumnType ctx "finance_transaction_classification_events" "event_type"
+          splitAmountType <- fetchColumnType ctx "finance_transaction_splits" "amount"
           assertEqual "Expected finance_account_events.event_type to be text" (Just "text") eventTypeType
           assertEqual "Expected finance_accounts.normalized_name to be text" (Just "text") normalizedNameType
           assertEqual "Expected finance_accounts.status to be text" (Just "text") statusType
@@ -1946,13 +1954,17 @@ financeMigrationUpCreatesSchema =
           assertEqual "Expected finance_transaction_idempotency.occurred_at_supplied to be boolean" (Just "boolean") idempotencyFlagType
           assertEqual "Expected finance_categories.owner to be text" (Just "text") categoryOwnerType
           assertEqual "Expected finance_categories.selectable to be boolean" (Just "boolean") categorySelectableType
+          assertEqual "Expected finance_transaction_classification_events.event_type to be text" (Just "text") classificationEventTypeType
+          assertEqual "Expected finance_transaction_splits.amount to be bigint" (Just "bigint") splitAmountType
 
           nameIndexExists <- fetchIndexExists ctx "finance_accounts_user_status_name_idx"
           transactionIndexExists <- fetchIndexExists ctx "finance_transactions_user_occurred_idx"
           categoryIndexExists <- fetchIndexExists ctx "finance_categories_user_parent_name_idx"
+          splitIndexExists <- fetchIndexExists ctx "finance_transaction_splits_user_transaction_idx"
           assertBool "Expected finance_accounts_user_status_name_idx to exist" nameIndexExists
           assertBool "Expected finance_transactions_user_occurred_idx to exist" transactionIndexExists
           assertBool "Expected finance_categories_user_parent_name_idx to exist" categoryIndexExists
+          assertBool "Expected finance_transaction_splits_user_transaction_idx to exist" splitIndexExists
 
           insertAccount <- runSqlCommandCtx ctx "INSERT INTO finance_accounts (user_id, account_id, display_name, normalized_name, status) VALUES ('user-1', 'account-1', 'Wallet', 'wallet', 'active')"
           case insertAccount of
@@ -2009,12 +2021,18 @@ financeMigrationDownRemovesSchema =
               transactionsTableExists <- fetchTableExists ctx "finance_transactions"
               idempotencyTableExists <- fetchTableExists ctx "finance_transaction_idempotency"
               categoriesTableExists <- fetchTableExists ctx "finance_categories"
+              classificationEventsTableExists <- fetchTableExists ctx "finance_transaction_classification_events"
+              transactionCategoriesTableExists <- fetchTableExists ctx "finance_transaction_categories"
+              transactionSplitsTableExists <- fetchTableExists ctx "finance_transaction_splits"
               assertBool "Expected finance_account_events table to be removed" (not eventsTableExists)
               assertBool "Expected finance_accounts table to be removed" (not projectionTableExists)
               assertBool "Expected finance_transaction_events table to be removed" (not transactionEventsTableExists)
               assertBool "Expected finance_transactions table to be removed" (not transactionsTableExists)
               assertBool "Expected finance_transaction_idempotency table to be removed" (not idempotencyTableExists)
               assertBool "Expected finance_categories table to be removed" (not categoriesTableExists)
+              assertBool "Expected finance_transaction_classification_events table to be removed" (not classificationEventsTableExists)
+              assertBool "Expected finance_transaction_categories table to be removed" (not transactionCategoriesTableExists)
+              assertBool "Expected finance_transaction_splits table to be removed" (not transactionSplitsTableExists)
 
 financeMigrationReapplyAfterDown :: IO ()
 financeMigrationReapplyAfterDown =
@@ -2038,12 +2056,18 @@ financeMigrationReapplyAfterDown =
                   transactionsTableExists <- fetchTableExists ctx "finance_transactions"
                   idempotencyTableExists <- fetchTableExists ctx "finance_transaction_idempotency"
                   categoriesTableExists <- fetchTableExists ctx "finance_categories"
+                  classificationEventsTableExists <- fetchTableExists ctx "finance_transaction_classification_events"
+                  transactionCategoriesTableExists <- fetchTableExists ctx "finance_transaction_categories"
+                  transactionSplitsTableExists <- fetchTableExists ctx "finance_transaction_splits"
                   assertBool "Expected finance_account_events table to exist after reapply" eventsTableExists
                   assertBool "Expected finance_accounts table to exist after reapply" projectionTableExists
                   assertBool "Expected finance_transaction_events table to exist after reapply" transactionEventsTableExists
                   assertBool "Expected finance_transactions table to exist after reapply" transactionsTableExists
                   assertBool "Expected finance_transaction_idempotency table to exist after reapply" idempotencyTableExists
                   assertBool "Expected finance_categories table to exist after reapply" categoriesTableExists
+                  assertBool "Expected finance_transaction_classification_events table to exist after reapply" classificationEventsTableExists
+                  assertBool "Expected finance_transaction_categories table to exist after reapply" transactionCategoriesTableExists
+                  assertBool "Expected finance_transaction_splits table to exist after reapply" transactionSplitsTableExists
 
 noteMigrationUpCreatesSchema :: IO ()
 noteMigrationUpCreatesSchema =

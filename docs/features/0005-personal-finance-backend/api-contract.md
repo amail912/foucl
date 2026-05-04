@@ -245,36 +245,36 @@ Rules:
 - unknown accounts or snapshot ids return `404`
 
 ## Operations
-### `POST /transactions/{id}/categorize`
+### `POST /api/v1/finance/transactions/{id}/categorize`
 Assigns a whole-transaction category to a transaction.
 
 Request fields:
-- `categoryId`
+- `category`
 
 Rules:
 - unknown transactions return `404`
-- unknown category ids return `404`
+- unknown category slugs return `404`
 - non-selectable categories return `400`
 - categorize requests against transactions with an active split return `409`
 - when no split is active, a later categorize request replaces the current whole-transaction category state
 - success returns the current transaction row
 
-### `POST /transactions/{id}/split`
+### `POST /api/v1/finance/transactions/{id}/split`
 Applies categorized split rows to a transaction.
 
 Request fields:
 - `splits`
 
 Split row fields:
-- `categoryId`
+- `category`
 - `amount`
 
 Rules:
 - split amounts must sum to the original transaction amount
 - split payloads must contain at least two rows
-- all split category ids must resolve in the effective category tree
-- all split category ids must be selectable
-- repeated category ids within one split payload are allowed
+- all split category slugs must resolve in the effective category tree
+- all split category slugs must be selectable
+- repeated category slugs within one split payload are allowed
 - a split supersedes any existing whole-transaction category in current state
 - a later split replaces the current active split state
 - success returns the current transaction row

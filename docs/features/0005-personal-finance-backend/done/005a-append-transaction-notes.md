@@ -12,7 +12,7 @@ As a user, I want to add notes to transactions, so I can preserve context alongs
 - Appended notes appear in the transaction row's `notes` array.
 
 ## Data And Contracts
-- Defines `POST /transactions/{id}/notes`.
+- Defines `POST /api/v1/finance/transactions/{id}/notes`.
 - Request payload contains `text`.
 - Blank or oversized note text returns `400`.
 - Unknown or foreign-scope transactions return `404`.

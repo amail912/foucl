@@ -438,6 +438,13 @@ runIntegrationTests = do
         assertStatusCode "Finance transaction link should require auth" 401 linkResp
         assertMessageResponse "Not authenticated" linkResp
 
+        notesReq <- parseRequest "POST http://localhost:8081/api/v1/finance/transactions/missing/notes"
+        notesResp <- httpJSON $ setRequestMethod "POST"
+                               $ setRequestHeader "Content-Type" ["application/json"]
+                               $ setRequestBodyJSON (object ["text" .= ("hello" :: String)]) notesReq
+        assertStatusCode "Finance transaction note append should require auth" 401 notesResp
+        assertMessageResponse "Not authenticated" notesResp
+
       it "should create and list finance accounts for the authenticated user" $ do
         cookie <- signinOnly baseUsername basePassword
         created <- createFinanceAccount cookie "  Cash Wallet  "
@@ -811,6 +818,57 @@ runIntegrationTests = do
         unknownTransactionResp <- linkFinanceTransactionsExpectValue cookie sentTxId "missing-tx" "transfer"
         assertStatusCode "Unknown transfer link transaction should return 404" 404 unknownTransactionResp
         assertMessageResponse "Transaction not found" unknownTransactionResp
+
+      it "should append transaction notes and validate note text rules" $ do
+        uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
+        let noteUsername = "fin-note-" ++ show uniquenessSuffix
+            foreignUsername = "fin-nf-" ++ show uniquenessSuffix
+        ensureApprovedSandboxUser baseUsername noteUsername basePassword
+        ensureApprovedSandboxUser baseUsername foreignUsername basePassword
+        cookie <- signinOnly noteUsername basePassword
+        foreignCookie <- signinOnly foreignUsername basePassword
+
+        account <- createFinanceAccount cookie "Notes Account"
+        accountId <- requireObjectStringField "id" account
+        foreignAccount <- createFinanceAccount foreignCookie "Foreign Notes Account"
+        foreignAccountId <- requireObjectStringField "id" foreignAccount
+
+        txResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "note-append-key-1" (object ["accountId" .= accountId, "amount" .= (1800 :: Int), "occurredAt" .= ("2026-04-21T10:00:00Z" :: String)])
+        assertStatusCode "Transaction create for note append should succeed" 200 txResp
+        txId <- requireObjectStringField "id" (getResponseBody txResp)
+
+        foreignTxResp <- createFinanceTransactionExpectValue foreignCookie financeTransactionsSentEndpoint "note-append-key-2" (object ["accountId" .= foreignAccountId, "amount" .= (1900 :: Int), "occurredAt" .= ("2026-04-21T10:01:00Z" :: String)])
+        assertStatusCode "Foreign transaction create should succeed" 200 foreignTxResp
+        foreignTxId <- requireObjectStringField "id" (getResponseBody foreignTxResp)
+
+        appendResp <- appendFinanceTransactionNoteExpectValue cookie txId "First note"
+        assertStatusCode "Appending a note should succeed" 200 appendResp
+        assertFinanceTransactionNotesTexts ["First note"] (getResponseBody appendResp)
+
+        exact2000Resp <- appendFinanceTransactionNoteExpectValue cookie txId (replicate 2000 'a')
+        assertStatusCode "Appending a 2000-char note should succeed" 200 exact2000Resp
+        assertFinanceTransactionNotesTexts ["First note", replicate 2000 'a'] (getResponseBody exact2000Resp)
+
+        tooLongResp <- appendFinanceTransactionNoteExpectValue cookie txId (replicate 2001 'a')
+        assertStatusCode "Appending a >2000-char note should return 400" 400 tooLongResp
+        assertMessageResponse "text must not be blank and must not exceed 2000 characters" tooLongResp
+
+        blankResp <- appendFinanceTransactionNoteExpectValue cookie txId "    "
+        assertStatusCode "Appending a blank note should return 400" 400 blankResp
+        assertMessageResponse "text must not be blank and must not exceed 2000 characters" blankResp
+
+        unknownResp <- appendFinanceTransactionNoteExpectValue cookie "missing-transaction" "hello"
+        assertStatusCode "Appending note to unknown transaction should return 404" 404 unknownResp
+        assertMessageResponse "Transaction not found" unknownResp
+
+        foreignResp <- appendFinanceTransactionNoteExpectValue cookie foreignTxId "hello"
+        assertStatusCode "Appending note to foreign transaction should return 404" 404 foreignResp
+        assertMessageResponse "Transaction not found" foreignResp
+
+        listed <- getFinanceTransactions cookie []
+        case filter (\row -> financeTransactionIdValue row == txId) listed of
+          [row] -> assertFinanceTransactionNotesTexts ["First note", replicate 2000 'a'] row
+          _ -> assertFailure "Expected one matching transaction row for appended notes"
 
       it "should keep finance account lists isolated per authenticated user" $ do
         uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
@@ -2201,6 +2259,14 @@ linkFinanceTransactionsExpectValue cookie sourceTransactionId targetTransactionI
                ])
              req
 
+appendFinanceTransactionNoteExpectValue :: String -> String -> String -> IO (Response Value)
+appendFinanceTransactionNoteExpectValue cookie transactionId textValue = do
+  req <- parseRequest ("POST http://localhost:8081" ++ financeTransactionsEndpoint ++ "/" ++ transactionId ++ "/notes")
+  httpJSON $ setRequestMethod "POST"
+         $ setRequestHeader "Cookie" [BS.pack cookie]
+         $ setRequestHeader "Content-Type" ["application/json"]
+         $ setRequestBodyJSON (object ["text" .= textValue]) req
+
 assertFinanceAccountNameAndStatus :: String -> String -> Value -> Assertion
 assertFinanceAccountNameAndStatus expectedName expectedStatus responseBody =
   case responseBody of
@@ -2296,6 +2362,15 @@ financeTransactionTransferValue responseBody =
     Object value -> parseMaybe (.: "transfer") value
     _ -> Nothing
 
+financeTransactionNotesValue :: Value -> [Value]
+financeTransactionNotesValue responseBody =
+  case responseBody of
+    Object value ->
+      case parseMaybe (.: "notes") value of
+        Just notes -> notes
+        Nothing -> []
+    _ -> []
+
 assertFinanceTransactionCategoryAndSplits :: Maybe String -> [(String, Int)] -> Value -> Assertion
 assertFinanceTransactionCategoryAndSplits expectedCategory expectedSplits responseBody = do
   assertEqual "Expected finance transaction category" expectedCategory (financeTransactionCategoryValue responseBody)
@@ -2332,6 +2407,31 @@ transferPeerMatches expectedPeerTransactionId expectedPeerAccountId expectedPeer
             && not (null (linkedAt :: String))
         _ -> False
     _ -> False
+
+assertFinanceTransactionNotesTexts :: [String] -> Value -> Assertion
+assertFinanceTransactionNotesTexts expectedTexts responseBody = do
+  let notes = financeTransactionNotesValue responseBody
+      extractedTexts =
+        [ textValue
+        | Object noteObj <- notes
+        , Just textValue <- [parseMaybe (.: "text") noteObj]
+        ]
+  assertEqual "Expected finance transaction notes texts" expectedTexts extractedTexts
+  mapM_ assertNoteShape notes
+  where
+    assertNoteShape noteValue =
+      case noteValue of
+        Object noteObj ->
+          case ( parseMaybe (.: "id") noteObj
+               , parseMaybe (.: "createdAt") noteObj
+               , parseMaybe (.: "updatedAt") noteObj
+               ) of
+            (Just noteId, Just createdAt, Just updatedAt) -> do
+              assertBool "Expected note id to be non-empty" (not (null (noteId :: String)))
+              assertBool "Expected note createdAt to be non-empty" (not (null (createdAt :: String)))
+              assertBool "Expected note updatedAt to be non-empty" (not (null (updatedAt :: String)))
+            _ -> assertFailure "Expected note object to include id, createdAt, updatedAt"
+        _ -> assertFailure "Expected note entry to be an object"
 
 financeCategoryIdValue :: Value -> String
 financeCategoryIdValue responseBody =

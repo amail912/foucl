@@ -14,7 +14,7 @@ As a user, I want to correct or remove transaction notes, so current transaction
 - Updated note text length must not exceed 2000 characters.
 
 ## Data And Contracts
-- Defines `POST /transactions/{transactionId}/notes/{noteId}` and `DELETE /transactions/{transactionId}/notes/{noteId}`.
+- Defines `POST /api/v1/finance/transactions/{transactionId}/notes/{noteId}` and `DELETE /api/v1/finance/transactions/{transactionId}/notes/{noteId}`.
 - The update request payload contains `text`.
 - Blank or oversized updated note text returns `400`.
 - Unknown or foreign-scope transaction or note ids return `404`.

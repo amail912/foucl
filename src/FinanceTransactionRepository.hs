@@ -4,6 +4,8 @@
 module FinanceTransactionRepository
   ( FinanceTransactionRepository(..)
   , FinanceTransaction(..)
+  , FinanceTransactionNote(..)
+  , FinanceTransactionNoteCreateRequest(..)
   , FinanceTransactionLinkRequest(..)
   , FinanceTransactionSplitRow(..)
   , FinanceTransactionTransfer(..)
@@ -20,8 +22,10 @@ module FinanceTransactionRepository
 
 import Control.Monad.Except (ExceptT, throwError)
 import Control.Monad.IO.Class (liftIO)
+import Data.Char (isSpace)
 import Data.Aeson (FromJSON(parseJSON), ToJSON(toJSON), Value, object, withObject, (.:), (.:?), (.=))
 import Data.Int (Int64)
+import Data.List (dropWhileEnd)
 import Data.Pool (Pool)
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
@@ -42,6 +46,7 @@ data FinanceTransactionRepository = FinanceTransactionRepository
   { repoCreateFinanceTransaction :: !(String -> FinanceTransactionWriteRequest -> ExceptT RepositoryError IO FinanceTransaction)
   , repoLoadFinanceTransactionById :: !(String -> String -> ExceptT RepositoryError IO FinanceTransaction)
   , repoListFinanceTransactions :: !(String -> Maybe String -> Maybe UTCTime -> Maybe UTCTime -> ExceptT RepositoryError IO [FinanceTransaction])
+  , repoAddFinanceTransactionNote :: !(String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction)
   , repoCategorizeFinanceTransaction :: !(String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction)
   , repoSplitFinanceTransaction :: !(String -> String -> [FinanceTransactionSplitWriteRow] -> ExceptT RepositoryError IO FinanceTransaction)
   , repoLinkFinanceTransactions :: !(String -> String -> String -> String -> ExceptT RepositoryError IO (FinanceTransaction, FinanceTransaction))
@@ -51,6 +56,10 @@ data FinanceTransactionCreateRequest = FinanceTransactionCreateRequest
   { financeTransactionCreateAccountId :: !String
   , financeTransactionCreateAmount :: !Int
   , financeTransactionCreateOccurredAt :: !(Maybe String)
+  }
+
+data FinanceTransactionNoteCreateRequest = FinanceTransactionNoteCreateRequest
+  { financeTransactionNoteCreateText :: !String
   }
 
 data FinanceTransactionLinkRequest = FinanceTransactionLinkRequest
@@ -101,6 +110,14 @@ data FinanceTransaction = FinanceTransaction
   , financeTransactionTransfer :: !(Maybe FinanceTransactionTransfer)
   , financeTransactionCategory :: !(Maybe String)
   , financeTransactionSplits :: ![FinanceTransactionSplitRow]
+  , financeTransactionNotes :: ![FinanceTransactionNote]
+  } deriving (Eq, Show)
+
+data FinanceTransactionNote = FinanceTransactionNote
+  { financeTransactionNoteId :: !String
+  , financeTransactionNoteText :: !String
+  , financeTransactionNoteCreatedAt :: !UTCTime
+  , financeTransactionNoteUpdatedAt :: !UTCTime
   } deriving (Eq, Show)
 
 data FinanceTransactionTransfer = FinanceTransactionTransfer
@@ -117,6 +134,10 @@ instance FromJSON FinanceTransactionCreateRequest where
       <$> value .: "accountId"
       <*> value .: "amount"
       <*> value .:? "occurredAt"
+
+instance FromJSON FinanceTransactionNoteCreateRequest where
+  parseJSON = withObject "FinanceTransactionNoteCreateRequest" $ \value ->
+    FinanceTransactionNoteCreateRequest <$> value .: "text"
 
 instance FromJSON FinanceTransactionLinkRequest where
   parseJSON = withObject "FinanceTransactionLinkRequest" $ \value ->
@@ -162,6 +183,20 @@ instance ToJSON FinanceTransactionTransfer where
         , "linkedAt" .= financeTransactionTransferLinkedAt
         ]
 
+instance ToJSON FinanceTransactionNote where
+  toJSON FinanceTransactionNote
+    { financeTransactionNoteId
+    , financeTransactionNoteText
+    , financeTransactionNoteCreatedAt
+    , financeTransactionNoteUpdatedAt
+    } =
+      object
+        [ "id" .= financeTransactionNoteId
+        , "text" .= financeTransactionNoteText
+        , "createdAt" .= financeTransactionNoteCreatedAt
+        , "updatedAt" .= financeTransactionNoteUpdatedAt
+        ]
+
 instance ToJSON FinanceTransaction where
   toJSON FinanceTransaction
     { financeTransactionId
@@ -173,6 +208,7 @@ instance ToJSON FinanceTransaction where
     , financeTransactionTransfer
     , financeTransactionCategory
     , financeTransactionSplits
+    , financeTransactionNotes
     } =
       object
         [ "id" .= financeTransactionId
@@ -184,7 +220,7 @@ instance ToJSON FinanceTransaction where
         , "transfer" .= financeTransactionTransfer
         , "category" .= financeTransactionCategory
         , "splits" .= financeTransactionSplits
-        , "notes" .= ([] :: [Value])
+        , "notes" .= financeTransactionNotes
         ]
 
 financeTransactionDirectionText :: FinanceTransactionDirection -> Text
@@ -197,6 +233,7 @@ postgresFinanceTransactionRepository pool =
     { repoCreateFinanceTransaction = pgCreateFinanceTransaction pool
     , repoLoadFinanceTransactionById = pgLoadFinanceTransactionById pool
     , repoListFinanceTransactions = pgListFinanceTransactions pool
+    , repoAddFinanceTransactionNote = pgAddFinanceTransactionNote pool
     , repoCategorizeFinanceTransaction = pgCategorizeFinanceTransaction pool
     , repoSplitFinanceTransaction = pgSplitFinanceTransaction pool
     , repoLinkFinanceTransactions = pgLinkFinanceTransactions pool
@@ -244,6 +281,16 @@ financeTransactionPostgresHealthChecks conn = do
       "SELECT user_id, transaction_id, peer_transaction_id, link_type, linked_at FROM finance_transaction_links LIMIT 0"
       :: IO [(String, String, String, String, UTCTime)])
     (\err -> "Finance schema check failed for finance_transaction_links: " ++ show err)
+  tryExcept
+    (query_ conn
+      "SELECT event_id, user_id, transaction_id, note_id, event_type, note_text, recorded_at FROM finance_transaction_note_events LIMIT 0"
+      :: IO [(String, String, String, String, String, String, UTCTime)])
+    (\err -> "Finance schema check failed for finance_transaction_note_events: " ++ show err)
+  tryExcept
+    (query_ conn
+      "SELECT user_id, transaction_id, note_id, note_text, created_at, updated_at FROM finance_transaction_notes LIMIT 0"
+      :: IO [(String, String, String, String, UTCTime, UTCTime)])
+    (\err -> "Finance schema check failed for finance_transaction_notes: " ++ show err)
   pure ()
 
 pgCreateFinanceTransaction :: Pool Connection -> String -> FinanceTransactionWriteRequest -> ExceptT RepositoryError IO FinanceTransaction
@@ -358,6 +405,39 @@ pgListFinanceTransactions pool userId mAccountId mFrom mTo =
           query conn
             "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at FROM finance_transactions WHERE user_id = ? AND account_id = ? AND occurred_at >= ? AND occurred_at < ? ORDER BY occurred_at DESC, transaction_id ASC"
             (userId, accountId, fromTs, toTs)
+
+pgAddFinanceTransactionNote :: Pool Connection -> String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction
+pgAddFinanceTransactionNote pool userId transactionId noteText =
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    if not (isValidNoteText noteText)
+      then throwError WriteFailure
+      else do
+        _ <- requireTransactionAmount conn userId transactionId
+        eventId <- liftIO (toString <$> nextRandom)
+        noteId <- liftIO (toString <$> nextRandom)
+        _ <- tryExcept
+          (withTransaction conn $ do
+            recordedRows <- query conn
+              "INSERT INTO finance_transaction_note_events (event_id, user_id, transaction_id, note_id, event_type, note_text) VALUES (?, ?, ?, ?, ?, ?) RETURNING recorded_at"
+              (eventId, userId, transactionId, noteId, ("TransactionNoteAdded" :: String), noteText)
+              :: IO [Only UTCTime]
+            recordedAt <- case recordedRows of
+              [Only rowRecordedAt] -> pure rowRecordedAt
+              _ -> fail "Unexpected recorded_at row count for finance transaction note event insert"
+            _ <- execute conn
+              "INSERT INTO finance_transaction_notes (user_id, transaction_id, note_id, note_text, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
+              (userId, transactionId, noteId, noteText, recordedAt, recordedAt)
+            pure ())
+          mapSqlWriteException
+        pgLoadFinanceTransactionByIdInConn conn userId transactionId
+
+isValidNoteText :: String -> Bool
+isValidNoteText text =
+  let trimmed = trimWhitespace text
+   in not (null trimmed) && length text <= 2000
+
+trimWhitespace :: String -> String
+trimWhitespace = dropWhile isSpace . dropWhileEnd isSpace
 
 pgCategorizeFinanceTransaction :: Pool Connection -> String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction
 pgCategorizeFinanceTransaction pool userId transactionId categorySlug =
@@ -547,7 +627,8 @@ validateCategorySlug conn userId categorySlug = do
 hydrateTransactionDetails :: Connection -> String -> FinanceTransaction -> ExceptT RepositoryError IO FinanceTransaction
 hydrateTransactionDetails conn userId transaction = do
   withTransfer <- hydrateTransferState conn userId transaction
-  hydrateClassificationState conn userId withTransfer
+  withClassification <- hydrateClassificationState conn userId withTransfer
+  hydrateNotesState conn userId withClassification
 
 hydrateTransferState :: Connection -> String -> FinanceTransaction -> ExceptT RepositoryError IO FinanceTransaction
 hydrateTransferState conn userId transaction = do
@@ -615,6 +696,25 @@ hydrateClassificationState conn userId transaction = do
         [Only categorySlug] -> pure transaction { financeTransactionCategory = Just categorySlug, financeTransactionSplits = [] }
         _ -> throwError ReadFailure
 
+hydrateNotesState :: Connection -> String -> FinanceTransaction -> ExceptT RepositoryError IO FinanceTransaction
+hydrateNotesState conn userId transaction = do
+  rows <- tryExcept
+    (query conn
+      "SELECT note_id, note_text, created_at, updated_at FROM finance_transaction_notes WHERE user_id = ? AND transaction_id = ? ORDER BY created_at ASC, note_id ASC"
+      (userId, financeTransactionId transaction)
+      :: IO [(String, String, UTCTime, UTCTime)])
+    mapSqlReadException
+  let notes =
+        [ FinanceTransactionNote
+            { financeTransactionNoteId = noteId
+            , financeTransactionNoteText = noteText
+            , financeTransactionNoteCreatedAt = createdAt
+            , financeTransactionNoteUpdatedAt = updatedAt
+            }
+        | (noteId, noteText, createdAt, updatedAt) <- rows
+        ]
+  pure transaction { financeTransactionNotes = notes }
+
 decodeBaseTransaction :: (String, Text, String, Int64, UTCTime, UTCTime) -> ExceptT RepositoryError IO FinanceTransaction
 decodeBaseTransaction (transactionId, directionText, accountId, amount, occurredAt, recordedAt) =
   case directionFromText directionText of
@@ -630,6 +730,7 @@ decodeBaseTransaction (transactionId, directionText, accountId, amount, occurred
         , financeTransactionTransfer = Nothing
         , financeTransactionCategory = Nothing
         , financeTransactionSplits = []
+        , financeTransactionNotes = []
         }
 
 idempotencyMatches :: FinanceTransactionWriteRequest -> Text -> String -> Int64 -> Bool -> UTCTime -> Bool

@@ -46,6 +46,7 @@ import FinanceTransactionRepository
   , FinanceTransactionCategorizeRequest(..)
   , FinanceTransactionDirection(..)
   , FinanceTransactionLinkRequest(..)
+  , FinanceTransactionNoteCreateRequest(..)
   , FinanceTransactionSplitRequest(..)
   , FinanceTransaction
   , FinanceTransactionRepository(..)
@@ -635,6 +636,7 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
           , dir "link" financeTransactionsLink
           , financeTransactionsCategorize
           , financeTransactionsSplit
+          , financeTransactionsNotes
           ]
     ]
   where
@@ -773,6 +775,13 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
       body <- askRq >>= takeRequestBody
       maybe (badRequest "Empty body") handleTransactionLinkBody body
 
+    financeTransactionsNotes = path $ \transactionId -> do
+      dir "notes" $ do
+        nullDir
+        method POST
+        body <- askRq >>= takeRequestBody
+        maybe (badRequest "Empty body") (handleTransactionNotesBody transactionId) body
+
     handleTransactionCategorizeBody :: String -> RqBody -> ServerPartT IO Response
     handleTransactionCategorizeBody transactionId rqBody =
       case decode' (unBody rqBody) :: Maybe FinanceTransactionCategorizeRequest of
@@ -818,6 +827,18 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
                   Left _ -> internalServerError emptyResponse
                   Right (sourceTransaction, targetTransaction) ->
                     ok (jsonResponse (object ["source" .= sourceTransaction, "target" .= targetTransaction]))
+
+    handleTransactionNotesBody :: String -> RqBody -> ServerPartT IO Response
+    handleTransactionNotesBody transactionId rqBody =
+      case decode' (unBody rqBody) :: Maybe FinanceTransactionNoteCreateRequest of
+        Nothing -> badRequest "Unable to decode the body as a FinanceTransactionNoteCreateRequest"
+        Just FinanceTransactionNoteCreateRequest { financeTransactionNoteCreateText } -> do
+          result <- liftIO $ runExceptT (repoAddFinanceTransactionNote financeTransactionRepo principalUserId transactionId financeTransactionNoteCreateText)
+          case result of
+            Left NotFound -> notFound (jsonMessage "Transaction not found")
+            Left WriteFailure -> badRequest "text must not be blank and must not exceed 2000 characters"
+            Left _ -> internalServerError emptyResponse
+            Right transaction -> ok (jsonResponse transaction)
 
     financeCategoriesList = do
       nullDir

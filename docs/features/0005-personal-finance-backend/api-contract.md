@@ -296,7 +296,7 @@ Rules:
 - no unlink endpoint exists in v1
 - success returns an object with `source` and `target` updated transaction rows
 
-### `POST /transactions/{id}/notes`
+### `POST /api/v1/finance/transactions/{id}/notes`
 Appends a note to a transaction.
 
 Request fields:
@@ -309,7 +309,7 @@ Rules:
 - blank or oversized note text returns `400`
 - success returns the updated transaction row
 
-### `POST /transactions/{transactionId}/notes/{noteId}`
+### `POST /api/v1/finance/transactions/{transactionId}/notes/{noteId}`
 Updates one existing transaction note.
 
 Request fields:
@@ -323,7 +323,7 @@ Rules:
 - unknown or foreign-scope transaction or note ids return `404`
 - success returns the updated transaction row
 
-### `DELETE /transactions/{transactionId}/notes/{noteId}`
+### `DELETE /api/v1/finance/transactions/{transactionId}/notes/{noteId}`
 Soft-deletes one existing transaction note.
 
 Rules:

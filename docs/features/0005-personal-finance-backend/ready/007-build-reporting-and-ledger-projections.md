@@ -5,7 +5,7 @@ As a user, I want ledger and aggregate report views, so I can inspect history an
 
 ## Behavior And Business Rules
 - Ledger views include all transactions, including transfer-linked transactions.
-- `GET /report` returns aggregate values for the filtered transaction set.
+- `GET /api/v1/finance/report` returns aggregate values for the filtered transaction set.
 - Transfer-linked transactions are excluded from all report aggregates.
 - Active split state overrides whole-transaction categorization in report matching and aggregation.
 - When split-driven category filtering is active, aggregate totals sum only the matching split-row amounts.
@@ -15,10 +15,10 @@ As a user, I want ledger and aggregate report views, so I can inspect history an
 - The `uncategorized` token matches transactions with no active category state and transactions explicitly assigned `Uncategorized Expense` or `Uncategorized Income`, including split rows.
 
 ## Data And Contracts
-- Refines `GET /transactions` and defines `GET /report`.
-- `GET /report` requires `from` and `to`.
-- `GET /report` supports optional `direction`, `accountIn`, `accountNotIn`, `categoryIn`, and `categoryNotIn` using repeated query parameters in v1.
-- `GET /report` returns `total`, `count`, and `transactionIds`.
+- Refines `GET /api/v1/finance/transactions` and defines `GET /api/v1/finance/report`.
+- `GET /api/v1/finance/report` requires `from` and `to`.
+- `GET /api/v1/finance/report` supports optional `direction`, `accountIn`, `accountNotIn`, `categoryIn`, and `categoryNotIn` using repeated query parameters in v1.
+- `GET /api/v1/finance/report` returns `total`, `count`, and `transactionIds`.
 - `transactionIds` expose the ids of the transactions included in the aggregate result.
 - Overlapping include and exclude values for the same filter dimension return `400`.
 - Split-category matching, Uncategorized behavior, and include/exclude filter combinations must remain deterministic.
@@ -33,9 +33,9 @@ As a user, I want ledger and aggregate report views, so I can inspect history an
 
 ## Testing
 - Ledger reads include expense, income, and transfer-linked transactions.
-- `GET /report` with `direction=sent` excludes transfers and sums only expense transactions.
-- `GET /report` with `direction=received` excludes transfers and sums only income transactions.
-- `GET /report` with `direction=all` returns net balance delta.
+- `GET /api/v1/finance/report` with `direction=sent` excludes transfers and sums only expense transactions.
+- `GET /api/v1/finance/report` with `direction=received` excludes transfers and sums only income transactions.
+- `GET /api/v1/finance/report` with `direction=all` returns net balance delta.
 - Category filters match active split rows when a split is active.
 - Split transactions contribute only matching split-row amounts to `total`.
 - Split transactions with multiple matching split rows contribute once to `count` and once to `transactionIds`.

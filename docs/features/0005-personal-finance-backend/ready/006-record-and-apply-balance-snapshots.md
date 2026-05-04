@@ -14,13 +14,13 @@ As a user, I want to record observed account balances, so I can compare event-de
 - Writing a snapshot returns reconciliation for the snapshot that was just created, even when the write is backdated.
 
 ## Data And Contracts
-- Defines `POST /accounts/{id}/snapshots`, `GET /accounts/{id}/snapshots`, and `GET /accounts/{id}/reconciliation`.
+- Defines `POST /api/v1/finance/accounts/{id}/snapshots`, `GET /api/v1/finance/accounts/{id}/snapshots`, and `GET /api/v1/finance/accounts/{id}/reconciliation`.
 - Snapshot write payload contains `balance` and `occurredAt`.
 - Snapshot list rows contain `id`, `occurredAt`, and `balance`.
 - Reconciliation responses contain `snapshotId`, `snapshotOccurredAt`, `observedBalance`, `derivedBalanceAtSnapshot`, and `discrepancy`.
-- `POST /accounts/{id}/snapshots` returns `404` for unknown or foreign-scope accounts and `409` for duplicate account-plus-timestamp snapshots.
-- `POST /accounts/{id}/snapshots` success returns reconciliation for the created snapshot, not necessarily the latest snapshot on the account.
-- `GET /accounts/{id}/reconciliation` returns the latest reconciliation by default and accepts optional `snapshotId` for a specific snapshot.
+- `POST /api/v1/finance/accounts/{id}/snapshots` returns `404` for unknown or foreign-scope accounts and `409` for duplicate account-plus-timestamp snapshots.
+- `POST /api/v1/finance/accounts/{id}/snapshots` success returns reconciliation for the created snapshot, not necessarily the latest snapshot on the account.
+- `GET /api/v1/finance/accounts/{id}/reconciliation` returns the latest reconciliation by default and accepts optional `snapshotId` for a specific snapshot.
 
 ## Technical Details
 - Snapshot handling must remain compatible with the append-only event log.

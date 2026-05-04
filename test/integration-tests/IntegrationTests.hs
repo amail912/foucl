@@ -427,6 +427,17 @@ runIntegrationTests = do
         assertStatusCode "Finance transaction split should require auth" 401 splitResp
         assertMessageResponse "Not authenticated" splitResp
 
+        linkReq <- parseRequest "POST http://localhost:8081/api/v1/finance/transactions/link"
+        linkResp <- httpJSON $ setRequestMethod "POST"
+                             $ setRequestHeader "Content-Type" ["application/json"]
+                             $ setRequestBodyJSON (object
+                               [ "sourceTransactionId" .= ("source" :: String)
+                               , "targetTransactionId" .= ("target" :: String)
+                               , "linkType" .= ("transfer" :: String)
+                               ]) linkReq
+        assertStatusCode "Finance transaction link should require auth" 401 linkResp
+        assertMessageResponse "Not authenticated" linkResp
+
       it "should create and list finance accounts for the authenticated user" $ do
         cookie <- signinOnly baseUsername basePassword
         created <- createFinanceAccount cookie "  Cash Wallet  "
@@ -734,6 +745,72 @@ runIntegrationTests = do
         unknownTransactionSplit <- splitFinanceTransactionExpectValue cookie "missing-tx" [("pets.food", 2000), ("personal.clothing", 2500)]
         assertStatusCode "Split should fail for unknown transaction" 404 unknownTransactionSplit
         assertMessageResponse "Transaction or category not found" unknownTransactionSplit
+
+      it "should link transfer transactions and enforce transfer validation rules" $ do
+        uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
+        let transferUsername = "fin-transfer-" ++ show uniquenessSuffix
+        ensureApprovedSandboxUser baseUsername transferUsername basePassword
+        cookie <- signinOnly transferUsername basePassword
+
+        sourceAccount <- createFinanceAccount cookie "Source Account"
+        targetAccount <- createFinanceAccount cookie "Target Account"
+        sameDirectionAccount <- createFinanceAccount cookie "Same Direction Account"
+        sourceAccountId <- requireObjectStringField "id" sourceAccount
+        targetAccountId <- requireObjectStringField "id" targetAccount
+        sameDirectionAccountId <- requireObjectStringField "id" sameDirectionAccount
+
+        sentTxResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "transfer-sent-1" (object ["accountId" .= sourceAccountId, "amount" .= (5000 :: Int), "occurredAt" .= ("2026-04-11T10:00:00Z" :: String)])
+        receivedTxResp <- createFinanceTransactionExpectValue cookie financeTransactionsReceivedEndpoint "transfer-received-1" (object ["accountId" .= targetAccountId, "amount" .= (5000 :: Int), "occurredAt" .= ("2026-04-11T10:01:00Z" :: String)])
+        assertStatusCode "Sent transfer candidate create should succeed" 200 sentTxResp
+        assertStatusCode "Received transfer candidate create should succeed" 200 receivedTxResp
+        sentTxId <- requireObjectStringField "id" (getResponseBody sentTxResp)
+        receivedTxId <- requireObjectStringField "id" (getResponseBody receivedTxResp)
+
+        linkedResp <- linkFinanceTransactionsExpectValue cookie sentTxId receivedTxId "transfer"
+        assertStatusCode "Valid transfer link should succeed" 200 linkedResp
+        assertTransferPairResponse sentTxId sourceAccountId 5000 receivedTxId targetAccountId 5000 (getResponseBody linkedResp)
+
+        listed <- getFinanceTransactions cookie []
+        let linkedRows = filter (\row -> financeTransactionIdValue row `elem` [sentTxId, receivedTxId]) listed
+        assertEqual "Expected both linked transactions in ledger list" 2 (Prelude.length linkedRows)
+        assertBool "Expected linked source row to include transfer summary" (any (transferPeerMatches receivedTxId targetAccountId 5000) linkedRows)
+        assertBool "Expected linked target row to include transfer summary" (any (transferPeerMatches sentTxId sourceAccountId 5000) linkedRows)
+
+        alreadyLinkedResp <- linkFinanceTransactionsExpectValue cookie sentTxId receivedTxId "transfer"
+        assertStatusCode "Relinking already linked transactions should return 409" 409 alreadyLinkedResp
+        assertMessageResponse "One or both transactions are already linked" alreadyLinkedResp
+
+        invalidLinkTypeResp <- linkFinanceTransactionsExpectValue cookie sentTxId receivedTxId "manual"
+        assertStatusCode "Unsupported linkType should return 400" 400 invalidLinkTypeResp
+        assertMessageResponse "linkType must be transfer" invalidLinkTypeResp
+
+        sameDirectionAResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "transfer-same-dir-a" (object ["accountId" .= sourceAccountId, "amount" .= (7000 :: Int), "occurredAt" .= ("2026-04-12T10:00:00Z" :: String)])
+        sameDirectionBResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "transfer-same-dir-b" (object ["accountId" .= sameDirectionAccountId, "amount" .= (7000 :: Int), "occurredAt" .= ("2026-04-12T10:01:00Z" :: String)])
+        sameDirectionAId <- requireObjectStringField "id" (getResponseBody sameDirectionAResp)
+        sameDirectionBId <- requireObjectStringField "id" (getResponseBody sameDirectionBResp)
+        sameDirectionResp <- linkFinanceTransactionsExpectValue cookie sameDirectionAId sameDirectionBId "transfer"
+        assertStatusCode "Same direction transfer candidates should return 409" 409 sameDirectionResp
+        assertMessageResponse "Invalid transfer link request" sameDirectionResp
+
+        differentAmountAResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "transfer-diff-amount-a" (object ["accountId" .= sourceAccountId, "amount" .= (8100 :: Int), "occurredAt" .= ("2026-04-13T10:00:00Z" :: String)])
+        differentAmountBResp <- createFinanceTransactionExpectValue cookie financeTransactionsReceivedEndpoint "transfer-diff-amount-b" (object ["accountId" .= targetAccountId, "amount" .= (8200 :: Int), "occurredAt" .= ("2026-04-13T10:01:00Z" :: String)])
+        differentAmountAId <- requireObjectStringField "id" (getResponseBody differentAmountAResp)
+        differentAmountBId <- requireObjectStringField "id" (getResponseBody differentAmountBResp)
+        differentAmountResp <- linkFinanceTransactionsExpectValue cookie differentAmountAId differentAmountBId "transfer"
+        assertStatusCode "Different amount transfer candidates should return 409" 409 differentAmountResp
+        assertMessageResponse "Invalid transfer link request" differentAmountResp
+
+        sameAccountSentResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "transfer-same-account-a" (object ["accountId" .= sourceAccountId, "amount" .= (9100 :: Int), "occurredAt" .= ("2026-04-14T10:00:00Z" :: String)])
+        sameAccountReceivedResp <- createFinanceTransactionExpectValue cookie financeTransactionsReceivedEndpoint "transfer-same-account-b" (object ["accountId" .= sourceAccountId, "amount" .= (9100 :: Int), "occurredAt" .= ("2026-04-14T10:01:00Z" :: String)])
+        sameAccountSentId <- requireObjectStringField "id" (getResponseBody sameAccountSentResp)
+        sameAccountReceivedId <- requireObjectStringField "id" (getResponseBody sameAccountReceivedResp)
+        sameAccountResp <- linkFinanceTransactionsExpectValue cookie sameAccountSentId sameAccountReceivedId "transfer"
+        assertStatusCode "Same account transfer candidates should return 409" 409 sameAccountResp
+        assertMessageResponse "Invalid transfer link request" sameAccountResp
+
+        unknownTransactionResp <- linkFinanceTransactionsExpectValue cookie sentTxId "missing-tx" "transfer"
+        assertStatusCode "Unknown transfer link transaction should return 404" 404 unknownTransactionResp
+        assertMessageResponse "Transaction not found" unknownTransactionResp
 
       it "should keep finance account lists isolated per authenticated user" $ do
         uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
@@ -2110,6 +2187,20 @@ splitFinanceTransactionExpectValue cookie transactionId rows = do
          $ setRequestHeader "Content-Type" ["application/json"]
          $ setRequestBodyJSON (object ["splits" .= splitRows]) req
 
+linkFinanceTransactionsExpectValue :: String -> String -> String -> String -> IO (Response Value)
+linkFinanceTransactionsExpectValue cookie sourceTransactionId targetTransactionId linkType = do
+  req <- parseRequest ("POST http://localhost:8081" ++ financeTransactionsEndpoint ++ "/link")
+  httpJSON $ setRequestMethod "POST"
+         $ setRequestHeader "Cookie" [BS.pack cookie]
+         $ setRequestHeader "Content-Type" ["application/json"]
+         $ setRequestBodyJSON
+             (object
+               [ "sourceTransactionId" .= sourceTransactionId
+               , "targetTransactionId" .= targetTransactionId
+               , "linkType" .= linkType
+               ])
+             req
+
 assertFinanceAccountNameAndStatus :: String -> String -> Value -> Assertion
 assertFinanceAccountNameAndStatus expectedName expectedStatus responseBody =
   case responseBody of
@@ -2199,10 +2290,48 @@ financeTransactionSplitsValue responseBody =
         Nothing -> []
     _ -> []
 
+financeTransactionTransferValue :: Value -> Maybe Value
+financeTransactionTransferValue responseBody =
+  case responseBody of
+    Object value -> parseMaybe (.: "transfer") value
+    _ -> Nothing
+
 assertFinanceTransactionCategoryAndSplits :: Maybe String -> [(String, Int)] -> Value -> Assertion
 assertFinanceTransactionCategoryAndSplits expectedCategory expectedSplits responseBody = do
   assertEqual "Expected finance transaction category" expectedCategory (financeTransactionCategoryValue responseBody)
   assertEqual "Expected finance transaction splits" expectedSplits (financeTransactionSplitsValue responseBody)
+
+assertTransferPairResponse :: String -> String -> Int -> String -> String -> Int -> Value -> Assertion
+assertTransferPairResponse sourceId sourceAccount sourceAmount targetId targetAccount targetAmount responseBody =
+  case responseBody of
+    Object value -> do
+      case (parseMaybe (.: "source") value, parseMaybe (.: "target") value) of
+        (Just sourceRow, Just targetRow) -> do
+          assertEqual "Expected source transaction id in link response" sourceId (financeTransactionIdValue sourceRow)
+          assertEqual "Expected target transaction id in link response" targetId (financeTransactionIdValue targetRow)
+          assertBool "Expected source row transfer peer metadata" (transferPeerMatches targetId targetAccount targetAmount sourceRow)
+          assertBool "Expected target row transfer peer metadata" (transferPeerMatches sourceId sourceAccount sourceAmount targetRow)
+        _ -> assertFailure "Expected source and target transaction rows in transfer link response"
+    _ -> assertFailure "Expected transfer link response object"
+
+transferPeerMatches :: String -> String -> Int -> Value -> Bool
+transferPeerMatches expectedPeerTransactionId expectedPeerAccountId expectedPeerAmount responseBody =
+  case financeTransactionTransferValue responseBody of
+    Just (Object transferObj) ->
+      case ( parseMaybe (.: "linkType") transferObj
+           , parseMaybe (.: "peerTransactionId") transferObj
+           , parseMaybe (.: "peerAccountId") transferObj
+           , parseMaybe (.: "peerAmount") transferObj
+           , parseMaybe (.: "linkedAt") transferObj
+           ) of
+        (Just linkType, Just peerTransactionId, Just peerAccountId, Just peerAmount, Just linkedAt) ->
+          (linkType :: String) == "transfer"
+            && (peerTransactionId :: String) == expectedPeerTransactionId
+            && (peerAccountId :: String) == expectedPeerAccountId
+            && (peerAmount :: Int) == expectedPeerAmount
+            && not (null (linkedAt :: String))
+        _ -> False
+    _ -> False
 
 financeCategoryIdValue :: Value -> String
 financeCategoryIdValue responseBody =

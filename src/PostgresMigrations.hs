@@ -176,6 +176,11 @@ financeMigrations =
       , upSqlPath = "db/migrations/finance/0004_finance_transaction_classification.up.sql"
       , downSqlPath = "db/migrations/finance/0004_finance_transaction_classification.down.sql"
       }
+  , SqlMigration
+      { migrationId = "0005_finance_transaction_links"
+      , upSqlPath = "db/migrations/finance/0005_finance_transaction_links.up.sql"
+      , downSqlPath = "db/migrations/finance/0005_finance_transaction_links.down.sql"
+      }
   ]
 
 noteMigrations :: [SqlMigration]

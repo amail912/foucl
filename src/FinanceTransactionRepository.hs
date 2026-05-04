@@ -4,7 +4,9 @@
 module FinanceTransactionRepository
   ( FinanceTransactionRepository(..)
   , FinanceTransaction(..)
+  , FinanceTransactionLinkRequest(..)
   , FinanceTransactionSplitRow(..)
+  , FinanceTransactionTransfer(..)
   , FinanceTransactionCreateRequest(..)
   , FinanceTransactionCategorizeRequest(..)
   , FinanceTransactionSplitRequest(..)
@@ -42,12 +44,19 @@ data FinanceTransactionRepository = FinanceTransactionRepository
   , repoListFinanceTransactions :: !(String -> Maybe String -> Maybe UTCTime -> Maybe UTCTime -> ExceptT RepositoryError IO [FinanceTransaction])
   , repoCategorizeFinanceTransaction :: !(String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction)
   , repoSplitFinanceTransaction :: !(String -> String -> [FinanceTransactionSplitWriteRow] -> ExceptT RepositoryError IO FinanceTransaction)
+  , repoLinkFinanceTransactions :: !(String -> String -> String -> String -> ExceptT RepositoryError IO (FinanceTransaction, FinanceTransaction))
   }
 
 data FinanceTransactionCreateRequest = FinanceTransactionCreateRequest
   { financeTransactionCreateAccountId :: !String
   , financeTransactionCreateAmount :: !Int
   , financeTransactionCreateOccurredAt :: !(Maybe String)
+  }
+
+data FinanceTransactionLinkRequest = FinanceTransactionLinkRequest
+  { financeTransactionLinkSourceTransactionId :: !String
+  , financeTransactionLinkTargetTransactionId :: !String
+  , financeTransactionLinkType :: !String
   }
 
 data FinanceTransactionCategorizeRequest = FinanceTransactionCategorizeRequest
@@ -89,8 +98,17 @@ data FinanceTransaction = FinanceTransaction
   , financeTransactionAmount :: !Int
   , financeTransactionOccurredAt :: !UTCTime
   , financeTransactionRecordedAt :: !UTCTime
+  , financeTransactionTransfer :: !(Maybe FinanceTransactionTransfer)
   , financeTransactionCategory :: !(Maybe String)
   , financeTransactionSplits :: ![FinanceTransactionSplitRow]
+  } deriving (Eq, Show)
+
+data FinanceTransactionTransfer = FinanceTransactionTransfer
+  { financeTransactionTransferLinkType :: !String
+  , financeTransactionTransferPeerTransactionId :: !String
+  , financeTransactionTransferPeerAccountId :: !String
+  , financeTransactionTransferPeerAmount :: !Int
+  , financeTransactionTransferLinkedAt :: !UTCTime
   } deriving (Eq, Show)
 
 instance FromJSON FinanceTransactionCreateRequest where
@@ -99,6 +117,13 @@ instance FromJSON FinanceTransactionCreateRequest where
       <$> value .: "accountId"
       <*> value .: "amount"
       <*> value .:? "occurredAt"
+
+instance FromJSON FinanceTransactionLinkRequest where
+  parseJSON = withObject "FinanceTransactionLinkRequest" $ \value ->
+    FinanceTransactionLinkRequest
+      <$> value .: "sourceTransactionId"
+      <*> value .: "targetTransactionId"
+      <*> value .: "linkType"
 
 instance FromJSON FinanceTransactionCategorizeRequest where
   parseJSON = withObject "FinanceTransactionCategorizeRequest" $ \value ->
@@ -121,6 +146,22 @@ instance ToJSON FinanceTransactionSplitRow where
       , "category" .= financeTransactionSplitCategory
       ]
 
+instance ToJSON FinanceTransactionTransfer where
+  toJSON FinanceTransactionTransfer
+    { financeTransactionTransferLinkType
+    , financeTransactionTransferPeerTransactionId
+    , financeTransactionTransferPeerAccountId
+    , financeTransactionTransferPeerAmount
+    , financeTransactionTransferLinkedAt
+    } =
+      object
+        [ "linkType" .= financeTransactionTransferLinkType
+        , "peerTransactionId" .= financeTransactionTransferPeerTransactionId
+        , "peerAccountId" .= financeTransactionTransferPeerAccountId
+        , "peerAmount" .= financeTransactionTransferPeerAmount
+        , "linkedAt" .= financeTransactionTransferLinkedAt
+        ]
+
 instance ToJSON FinanceTransaction where
   toJSON FinanceTransaction
     { financeTransactionId
@@ -129,6 +170,7 @@ instance ToJSON FinanceTransaction where
     , financeTransactionAmount
     , financeTransactionOccurredAt
     , financeTransactionRecordedAt
+    , financeTransactionTransfer
     , financeTransactionCategory
     , financeTransactionSplits
     } =
@@ -139,7 +181,7 @@ instance ToJSON FinanceTransaction where
         , "amount" .= financeTransactionAmount
         , "occurredAt" .= financeTransactionOccurredAt
         , "recordedAt" .= financeTransactionRecordedAt
-        , "transfer" .= (Nothing :: Maybe Value)
+        , "transfer" .= financeTransactionTransfer
         , "category" .= financeTransactionCategory
         , "splits" .= financeTransactionSplits
         , "notes" .= ([] :: [Value])
@@ -157,6 +199,7 @@ postgresFinanceTransactionRepository pool =
     , repoListFinanceTransactions = pgListFinanceTransactions pool
     , repoCategorizeFinanceTransaction = pgCategorizeFinanceTransaction pool
     , repoSplitFinanceTransaction = pgSplitFinanceTransaction pool
+    , repoLinkFinanceTransactions = pgLinkFinanceTransactions pool
     }
 
 financeTransactionPostgresHealthChecks :: Connection -> ExceptT String IO ()
@@ -191,6 +234,16 @@ financeTransactionPostgresHealthChecks conn = do
       "SELECT user_id, transaction_id, split_index, amount, category, updated_at FROM finance_transaction_splits LIMIT 0"
       :: IO [(String, String, Int, Int64, String, UTCTime)])
     (\err -> "Finance schema check failed for finance_transaction_splits: " ++ show err)
+  tryExcept
+    (query_ conn
+      "SELECT event_id, user_id, source_transaction_id, target_transaction_id, link_type, recorded_at FROM finance_transaction_link_events LIMIT 0"
+      :: IO [(String, String, String, String, String, UTCTime)])
+    (\err -> "Finance schema check failed for finance_transaction_link_events: " ++ show err)
+  tryExcept
+    (query_ conn
+      "SELECT user_id, transaction_id, peer_transaction_id, link_type, linked_at FROM finance_transaction_links LIMIT 0"
+      :: IO [(String, String, String, String, UTCTime)])
+    (\err -> "Finance schema check failed for finance_transaction_links: " ++ show err)
   pure ()
 
 pgCreateFinanceTransaction :: Pool Connection -> String -> FinanceTransactionWriteRequest -> ExceptT RepositoryError IO FinanceTransaction
@@ -261,7 +314,7 @@ pgLoadFinanceTransactionByIdInConn conn userId transactionId = do
     [] -> throwError NotFound
     [row] -> do
       base <- decodeBaseTransaction row
-      hydrateClassification conn userId base
+      hydrateTransactionDetails conn userId base
     _ -> throwError ReadFailure
 
 pgListFinanceTransactions :: Pool Connection -> String -> Maybe String -> Maybe UTCTime -> Maybe UTCTime -> ExceptT RepositoryError IO [FinanceTransaction]
@@ -269,7 +322,7 @@ pgListFinanceTransactions pool userId mAccountId mFrom mTo =
   withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
     rows <- tryExcept (runListQuery conn) mapSqlReadException
     baseRows <- mapM decodeBaseTransaction rows
-    mapM (hydrateClassification conn userId) baseRows
+    mapM (hydrateTransactionDetails conn userId) baseRows
   where
     runListQuery conn =
       case (mAccountId, mFrom, mTo) of
@@ -358,6 +411,85 @@ pgSplitFinanceTransaction pool userId transactionId splitRows =
       mapSqlWriteException
     pgLoadFinanceTransactionByIdInConn conn userId transactionId
 
+pgLinkFinanceTransactions :: Pool Connection -> String -> String -> String -> String -> ExceptT RepositoryError IO (FinanceTransaction, FinanceTransaction)
+pgLinkFinanceTransactions pool userId sourceTransactionId targetTransactionId linkType =
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    if linkType /= "transfer"
+      then throwError WriteFailure
+      else do
+        source <- loadTransactionFacts conn userId sourceTransactionId
+        target <- loadTransactionFacts conn userId targetTransactionId
+        validateTransferPair source target
+        sourceLinked <- transactionHasLink conn userId sourceTransactionId
+        targetLinked <- transactionHasLink conn userId targetTransactionId
+        if sourceLinked || targetLinked
+          then throwError AlreadyExists
+          else do
+            eventId <- liftIO (toString <$> nextRandom)
+            _ <- tryExcept
+              (withTransaction conn $ do
+                _ <- execute conn
+                  "INSERT INTO finance_transaction_link_events (event_id, user_id, source_transaction_id, target_transaction_id, link_type) VALUES (?, ?, ?, ?, ?)"
+                  (eventId, userId, sourceTransactionId, targetTransactionId, linkType)
+                _ <- execute conn
+                  "INSERT INTO finance_transaction_links (user_id, transaction_id, peer_transaction_id, link_type) VALUES (?, ?, ?, ?)"
+                  (userId, sourceTransactionId, targetTransactionId, linkType)
+                _ <- execute conn
+                  "INSERT INTO finance_transaction_links (user_id, transaction_id, peer_transaction_id, link_type) VALUES (?, ?, ?, ?)"
+                  (userId, targetTransactionId, sourceTransactionId, linkType)
+                pure ())
+              mapSqlWriteException
+            sourceTransaction <- pgLoadFinanceTransactionByIdInConn conn userId sourceTransactionId
+            targetTransaction <- pgLoadFinanceTransactionByIdInConn conn userId targetTransactionId
+            pure (sourceTransaction, targetTransaction)
+
+data TransactionFacts = TransactionFacts
+  { transactionFactsId :: !String
+  , transactionFactsDirection :: !FinanceTransactionDirection
+  , transactionFactsAccountId :: !String
+  , transactionFactsAmount :: !Int
+  }
+
+loadTransactionFacts :: Connection -> String -> String -> ExceptT RepositoryError IO TransactionFacts
+loadTransactionFacts conn userId transactionId = do
+  rows <- tryExcept
+    (query conn
+      "SELECT transaction_id, direction, account_id, amount FROM finance_transactions WHERE user_id = ? AND transaction_id = ?"
+      (userId, transactionId)
+      :: IO [(String, Text, String, Int64)])
+    mapSqlReadException
+  case rows of
+    [] -> throwError NotFound
+    [(loadedId, directionText, accountId, amount)] ->
+      case directionFromText directionText of
+        Nothing -> throwError ReadFailure
+        Just parsedDirection ->
+          pure TransactionFacts
+            { transactionFactsId = loadedId
+            , transactionFactsDirection = parsedDirection
+            , transactionFactsAccountId = accountId
+            , transactionFactsAmount = fromIntegral amount
+            }
+    _ -> throwError ReadFailure
+
+transactionHasLink :: Connection -> String -> String -> ExceptT RepositoryError IO Bool
+transactionHasLink conn userId transactionId = do
+  rows <- tryExcept
+    (query conn
+      "SELECT transaction_id FROM finance_transaction_links WHERE user_id = ? AND transaction_id = ? LIMIT 1"
+      (userId, transactionId)
+      :: IO [Only String])
+    mapSqlReadException
+  pure (not (null rows))
+
+validateTransferPair :: TransactionFacts -> TransactionFacts -> ExceptT RepositoryError IO ()
+validateTransferPair source target
+  | transactionFactsId source == transactionFactsId target = throwError WriteFailure
+  | transactionFactsAccountId source == transactionFactsAccountId target = throwError WriteFailure
+  | transactionFactsDirection source == transactionFactsDirection target = throwError WriteFailure
+  | transactionFactsAmount source /= transactionFactsAmount target = throwError WriteFailure
+  | otherwise = pure ()
+
 insertSplitRows :: Connection -> String -> String -> [FinanceTransactionSplitWriteRow] -> IO ()
 insertSplitRows _ _ _ [] = pure ()
 insertSplitRows conn userId transactionId rows =
@@ -412,8 +544,46 @@ validateCategorySlug conn userId categorySlug = do
         else throwError WriteFailure
     _ -> throwError ReadFailure
 
-hydrateClassification :: Connection -> String -> FinanceTransaction -> ExceptT RepositoryError IO FinanceTransaction
-hydrateClassification conn userId transaction = do
+hydrateTransactionDetails :: Connection -> String -> FinanceTransaction -> ExceptT RepositoryError IO FinanceTransaction
+hydrateTransactionDetails conn userId transaction = do
+  withTransfer <- hydrateTransferState conn userId transaction
+  hydrateClassificationState conn userId withTransfer
+
+hydrateTransferState :: Connection -> String -> FinanceTransaction -> ExceptT RepositoryError IO FinanceTransaction
+hydrateTransferState conn userId transaction = do
+  rows <- tryExcept
+    (query conn
+      "SELECT peer_transaction_id, link_type, linked_at FROM finance_transaction_links WHERE user_id = ? AND transaction_id = ?"
+      (userId, financeTransactionId transaction)
+      :: IO [(String, String, UTCTime)])
+    mapSqlReadException
+  case rows of
+    [] -> pure transaction { financeTransactionTransfer = Nothing }
+    [(peerTransactionId, linkType, linkedAt)] -> do
+      peerRows <- tryExcept
+        (query conn
+          "SELECT account_id, amount FROM finance_transactions WHERE user_id = ? AND transaction_id = ?"
+          (userId, peerTransactionId)
+          :: IO [(String, Int64)])
+        mapSqlReadException
+      case peerRows of
+        [(peerAccountId, peerAmount)] ->
+          pure transaction
+            { financeTransactionTransfer =
+                Just FinanceTransactionTransfer
+                  { financeTransactionTransferLinkType = linkType
+                  , financeTransactionTransferPeerTransactionId = peerTransactionId
+                  , financeTransactionTransferPeerAccountId = peerAccountId
+                  , financeTransactionTransferPeerAmount = fromIntegral peerAmount
+                  , financeTransactionTransferLinkedAt = linkedAt
+                  }
+            }
+        [] -> throwError ReadFailure
+        _ -> throwError ReadFailure
+    _ -> throwError ReadFailure
+
+hydrateClassificationState :: Connection -> String -> FinanceTransaction -> ExceptT RepositoryError IO FinanceTransaction
+hydrateClassificationState conn userId transaction = do
   splitRows <- tryExcept
     (query conn
       "SELECT amount, category FROM finance_transaction_splits WHERE user_id = ? AND transaction_id = ? ORDER BY split_index ASC"
@@ -457,6 +627,7 @@ decodeBaseTransaction (transactionId, directionText, accountId, amount, occurred
         , financeTransactionAmount = fromIntegral amount
         , financeTransactionOccurredAt = occurredAt
         , financeTransactionRecordedAt = recordedAt
+        , financeTransactionTransfer = Nothing
         , financeTransactionCategory = Nothing
         , financeTransactionSplits = []
         }

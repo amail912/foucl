@@ -1928,6 +1928,8 @@ financeMigrationUpCreatesSchema =
           classificationEventsTableExists <- fetchTableExists ctx "finance_transaction_classification_events"
           transactionCategoriesTableExists <- fetchTableExists ctx "finance_transaction_categories"
           transactionSplitsTableExists <- fetchTableExists ctx "finance_transaction_splits"
+          linkEventsTableExists <- fetchTableExists ctx "finance_transaction_link_events"
+          linksTableExists <- fetchTableExists ctx "finance_transaction_links"
           assertBool "Expected finance_account_events table to exist" eventsTableExists
           assertBool "Expected finance_accounts table to exist" projectionTableExists
           assertBool "Expected finance_transaction_events table to exist" transactionEventsTableExists
@@ -1937,6 +1939,8 @@ financeMigrationUpCreatesSchema =
           assertBool "Expected finance_transaction_classification_events table to exist" classificationEventsTableExists
           assertBool "Expected finance_transaction_categories table to exist" transactionCategoriesTableExists
           assertBool "Expected finance_transaction_splits table to exist" transactionSplitsTableExists
+          assertBool "Expected finance_transaction_link_events table to exist" linkEventsTableExists
+          assertBool "Expected finance_transaction_links table to exist" linksTableExists
 
           eventTypeType <- fetchColumnType ctx "finance_account_events" "event_type"
           normalizedNameType <- fetchColumnType ctx "finance_accounts" "normalized_name"
@@ -1947,6 +1951,8 @@ financeMigrationUpCreatesSchema =
           categorySelectableType <- fetchColumnType ctx "finance_categories" "selectable"
           classificationEventTypeType <- fetchColumnType ctx "finance_transaction_classification_events" "event_type"
           splitAmountType <- fetchColumnType ctx "finance_transaction_splits" "amount"
+          linkEventTypeType <- fetchColumnType ctx "finance_transaction_link_events" "link_type"
+          linkTypeType <- fetchColumnType ctx "finance_transaction_links" "link_type"
           assertEqual "Expected finance_account_events.event_type to be text" (Just "text") eventTypeType
           assertEqual "Expected finance_accounts.normalized_name to be text" (Just "text") normalizedNameType
           assertEqual "Expected finance_accounts.status to be text" (Just "text") statusType
@@ -1956,15 +1962,19 @@ financeMigrationUpCreatesSchema =
           assertEqual "Expected finance_categories.selectable to be boolean" (Just "boolean") categorySelectableType
           assertEqual "Expected finance_transaction_classification_events.event_type to be text" (Just "text") classificationEventTypeType
           assertEqual "Expected finance_transaction_splits.amount to be bigint" (Just "bigint") splitAmountType
+          assertEqual "Expected finance_transaction_link_events.link_type to be text" (Just "text") linkEventTypeType
+          assertEqual "Expected finance_transaction_links.link_type to be text" (Just "text") linkTypeType
 
           nameIndexExists <- fetchIndexExists ctx "finance_accounts_user_status_name_idx"
           transactionIndexExists <- fetchIndexExists ctx "finance_transactions_user_occurred_idx"
           categoryIndexExists <- fetchIndexExists ctx "finance_categories_user_parent_name_idx"
           splitIndexExists <- fetchIndexExists ctx "finance_transaction_splits_user_transaction_idx"
+          linksPeerIndexExists <- fetchIndexExists ctx "finance_transaction_links_user_peer_idx"
           assertBool "Expected finance_accounts_user_status_name_idx to exist" nameIndexExists
           assertBool "Expected finance_transactions_user_occurred_idx to exist" transactionIndexExists
           assertBool "Expected finance_categories_user_parent_name_idx to exist" categoryIndexExists
           assertBool "Expected finance_transaction_splits_user_transaction_idx to exist" splitIndexExists
+          assertBool "Expected finance_transaction_links_user_peer_idx to exist" linksPeerIndexExists
 
           insertAccount <- runSqlCommandCtx ctx "INSERT INTO finance_accounts (user_id, account_id, display_name, normalized_name, status) VALUES ('user-1', 'account-1', 'Wallet', 'wallet', 'active')"
           case insertAccount of
@@ -2024,6 +2034,8 @@ financeMigrationDownRemovesSchema =
               classificationEventsTableExists <- fetchTableExists ctx "finance_transaction_classification_events"
               transactionCategoriesTableExists <- fetchTableExists ctx "finance_transaction_categories"
               transactionSplitsTableExists <- fetchTableExists ctx "finance_transaction_splits"
+              linkEventsTableExists <- fetchTableExists ctx "finance_transaction_link_events"
+              linksTableExists <- fetchTableExists ctx "finance_transaction_links"
               assertBool "Expected finance_account_events table to be removed" (not eventsTableExists)
               assertBool "Expected finance_accounts table to be removed" (not projectionTableExists)
               assertBool "Expected finance_transaction_events table to be removed" (not transactionEventsTableExists)
@@ -2033,6 +2045,8 @@ financeMigrationDownRemovesSchema =
               assertBool "Expected finance_transaction_classification_events table to be removed" (not classificationEventsTableExists)
               assertBool "Expected finance_transaction_categories table to be removed" (not transactionCategoriesTableExists)
               assertBool "Expected finance_transaction_splits table to be removed" (not transactionSplitsTableExists)
+              assertBool "Expected finance_transaction_link_events table to be removed" (not linkEventsTableExists)
+              assertBool "Expected finance_transaction_links table to be removed" (not linksTableExists)
 
 financeMigrationReapplyAfterDown :: IO ()
 financeMigrationReapplyAfterDown =
@@ -2059,6 +2073,8 @@ financeMigrationReapplyAfterDown =
                   classificationEventsTableExists <- fetchTableExists ctx "finance_transaction_classification_events"
                   transactionCategoriesTableExists <- fetchTableExists ctx "finance_transaction_categories"
                   transactionSplitsTableExists <- fetchTableExists ctx "finance_transaction_splits"
+                  linkEventsTableExists <- fetchTableExists ctx "finance_transaction_link_events"
+                  linksTableExists <- fetchTableExists ctx "finance_transaction_links"
                   assertBool "Expected finance_account_events table to exist after reapply" eventsTableExists
                   assertBool "Expected finance_accounts table to exist after reapply" projectionTableExists
                   assertBool "Expected finance_transaction_events table to exist after reapply" transactionEventsTableExists
@@ -2068,6 +2084,8 @@ financeMigrationReapplyAfterDown =
                   assertBool "Expected finance_transaction_classification_events table to exist after reapply" classificationEventsTableExists
                   assertBool "Expected finance_transaction_categories table to exist after reapply" transactionCategoriesTableExists
                   assertBool "Expected finance_transaction_splits table to exist after reapply" transactionSplitsTableExists
+                  assertBool "Expected finance_transaction_link_events table to exist after reapply" linkEventsTableExists
+                  assertBool "Expected finance_transaction_links table to exist after reapply" linksTableExists
 
 noteMigrationUpCreatesSchema :: IO ()
 noteMigrationUpCreatesSchema =
@@ -2383,6 +2401,7 @@ financeTransactionPostgresRepositoryTests = test
   [ "Finance transaction Postgres adapter should create sent and received rows and preserve idempotent retries" ~: pgFinanceTransactionRepoCreateAndIdempotency
   , "Finance transaction Postgres adapter should reject reused idempotency keys for different requests" ~: pgFinanceTransactionRepoRejectsIdempotencyConflicts
   , "Finance transaction Postgres adapter should list deterministically with account and half-open time filters" ~: pgFinanceTransactionRepoListWithFilters
+  , "Finance transaction Postgres adapter should link valid transfer pairs and reject invalid matches" ~: pgFinanceTransactionRepoTransferLinking
   ]
 
 notePostgresRepositoryTests = test
@@ -3388,6 +3407,63 @@ pgFinanceTransactionRepoListWithFilters =
                   assertEqual "Expected unknown account filter to return an empty list" [] unknownTransactions
                 results -> assertFailure ("Unexpected finance transaction list results: " ++ show results)
             results -> assertFailure ("Expected finance account setup success for list test, got " ++ show results)
+
+pgFinanceTransactionRepoTransferLinking :: IO ()
+pgFinanceTransactionRepoTransferLinking =
+  withOptionalPostgresContext "Skipping Finance transaction Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runExceptT (runFinanceMigrationsAtPath "." schemaConn MigrateUp)
+      case upResult of
+        Left err -> assertFailure ("Expected finance migration up success, got " ++ err)
+        Right () -> do
+          pool <- mkTestPostgresPool schemaConn
+          let accountRepo = postgresFinanceAccountRepository pool
+              transactionRepo = postgresFinanceTransactionRepository pool
+              userId = "finance-transfer-user"
+          sourceAccount <- runExceptT $ repoCreateFinanceAccount accountRepo userId "Source"
+          targetAccount <- runExceptT $ repoCreateFinanceAccount accountRepo userId "Target"
+          case (sourceAccount, targetAccount) of
+            (Right source, Right target) -> do
+              sentCreated <- runExceptT $ repoCreateFinanceTransaction transactionRepo userId FinanceTransactionWriteRequest
+                { financeTransactionWriteIdempotencyKey = "transfer-link-sent"
+                , financeTransactionWriteDirection = FinanceTransactionSent
+                , financeTransactionWriteAccountId = financeAccountId source
+                , financeTransactionWriteAmount = 5000
+                , financeTransactionWriteOccurredAt = read "2026-04-10 10:00:00 UTC"
+                , financeTransactionWriteOccurredAtSupplied = True
+                }
+              receivedCreated <- runExceptT $ repoCreateFinanceTransaction transactionRepo userId FinanceTransactionWriteRequest
+                { financeTransactionWriteIdempotencyKey = "transfer-link-received"
+                , financeTransactionWriteDirection = FinanceTransactionReceived
+                , financeTransactionWriteAccountId = financeAccountId target
+                , financeTransactionWriteAmount = 5000
+                , financeTransactionWriteOccurredAt = read "2026-04-10 10:01:00 UTC"
+                , financeTransactionWriteOccurredAtSupplied = True
+                }
+              case (sentCreated, receivedCreated) of
+                (Right sentTxn, Right receivedTxn) -> do
+                  linked <- runExceptT $ repoLinkFinanceTransactions transactionRepo userId (financeTransactionId sentTxn) (financeTransactionId receivedTxn) "transfer"
+                  relinked <- runExceptT $ repoLinkFinanceTransactions transactionRepo userId (financeTransactionId sentTxn) (financeTransactionId receivedTxn) "transfer"
+                  invalidType <- runExceptT $ repoLinkFinanceTransactions transactionRepo userId (financeTransactionId sentTxn) (financeTransactionId receivedTxn) "manual"
+                  case (linked, relinked, invalidType) of
+                    (Right (linkedSource, linkedTarget), Left AlreadyExists, Left WriteFailure) -> do
+                      case financeTransactionTransfer linkedSource of
+                        Just transferSummary -> do
+                          assertEqual "Expected source transfer link type" "transfer" (financeTransactionTransferLinkType transferSummary)
+                          assertEqual "Expected source transfer peer id" (financeTransactionId receivedTxn) (financeTransactionTransferPeerTransactionId transferSummary)
+                          assertEqual "Expected source transfer peer account" (financeAccountId target) (financeTransactionTransferPeerAccountId transferSummary)
+                          assertEqual "Expected source transfer peer amount" 5000 (financeTransactionTransferPeerAmount transferSummary)
+                        Nothing -> assertFailure "Expected source transaction to include transfer summary"
+                      case financeTransactionTransfer linkedTarget of
+                        Just transferSummary -> do
+                          assertEqual "Expected target transfer link type" "transfer" (financeTransactionTransferLinkType transferSummary)
+                          assertEqual "Expected target transfer peer id" (financeTransactionId sentTxn) (financeTransactionTransferPeerTransactionId transferSummary)
+                          assertEqual "Expected target transfer peer account" (financeAccountId source) (financeTransactionTransferPeerAccountId transferSummary)
+                          assertEqual "Expected target transfer peer amount" 5000 (financeTransactionTransferPeerAmount transferSummary)
+                        Nothing -> assertFailure "Expected target transaction to include transfer summary"
+                    outcomes -> assertFailure ("Unexpected transfer link outcomes: " ++ show outcomes)
+                outcomes -> assertFailure ("Unexpected finance transaction setup outcomes for transfer linking: " ++ show outcomes)
+            outcomes -> assertFailure ("Unexpected account setup outcomes for transfer linking: " ++ show outcomes)
 
 pgNoteRepoRoundTripLifecycle :: IO ()
 pgNoteRepoRoundTripLifecycle =

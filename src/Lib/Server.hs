@@ -45,6 +45,7 @@ import FinanceTransactionRepository
   ( FinanceTransactionCreateRequest(..)
   , FinanceTransactionCategorizeRequest(..)
   , FinanceTransactionDirection(..)
+  , FinanceTransactionLinkRequest(..)
   , FinanceTransactionSplitRequest(..)
   , FinanceTransaction
   , FinanceTransactionRepository(..)
@@ -631,6 +632,7 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
           [ financeTransactionsList
           , dir "sent" (financeTransactionsCreate FinanceTransactionSent)
           , dir "received" (financeTransactionsCreate FinanceTransactionReceived)
+          , dir "link" financeTransactionsLink
           , financeTransactionsCategorize
           , financeTransactionsSplit
           ]
@@ -765,6 +767,12 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
         body <- askRq >>= takeRequestBody
         maybe (badRequest "Empty body") (handleTransactionSplitBody transactionId) body
 
+    financeTransactionsLink = do
+      nullDir
+      method POST
+      body <- askRq >>= takeRequestBody
+      maybe (badRequest "Empty body") handleTransactionLinkBody body
+
     handleTransactionCategorizeBody :: String -> RqBody -> ServerPartT IO Response
     handleTransactionCategorizeBody transactionId rqBody =
       case decode' (unBody rqBody) :: Maybe FinanceTransactionCategorizeRequest of
@@ -789,6 +797,27 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
             Left WriteFailure -> badRequest "splits must contain at least two rows, sum to the transaction amount, and use selectable categories"
             Left _ -> internalServerError emptyResponse
             Right transaction -> ok (jsonResponse transaction)
+
+    handleTransactionLinkBody :: RqBody -> ServerPartT IO Response
+    handleTransactionLinkBody rqBody =
+      case decode' (unBody rqBody) :: Maybe FinanceTransactionLinkRequest of
+        Nothing -> badRequest "Unable to decode the body as a FinanceTransactionLinkRequest"
+        Just FinanceTransactionLinkRequest
+          { financeTransactionLinkSourceTransactionId
+          , financeTransactionLinkTargetTransactionId
+          , financeTransactionLinkType
+          } ->
+            if financeTransactionLinkType /= "transfer"
+              then badRequest "linkType must be transfer"
+              else do
+                result <- liftIO $ runExceptT (repoLinkFinanceTransactions financeTransactionRepo principalUserId financeTransactionLinkSourceTransactionId financeTransactionLinkTargetTransactionId financeTransactionLinkType)
+                case result of
+                  Left NotFound -> notFound (jsonMessage "Transaction not found")
+                  Left WriteFailure -> setResponseCode 409 >> pure (jsonMessage "Invalid transfer link request")
+                  Left AlreadyExists -> setResponseCode 409 >> pure (jsonMessage "One or both transactions are already linked")
+                  Left _ -> internalServerError emptyResponse
+                  Right (sourceTransaction, targetTransaction) ->
+                    ok (jsonResponse (object ["source" .= sourceTransaction, "target" .= targetTransaction]))
 
     financeCategoriesList = do
       nullDir

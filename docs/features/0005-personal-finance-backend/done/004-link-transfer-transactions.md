@@ -14,13 +14,13 @@ As a user, I want to explicitly mark transfers between my accounts, so internal 
 - No unlink operation exists in v1.
 
 ## Data And Contracts
-- Defines `POST /transactions/link` for explicit transaction relationships.
+- Defines `POST /api/v1/finance/transactions/link` for explicit transaction relationships.
 - Request fields are `sourceTransactionId`, `targetTransactionId`, and `linkType`.
 - `linkType = transfer` is the only supported value in v1.
 - Unknown or foreign-scope transactions return `404`.
 - Already linked transactions return `409`.
 - Same-account pairs, same-direction pairs, different-amount pairs, and other invalid transfer matches return `409`.
-- Success responses return both updated transaction rows.
+- Success responses return an object with both updated transaction rows: `source` and `target`.
 - Transaction rows expose `transfer` as `null` or a full transfer object with `linkType`, `peerTransactionId`, `peerAccountId`, `peerAmount`, and `linkedAt`.
 
 ## Technical Details

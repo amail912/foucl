@@ -279,7 +279,7 @@ Rules:
 - a later split replaces the current active split state
 - success returns the current transaction row
 
-### `POST /transactions/link`
+### `POST /api/v1/finance/transactions/link`
 Creates an explicit relationship between transactions.
 
 Request fields:
@@ -294,7 +294,7 @@ Rules:
 - if either transaction is already transfer-linked, return `409`
 - if the requested link violates transfer matching rules, return `409`
 - no unlink endpoint exists in v1
-- success returns both updated transaction rows
+- success returns an object with `source` and `target` updated transaction rows
 
 ### `POST /transactions/{id}/notes`
 Appends a note to a transaction.

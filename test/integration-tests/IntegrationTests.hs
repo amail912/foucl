@@ -38,6 +38,7 @@ import Model
 noteEndpoint = "/note"
 checklistEndpoint = "/checklist"
 financeAccountsEndpoint = "/api/v1/finance/accounts"
+financeCategoriesEndpoint = "/api/v1/finance/categories"
 financeTransactionsEndpoint = "/api/v1/finance/transactions"
 financeTransactionsSentEndpoint = "/api/v1/finance/transactions/sent"
 financeTransactionsReceivedEndpoint = "/api/v1/finance/transactions/received"
@@ -381,6 +382,18 @@ runIntegrationTests = do
         assertStatusCode "Finance account close should require auth" 401 closeResp
         assertMessageResponse "Not authenticated" closeResp
 
+        listCategoriesReq <- parseRequest "GET http://localhost:8081/api/v1/finance/categories"
+        listCategoriesResp <- httpJSON $ setRequestMethod "GET" listCategoriesReq
+        assertStatusCode "Finance category list should require auth" 401 listCategoriesResp
+        assertMessageResponse "Not authenticated" listCategoriesResp
+
+        createCategoryReq <- parseRequest "POST http://localhost:8081/api/v1/finance/categories"
+        createCategoryResp <- httpJSON $ setRequestMethod "POST"
+                                        $ setRequestHeader "Content-Type" ["application/json"]
+                                        $ setRequestBodyJSON (object ["name" .= ("Wallet" :: String)]) createCategoryReq
+        assertStatusCode "Finance category create should require auth" 401 createCategoryResp
+        assertMessageResponse "Not authenticated" createCategoryResp
+
         sentReq <- parseRequest "POST http://localhost:8081/api/v1/finance/transactions/sent"
         sentResp <- httpJSON $ setRequestMethod "POST"
                               $ setRequestHeader "Content-Type" ["application/json"]
@@ -454,6 +467,79 @@ runIntegrationTests = do
         closeResp <- closeFinanceAccountExpectValue cookie "missing-account"
         assertStatusCode "Closing an unknown finance account should return 404" 404 closeResp
         assertMessageResponse "Account not found" closeResp
+
+      it "should list built-in finance categories and support user-owned category lifecycle" $ do
+        uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
+        let categoryUsername = "fin-cat-" ++ show uniquenessSuffix
+        ensureApprovedSandboxUser baseUsername categoryUsername basePassword
+        cookie <- signinOnly categoryUsername basePassword
+
+        initialCategories <- getFinanceCategories cookie
+        assertBool "Expected built-in income root category to exist" (any (\category -> financeCategoryIdValue category == "income" && not (financeCategorySelectableValue category) && financeCategoryOwnerValue category == "built_in") initialCategories)
+        assertBool "Expected built-in income salary category to exist" (any (\category -> financeCategoryIdValue category == "income.salary" && financeCategorySelectableValue category && financeCategoryOwnerValue category == "built_in") initialCategories)
+
+        customRoot <- createFinanceCategory cookie "Custom Root" Nothing
+        customRootId <- requireObjectStringField "id" customRoot
+        underBuiltIn <- createFinanceCategory cookie "Under Built In" (Just "transport")
+        underBuiltInId <- requireObjectStringField "id" underBuiltIn
+        nested <- createFinanceCategory cookie "Nested Child" (Just customRootId)
+        nestedId <- requireObjectStringField "id" nested
+
+        categoriesAfterCreate <- getFinanceCategories cookie
+        assertBool "Expected custom root category to appear in list" (any ((== customRootId) . financeCategoryIdValue) categoriesAfterCreate)
+        assertBool "Expected built-in child category to appear in list" (any ((== underBuiltInId) . financeCategoryIdValue) categoriesAfterCreate)
+        assertBool "Expected nested child category to appear in list" (any ((== nestedId) . financeCategoryIdValue) categoriesAfterCreate)
+
+        updatedNested <- updateFinanceCategory cookie nestedId "Nested Child Updated" (Just "personal")
+        assertEqual "Expected updated category name" "Nested Child Updated" (financeCategoryNameValue updatedNested)
+        assertEqual "Expected updated category parent" (Just "personal") (financeCategoryParentIdValue updatedNested)
+
+        builtInUpdateResp <- updateFinanceCategoryExpectValue cookie "income" "Nope" Nothing
+        assertStatusCode "Updating a built-in category should return 409" 409 builtInUpdateResp
+        assertMessageResponse "Built-in categories are read-only" builtInUpdateResp
+
+        builtInDeleteResp <- deleteFinanceCategoryExpectValue cookie "income"
+        assertStatusCode "Deleting a built-in category should return 409" 409 builtInDeleteResp
+        assertMessageResponse "Category cannot be deleted" builtInDeleteResp
+
+        deleteFinanceCategory cookie underBuiltInId
+        deleteFinanceCategory cookie nestedId
+        deleteFinanceCategory cookie customRootId
+        categoriesAfterDelete <- getFinanceCategories cookie
+        assertBool "Expected deleted custom root to disappear from list" (all ((/= customRootId) . financeCategoryIdValue) categoriesAfterDelete)
+        assertBool "Expected deleted nested category to disappear from list" (all ((/= nestedId) . financeCategoryIdValue) categoriesAfterDelete)
+
+      it "should reject invalid finance category parent choices and cross-user references" $ do
+        uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
+        let ownerUsername = "fin-cat-owner-" ++ show uniquenessSuffix
+            otherUsernameLocal = "fin-cat-other-" ++ show uniquenessSuffix
+        ensureApprovedSandboxUser baseUsername ownerUsername basePassword
+        ensureApprovedSandboxUser baseUsername otherUsernameLocal basePassword
+        ownerCookie <- signinOnly ownerUsername basePassword
+        otherCookie <- signinOnly otherUsernameLocal basePassword
+
+        foreignRoot <- createFinanceCategory otherCookie "Foreign Root" Nothing
+        foreignRootId <- requireObjectStringField "id" foreignRoot
+        ownerRoot <- createFinanceCategory ownerCookie "Owner Root" Nothing
+        ownerRootId <- requireObjectStringField "id" ownerRoot
+        ownerChild <- createFinanceCategory ownerCookie "Owner Child" (Just ownerRootId)
+        ownerChildId <- requireObjectStringField "id" ownerChild
+
+        invalidParentResp <- createFinanceCategoryExpectValue ownerCookie "Bad Parent" (Just "missing-parent")
+        assertStatusCode "Unknown category parent should return 400" 400 invalidParentResp
+        assertMessageResponse "parentId must reference an accessible category and must not create a cycle" invalidParentResp
+
+        foreignParentResp <- createFinanceCategoryExpectValue ownerCookie "Foreign Parent Link" (Just foreignRootId)
+        assertStatusCode "Cross-user category parent should return 400" 400 foreignParentResp
+        assertMessageResponse "parentId must reference an accessible category and must not create a cycle" foreignParentResp
+
+        cycleResp <- updateFinanceCategoryExpectValue ownerCookie ownerRootId "Owner Root" (Just ownerChildId)
+        assertStatusCode "Category cycle update should return 400" 400 cycleResp
+        assertMessageResponse "parentId must reference an accessible category and must not create a cycle" cycleResp
+
+        parentDeleteResp <- deleteFinanceCategoryExpectValue ownerCookie ownerRootId
+        assertStatusCode "Deleting a category that still has children should return 409" 409 parentDeleteResp
+        assertMessageResponse "Category cannot be deleted" parentDeleteResp
 
       it "should create sent and received finance transactions and enforce closed-account and idempotency rules" $ do
         cookie <- signinOnly baseUsername basePassword
@@ -1825,6 +1911,63 @@ closeFinanceAccountExpectValue cookie accountId = do
          $ setRequestHeader "Cookie" [BS.pack cookie]
          req
 
+createFinanceCategory :: String -> String -> Maybe String -> IO Value
+createFinanceCategory cookie name parentId = do
+  resp <- createFinanceCategoryExpectValue cookie name parentId
+  assertStatusCode "Finance category create should succeed" 200 resp
+  pure (getResponseBody resp)
+
+createFinanceCategoryExpectValue :: String -> String -> Maybe String -> IO (Response Value)
+createFinanceCategoryExpectValue cookie name parentId = do
+  req <- parseRequest ("POST http://localhost:8081" ++ financeCategoriesEndpoint)
+  let body =
+        case parentId of
+          Nothing -> object ["name" .= name]
+          Just parentCategoryId -> object ["name" .= name, "parentId" .= parentCategoryId]
+  httpJSON $ setRequestMethod "POST"
+         $ setRequestHeader "Cookie" [BS.pack cookie]
+         $ setRequestHeader "Content-Type" ["application/json"]
+         $ setRequestBodyJSON body req
+
+getFinanceCategories :: String -> IO [Value]
+getFinanceCategories cookie = do
+  req <- parseRequest ("GET http://localhost:8081" ++ financeCategoriesEndpoint)
+  resp <- httpJSON $ setRequestMethod "GET"
+                  $ setRequestHeader "Cookie" [BS.pack cookie]
+                  req
+  assertStatusCode "Finance category list should succeed" 200 (resp :: Response [Value])
+  pure (getResponseBody resp)
+
+updateFinanceCategory :: String -> String -> String -> Maybe String -> IO Value
+updateFinanceCategory cookie categoryId name parentId = do
+  resp <- updateFinanceCategoryExpectValue cookie categoryId name parentId
+  assertStatusCode "Finance category update should succeed" 200 resp
+  pure (getResponseBody resp)
+
+updateFinanceCategoryExpectValue :: String -> String -> String -> Maybe String -> IO (Response Value)
+updateFinanceCategoryExpectValue cookie categoryId name parentId = do
+  req <- parseRequest ("POST http://localhost:8081" ++ financeCategoriesEndpoint ++ "/" ++ categoryId)
+  let body =
+        case parentId of
+          Nothing -> object ["name" .= name]
+          Just parentCategoryId -> object ["name" .= name, "parentId" .= parentCategoryId]
+  httpJSON $ setRequestMethod "POST"
+         $ setRequestHeader "Cookie" [BS.pack cookie]
+         $ setRequestHeader "Content-Type" ["application/json"]
+         $ setRequestBodyJSON body req
+
+deleteFinanceCategory :: String -> String -> IO ()
+deleteFinanceCategory cookie categoryId = do
+  resp <- deleteFinanceCategoryExpectValue cookie categoryId
+  assertStatusCode "Finance category delete should succeed" 200 resp
+
+deleteFinanceCategoryExpectValue :: String -> String -> IO (Response Value)
+deleteFinanceCategoryExpectValue cookie categoryId = do
+  req <- parseRequest ("DELETE http://localhost:8081" ++ financeCategoriesEndpoint ++ "/" ++ categoryId)
+  httpJSON $ setRequestMethod "DELETE"
+         $ setRequestHeader "Cookie" [BS.pack cookie]
+         req
+
 createFinanceTransactionExpectValue :: String -> String -> String -> Value -> IO (Response Value)
 createFinanceTransactionExpectValue cookie endpoint idempotencyKey body = do
   req <- parseRequest ("POST http://localhost:8081" ++ endpoint)
@@ -1937,3 +2080,45 @@ financeTransactionIdValue responseBody =
         Just actualId -> actualId
         Nothing -> error "Expected finance transaction id field"
     _ -> error "Expected finance transaction response object"
+
+financeCategoryIdValue :: Value -> String
+financeCategoryIdValue responseBody =
+  case responseBody of
+    Object value ->
+      case parseMaybe (.: "id") value of
+        Just actualId -> actualId
+        Nothing -> error "Expected finance category id field"
+    _ -> error "Expected finance category response object"
+
+financeCategoryNameValue :: Value -> String
+financeCategoryNameValue responseBody =
+  case responseBody of
+    Object value ->
+      case parseMaybe (.: "name") value of
+        Just actualName -> actualName
+        Nothing -> error "Expected finance category name field"
+    _ -> error "Expected finance category response object"
+
+financeCategoryOwnerValue :: Value -> String
+financeCategoryOwnerValue responseBody =
+  case responseBody of
+    Object value ->
+      case parseMaybe (.: "owner") value of
+        Just actualOwner -> actualOwner
+        Nothing -> error "Expected finance category owner field"
+    _ -> error "Expected finance category response object"
+
+financeCategorySelectableValue :: Value -> Bool
+financeCategorySelectableValue responseBody =
+  case responseBody of
+    Object value ->
+      case parseMaybe (.: "selectable") value of
+        Just actualSelectable -> actualSelectable
+        Nothing -> error "Expected finance category selectable field"
+    _ -> error "Expected finance category response object"
+
+financeCategoryParentIdValue :: Value -> Maybe String
+financeCategoryParentIdValue responseBody =
+  case responseBody of
+    Object value -> parseMaybe (.: "parentId") value
+    _ -> Nothing

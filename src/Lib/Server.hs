@@ -36,6 +36,11 @@ import CalendarRepository (CalendarRepository(..))
 import Crud
 import CrudStorage (createItem, deleteItem, modifyItem)
 import FinanceAccountRepository (FinanceAccount(..), FinanceAccountCreateRequest(..), FinanceAccountRepository(..), FinanceAccountStatus(..), FinanceAccountStatusFilter(..), normalizeFinanceAccountName, parseFinanceAccountStatusFilter)
+import FinanceCategoryRepository
+  ( FinanceCategoryRepository(..)
+  , FinanceCategoryWriteRequest(..)
+  , normalizeFinanceCategoryName
+  )
 import FinanceTransactionRepository
   ( FinanceTransactionCreateRequest(..)
   , FinanceTransactionDirection(..)
@@ -306,8 +311,8 @@ instance ToServerResponse AuthError where
   toServerResponse (ResourceConflict message) = setResponseCode 409 >> pure (jsonMessage message)
   toServerResponse (TechnicalError _) = internalServerError $ jsonMessage "Unable to process authentication"
 
-apiController :: AuthRepository -> CalendarRepository -> TripSharingRepository -> FinanceAccountRepository -> FinanceTransactionRepository -> NoteRepository -> ChecklistRepository -> MVar [UTCTime] -> FilePath -> AppConfig -> SessionStore -> ServerPartT IO Response
-apiController authRepo calendarRepo tripSharingRepo financeAccountRepo financeTransactionRepo noteRepo checklistRepo signupRateLimitState tmpDir appConfig sessionStore =
+apiController :: AuthRepository -> CalendarRepository -> TripSharingRepository -> FinanceAccountRepository -> FinanceCategoryRepository -> FinanceTransactionRepository -> NoteRepository -> ChecklistRepository -> MVar [UTCTime] -> FilePath -> AppConfig -> SessionStore -> ServerPartT IO Response
+apiController authRepo calendarRepo tripSharingRepo financeAccountRepo financeCategoryRepo financeTransactionRepo noteRepo checklistRepo signupRateLimitState tmpDir appConfig sessionStore =
   let sessionCfg = sessionConfig appConfig
       bootstrapAdmin = bootstrapAdminUsername appConfig
   in dir "api" $ msum [ signupController authRepo signupRateLimitState tmpDir bootstrapAdmin
@@ -321,7 +326,7 @@ apiController authRepo calendarRepo tripSharingRepo financeAccountRepo financeTr
                             [ dir "trip-places" $ requireAuth sessionCfg sessionStore tripPlacesController
                             , dir "trip-sharing" $ requireAuth sessionCfg sessionStore (tripSharingController authRepo tripSharingRepo calendarRepo)
                             , dir "calendar-items" $ requireAuth sessionCfg sessionStore (agendaController calendarRepo)
-                            , dir "finance" $ requireAuth sessionCfg sessionStore (financeController financeAccountRepo financeTransactionRepo)
+                            , dir "finance" $ requireAuth sessionCfg sessionStore (financeController financeAccountRepo financeCategoryRepo financeTransactionRepo)
                             , dir "admin" $ requireAuth sessionCfg sessionStore (adminController authRepo bootstrapAdmin)
                             ]
                       ]
@@ -603,14 +608,21 @@ tripPlacesController _ = do
   method GET
   ok (jsonResponse tripPlacesCatalog)
 
-financeController :: FinanceAccountRepository -> FinanceTransactionRepository -> AppContext -> ServerPartT IO Response
-financeController financeAccountRepo financeTransactionRepo AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
+financeController :: FinanceAccountRepository -> FinanceCategoryRepository -> FinanceTransactionRepository -> AppContext -> ServerPartT IO Response
+financeController financeAccountRepo financeCategoryRepo financeTransactionRepo AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
   msum
     [ dir "accounts" $
         msum
           [ financeAccountsList
           , financeAccountsCreate
           , financeAccountsClose
+          ]
+    , dir "categories" $
+        msum
+          [ financeCategoriesList
+          , financeCategoriesCreate
+          , financeCategoriesUpdate
+          , financeCategoriesDelete
           ]
     , dir "transactions" $
         msum
@@ -734,6 +746,68 @@ financeController financeAccountRepo financeTransactionRepo AppContext { session
               case result of
                 Left _ -> internalServerError emptyResponse
                 Right transactions -> ok (jsonResponse transactions)
+
+    financeCategoriesList = do
+      nullDir
+      method GET
+      result <- liftIO $ runExceptT (repoListFinanceCategories financeCategoryRepo principalUserId)
+      case result of
+        Left _ -> internalServerError emptyResponse
+        Right categories -> ok (jsonResponse categories)
+
+    financeCategoriesCreate = do
+      nullDir
+      method POST
+      body <- askRq >>= takeRequestBody
+      maybe (badRequest "Empty body") handleCategoryCreateBody body
+
+    financeCategoriesUpdate = path $ \categoryId -> do
+      nullDir
+      method POST
+      body <- askRq >>= takeRequestBody
+      maybe (badRequest "Empty body") (handleCategoryUpdateBody categoryId) body
+
+    financeCategoriesDelete = path $ \categoryId -> do
+      nullDir
+      method DELETE
+      result <- liftIO $ runExceptT (repoDeleteFinanceCategory financeCategoryRepo principalUserId categoryId)
+      case result of
+        Left NotFound -> notFound (jsonMessage "Category not found")
+        Left AlreadyExists -> setResponseCode 409 >> pure (jsonMessage "Category cannot be deleted")
+        Left _ -> internalServerError emptyResponse
+        Right () -> ok emptyResponse
+
+    handleCategoryCreateBody :: RqBody -> ServerPartT IO Response
+    handleCategoryCreateBody rqBody =
+      case decode' (unBody rqBody) :: Maybe FinanceCategoryWriteRequest of
+        Nothing -> badRequest "Unable to decode the body as a FinanceCategoryWriteRequest"
+        Just writeRequest@FinanceCategoryWriteRequest { financeCategoryWriteName } ->
+          case normalizeFinanceCategoryName financeCategoryWriteName of
+            Nothing -> badRequest "name must not be empty"
+            Just normalizedName -> do
+              let normalizedRequest = writeRequest { financeCategoryWriteName = normalizedName }
+              result <- liftIO $ runExceptT (repoCreateFinanceCategory financeCategoryRepo principalUserId normalizedRequest)
+              case result of
+                Left WriteFailure -> badRequest "parentId must reference an accessible category and must not create a cycle"
+                Left _ -> internalServerError emptyResponse
+                Right category -> ok (jsonResponse category)
+
+    handleCategoryUpdateBody :: String -> RqBody -> ServerPartT IO Response
+    handleCategoryUpdateBody categoryId rqBody =
+      case decode' (unBody rqBody) :: Maybe FinanceCategoryWriteRequest of
+        Nothing -> badRequest "Unable to decode the body as a FinanceCategoryWriteRequest"
+        Just writeRequest@FinanceCategoryWriteRequest { financeCategoryWriteName } ->
+          case normalizeFinanceCategoryName financeCategoryWriteName of
+            Nothing -> badRequest "name must not be empty"
+            Just normalizedName -> do
+              let normalizedRequest = writeRequest { financeCategoryWriteName = normalizedName }
+              result <- liftIO $ runExceptT (repoUpdateFinanceCategory financeCategoryRepo principalUserId categoryId normalizedRequest)
+              case result of
+                Left NotFound -> notFound (jsonMessage "Category not found")
+                Left AlreadyExists -> setResponseCode 409 >> pure (jsonMessage "Built-in categories are read-only")
+                Left WriteFailure -> badRequest "parentId must reference an accessible category and must not create a cycle"
+                Left _ -> internalServerError emptyResponse
+                Right category -> ok (jsonResponse category)
 
     parseQueryTime :: String -> Maybe String -> Either String (Maybe UTCTime)
     parseQueryTime _ Nothing = Right Nothing

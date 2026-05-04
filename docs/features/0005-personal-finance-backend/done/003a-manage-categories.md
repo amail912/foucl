@@ -13,15 +13,16 @@ As a user, I want a stable category tree with built-in and personal categories, 
 - Top-level built-in categories are not selectable.
 - Any non-top-level category is selectable, even when it has children.
 - User-owned categories may be created under built-in or user-owned parents.
-- Deleting a user-owned category is allowed only when it is not referenced by current transaction categorization or active split state.
+- Deleting a user-owned category is allowed only when it has no child categories and is not referenced by current transaction categorization or active split state.
 
 ## Data And Contracts
-- Defines `GET /categories`, `POST /categories`, `POST /categories/{id}`, and `DELETE /categories/{id}`.
+- Defines `GET /api/v1/finance/categories`, `POST /api/v1/finance/categories`, `POST /api/v1/finance/categories/{id}`, and `DELETE /api/v1/finance/categories/{id}`.
 - Category rows expose `id`, `name`, `parentId`, `owner`, and `selectable`.
-- `POST /categories` and `POST /categories/{id}` accept `name` and optional `parentId`.
+- `POST /api/v1/finance/categories` and `POST /api/v1/finance/categories/{id}` accept `name` and optional `parentId`.
 - Built-in categories remain read-only through public write endpoints and reject update or delete with `409`.
 - Invalid parent ids, cross-user parent references, and attempted parent cycles return `400`.
 - Deleting a referenced user-owned category returns `409`.
+- Deleting a user-owned category that still has child categories returns `409`.
 - The canonical v1 built-in category tree is:
 
 ```text
@@ -116,7 +117,7 @@ Uncategorized
 ## Technical Details
 - Category ids must remain stable so transaction classification history remains durable.
 - The effective category tree should combine built-in and user-owned categories in one authenticated read model.
-- Built-in category ids should be seeded deterministically as part of the backend contract.
+- Built-in category ids should be seeded deterministically as public slug ids as part of the backend contract.
 - Selection validation must reject only top-level built-in categories, not all non-leaf categories.
 - Reference checks for delete must cover active whole-transaction categorization and active split state.
 - No built-in transfer category exists in v1 because internal movement is modeled through explicit transfer links.
@@ -131,6 +132,7 @@ Uncategorized
 - Updating or deleting a built-in category through public write endpoints returns `409`.
 - Creating or updating a category with an invalid parent, cross-user parent, or parent cycle returns `400`.
 - Deleting a referenced user-owned category returns `409`.
+- Deleting a user-owned category with child categories returns `409`.
 - Deleting an unreferenced user-owned category succeeds.
 
 ## Rollout And Compatibility

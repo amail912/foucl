@@ -61,7 +61,7 @@ Rules:
 - closed accounts remain readable through `GET /accounts?status=closed` and `GET /accounts?status=all`
 
 ## Categories
-### `GET /categories`
+### `GET /api/v1/finance/categories`
 Returns the effective category tree for the authenticated user.
 
 Response fields per category:
@@ -75,11 +75,12 @@ Rules:
 - the effective tree includes backend-owned built-in categories and user-owned categories
 - each category has at most one parent in v1
 - built-in categories are read-only
+- built-in category ids use deterministic slug ids, for example `income.salary` and `uncategorized.expense`
 - built-in top-level categories are non-selectable
 - non-top-level categories are selectable even when they have children
 - built-in category names are explicit and self-describing without requiring path-only disambiguation
 
-### `POST /categories`
+### `POST /api/v1/finance/categories`
 Creates a user-owned category.
 
 Request fields:
@@ -90,7 +91,7 @@ Rules:
 - user-owned categories may be created with no parent or under a built-in or user-owned parent
 - invalid parent ids, cross-user parent references, and attempted parent cycles return `400`
 
-### `POST /categories/{id}`
+### `POST /api/v1/finance/categories/{id}`
 Updates a user-owned category.
 
 Request fields:
@@ -102,11 +103,12 @@ Rules:
 - invalid parent ids, cross-user parent references, and attempted parent cycles return `400`
 - built-in categories cannot be updated and return `409`
 
-### `DELETE /categories/{id}`
+### `DELETE /api/v1/finance/categories/{id}`
 Deletes a user-owned category.
 
 Rules:
 - deleting a category that is still referenced by current transaction categorization or active split state returns `409`
+- deleting a category that still has child categories returns `409`
 - built-in categories cannot be updated or deleted through public write endpoints
 - deleting a built-in category returns `409`
 - no category defaults exist in v1

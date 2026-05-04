@@ -274,9 +274,10 @@ Draft shape:
 - `status=all` returns active and closed accounts
 
 ### Categories
-- `GET /categories` returns the effective tree for the authenticated user
+- `GET /api/v1/finance/categories` returns the effective tree for the authenticated user
 - category rows expose `id`, `name`, `parentId`, ownership summary, and `selectable`
 - top-level built-in categories are non-selectable and all deeper categories are selectable
+- built-in category ids are deterministic path-like slugs
 - `Uncategorized` built-ins remain part of the category tree and also participate in report-side `uncategorized` filtering
 
 ### Transactions

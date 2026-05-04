@@ -13,7 +13,7 @@ import Model (Identifiable(..), NoteContent(..), ChecklistContent(..), Checklist
 import System.Directory (removeDirectoryRecursive, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, getCurrentDirectory, getPermissions, setPermissions, setCurrentDirectory, Permissions(..))
 import Data.Maybe (fromJust)
 import Data.Either (isRight)
-import Data.List ((\\), sort, sortOn, isInfixOf, isPrefixOf)
+import Data.List ((\\), find, sort, sortOn, isInfixOf, isPrefixOf)
 import Control.Monad (when)
 import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import Control.Monad.Trans.Except (ExceptT(..), runExceptT, throwE)
@@ -30,6 +30,7 @@ import AgendaStorage
 import TripSharingStorage
 import CalendarRepository
 import FinanceAccountRepository
+import FinanceCategoryRepository
 import FinanceTransactionRepository
 import TripSharingRepository
 import NotesChecklistRepository
@@ -43,6 +44,7 @@ import Lib
   , makePostgresCalendarRepository
   , makePostgresTripSharingRepository
   , makePostgresFinanceAccountRepository
+  , makePostgresFinanceCategoryRepository
   , makePostgresFinanceTransactionRepository
   , makePostgresNoteRepository
   , makePostgresChecklistRepository
@@ -72,7 +74,7 @@ import Database.PostgreSQL.Simple (Connection, close, connectPostgreSQL)
 import System.FilePath ((</>))
 
 runUnitTests :: IO ()
-runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, notesChecklistRepositoryContractTests, agendaStorageTests, tripSharingStorageTests, calendarRepositoryTests, tripSharingRepositoryTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionBackendConfigTests, calendarBackendConfigTests, tripSharingBackendConfigTests, noteBackendConfigTests, checklistBackendConfigTests, startupMigrationDomainSelectionTests, postgresMigrationTests, sessionTests, sessionFilesystemAdapterTests, sessionPostgresRepositoryTests, calendarPostgresRepositoryTests, tripSharingPostgresRepositoryTests, financeAccountPostgresRepositoryTests, financeTransactionPostgresRepositoryTests, notePostgresRepositoryTests, checklistPostgresRepositoryTests]
+runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, notesChecklistRepositoryContractTests, agendaStorageTests, tripSharingStorageTests, calendarRepositoryTests, tripSharingRepositoryTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionBackendConfigTests, calendarBackendConfigTests, tripSharingBackendConfigTests, noteBackendConfigTests, checklistBackendConfigTests, startupMigrationDomainSelectionTests, postgresMigrationTests, sessionTests, sessionFilesystemAdapterTests, sessionPostgresRepositoryTests, calendarPostgresRepositoryTests, tripSharingPostgresRepositoryTests, financeAccountPostgresRepositoryTests, financeCategoryPostgresRepositoryTests, financeTransactionPostgresRepositoryTests, notePostgresRepositoryTests, checklistPostgresRepositoryTests]
 
 runTestTTAndExit tests = do
   c <- runTestTT tests
@@ -1922,27 +1924,35 @@ financeMigrationUpCreatesSchema =
           transactionEventsTableExists <- fetchTableExists ctx "finance_transaction_events"
           transactionsTableExists <- fetchTableExists ctx "finance_transactions"
           idempotencyTableExists <- fetchTableExists ctx "finance_transaction_idempotency"
+          categoriesTableExists <- fetchTableExists ctx "finance_categories"
           assertBool "Expected finance_account_events table to exist" eventsTableExists
           assertBool "Expected finance_accounts table to exist" projectionTableExists
           assertBool "Expected finance_transaction_events table to exist" transactionEventsTableExists
           assertBool "Expected finance_transactions table to exist" transactionsTableExists
           assertBool "Expected finance_transaction_idempotency table to exist" idempotencyTableExists
+          assertBool "Expected finance_categories table to exist" categoriesTableExists
 
           eventTypeType <- fetchColumnType ctx "finance_account_events" "event_type"
           normalizedNameType <- fetchColumnType ctx "finance_accounts" "normalized_name"
           statusType <- fetchColumnType ctx "finance_accounts" "status"
           transactionDirectionType <- fetchColumnType ctx "finance_transactions" "direction"
           idempotencyFlagType <- fetchColumnType ctx "finance_transaction_idempotency" "occurred_at_supplied"
+          categoryOwnerType <- fetchColumnType ctx "finance_categories" "owner"
+          categorySelectableType <- fetchColumnType ctx "finance_categories" "selectable"
           assertEqual "Expected finance_account_events.event_type to be text" (Just "text") eventTypeType
           assertEqual "Expected finance_accounts.normalized_name to be text" (Just "text") normalizedNameType
           assertEqual "Expected finance_accounts.status to be text" (Just "text") statusType
           assertEqual "Expected finance_transactions.direction to be text" (Just "text") transactionDirectionType
           assertEqual "Expected finance_transaction_idempotency.occurred_at_supplied to be boolean" (Just "boolean") idempotencyFlagType
+          assertEqual "Expected finance_categories.owner to be text" (Just "text") categoryOwnerType
+          assertEqual "Expected finance_categories.selectable to be boolean" (Just "boolean") categorySelectableType
 
           nameIndexExists <- fetchIndexExists ctx "finance_accounts_user_status_name_idx"
           transactionIndexExists <- fetchIndexExists ctx "finance_transactions_user_occurred_idx"
+          categoryIndexExists <- fetchIndexExists ctx "finance_categories_user_parent_name_idx"
           assertBool "Expected finance_accounts_user_status_name_idx to exist" nameIndexExists
           assertBool "Expected finance_transactions_user_occurred_idx to exist" transactionIndexExists
+          assertBool "Expected finance_categories_user_parent_name_idx to exist" categoryIndexExists
 
           insertAccount <- runSqlCommandCtx ctx "INSERT INTO finance_accounts (user_id, account_id, display_name, normalized_name, status) VALUES ('user-1', 'account-1', 'Wallet', 'wallet', 'active')"
           case insertAccount of
@@ -1967,6 +1977,20 @@ financeMigrationUpCreatesSchema =
               Left _ -> True
               Right () -> False
 
+          builtinCategoryCount <- runScalarQueryCtx ctx "SELECT COUNT(*) FROM finance_categories WHERE user_id IS NULL"
+          case builtinCategoryCount of
+            Right raw ->
+              case reads (trimTrailingNewline raw) :: [(Int, String)] of
+                [(count, "")] -> assertBool "Expected built-in finance categories to be seeded" (count > 10)
+                _ -> assertFailure ("Expected builtin category count to parse, got " ++ raw)
+            Left err -> assertFailure ("Expected builtin category count query success, got " ++ err)
+
+          invalidCategoryOwner <- runSqlCommandCtx ctx "INSERT INTO finance_categories (category_id, user_id, name, parent_id, owner, selectable) VALUES ('broken-category', NULL, 'Broken', NULL, 'unknown', TRUE)"
+          assertBool "Expected invalid finance category owner insert to fail due to CHECK constraint" $
+            case invalidCategoryOwner of
+              Left _ -> True
+              Right () -> False
+
 financeMigrationDownRemovesSchema :: IO ()
 financeMigrationDownRemovesSchema =
   withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
@@ -1984,11 +2008,13 @@ financeMigrationDownRemovesSchema =
               transactionEventsTableExists <- fetchTableExists ctx "finance_transaction_events"
               transactionsTableExists <- fetchTableExists ctx "finance_transactions"
               idempotencyTableExists <- fetchTableExists ctx "finance_transaction_idempotency"
+              categoriesTableExists <- fetchTableExists ctx "finance_categories"
               assertBool "Expected finance_account_events table to be removed" (not eventsTableExists)
               assertBool "Expected finance_accounts table to be removed" (not projectionTableExists)
               assertBool "Expected finance_transaction_events table to be removed" (not transactionEventsTableExists)
               assertBool "Expected finance_transactions table to be removed" (not transactionsTableExists)
               assertBool "Expected finance_transaction_idempotency table to be removed" (not idempotencyTableExists)
+              assertBool "Expected finance_categories table to be removed" (not categoriesTableExists)
 
 financeMigrationReapplyAfterDown :: IO ()
 financeMigrationReapplyAfterDown =
@@ -2011,11 +2037,13 @@ financeMigrationReapplyAfterDown =
                   transactionEventsTableExists <- fetchTableExists ctx "finance_transaction_events"
                   transactionsTableExists <- fetchTableExists ctx "finance_transactions"
                   idempotencyTableExists <- fetchTableExists ctx "finance_transaction_idempotency"
+                  categoriesTableExists <- fetchTableExists ctx "finance_categories"
                   assertBool "Expected finance_account_events table to exist after reapply" eventsTableExists
                   assertBool "Expected finance_accounts table to exist after reapply" projectionTableExists
                   assertBool "Expected finance_transaction_events table to exist after reapply" transactionEventsTableExists
                   assertBool "Expected finance_transactions table to exist after reapply" transactionsTableExists
                   assertBool "Expected finance_transaction_idempotency table to exist after reapply" idempotencyTableExists
+                  assertBool "Expected finance_categories table to exist after reapply" categoriesTableExists
 
 noteMigrationUpCreatesSchema :: IO ()
 noteMigrationUpCreatesSchema =
@@ -2318,6 +2346,13 @@ financeAccountPostgresRepositoryTests = test
   , "Finance account Postgres adapter should reject duplicate normalized names" ~: pgFinanceAccountRepoDuplicateNormalizedNameReturnsAlreadyExists
   , "Finance account Postgres adapter should close accounts idempotently and return NotFound for missing ids" ~: pgFinanceAccountRepoCloseLifecycle
   , "Finance account Postgres adapter should filter by status and keep users isolated" ~: pgFinanceAccountRepoStatusFilteringAndIsolation
+  ]
+
+financeCategoryPostgresRepositoryTests = test
+  [ "Finance category Postgres adapter should list seeded built-ins and user-owned categories together" ~: pgFinanceCategoryRepoListsBuiltInsAndUserCategories
+  , "Finance category Postgres adapter should create, update, and delete user-owned categories" ~: pgFinanceCategoryRepoCreateUpdateDeleteLifecycle
+  , "Finance category Postgres adapter should reject invalid parents and category cycles" ~: pgFinanceCategoryRepoRejectsInvalidParentAndCycles
+  , "Finance category Postgres adapter should protect built-ins and non-empty parent categories from delete" ~: pgFinanceCategoryRepoProtectsBuiltInsAndParentDeletes
   ]
 
 financeTransactionPostgresRepositoryTests = test
@@ -3017,6 +3052,161 @@ pgFinanceAccountRepoCloseLifecycle =
                   assertEqual "Expected second close to stay idempotent and return the same closed projection" firstClosed secondClosed
                 (firstResult, secondResult, missingResult) ->
                   assertFailure ("Unexpected finance account close results: " ++ show (firstResult, secondResult, missingResult))
+
+pgFinanceCategoryRepoListsBuiltInsAndUserCategories :: IO ()
+pgFinanceCategoryRepoListsBuiltInsAndUserCategories =
+  withOptionalPostgresContext "Skipping Finance category Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runExceptT (runFinanceMigrationsAtPath "." schemaConn MigrateUp)
+      case upResult of
+        Left err -> assertFailure ("Expected finance migration up success, got " ++ err)
+        Right () -> do
+          pool <- mkTestPostgresPool schemaConn
+          let repo = postgresFinanceCategoryRepository pool
+              userId = "finance-category-user"
+          rootCreate <- runExceptT $ repoCreateFinanceCategory repo userId FinanceCategoryWriteRequest
+            { financeCategoryWriteName = "Custom Root"
+            , financeCategoryWriteParentId = Nothing
+            }
+          childCreate <- runExceptT $ repoCreateFinanceCategory repo userId FinanceCategoryWriteRequest
+            { financeCategoryWriteName = "Commute Extension"
+            , financeCategoryWriteParentId = Just "transport"
+            }
+          case (rootCreate, childCreate) of
+            (Right rootCategory, Right childCategory) -> do
+              listed <- runExceptT $ repoListFinanceCategories repo userId
+              case listed of
+                Left err -> assertFailure ("Expected finance category list success, got " ++ show err)
+                Right categories -> do
+                  let incomeRoot = find (\category -> financeCategoryId category == "income") categories
+                      salaryLeaf = find (\category -> financeCategoryId category == "income.salary") categories
+                      listedRoot = find (\category -> financeCategoryId category == financeCategoryId rootCategory) categories
+                      listedChild = find (\category -> financeCategoryId category == financeCategoryId childCategory) categories
+                  case incomeRoot of
+                    Just category -> do
+                      assertEqual "Expected income root owner to be built-in" FinanceCategoryBuiltIn (financeCategoryOwner category)
+                      assertEqual "Expected income root to be non-selectable" False (financeCategorySelectable category)
+                    Nothing -> assertFailure "Expected seeded income root category to exist"
+                  case salaryLeaf of
+                    Just category -> do
+                      assertEqual "Expected income salary owner to be built-in" FinanceCategoryBuiltIn (financeCategoryOwner category)
+                      assertEqual "Expected income salary to be selectable" True (financeCategorySelectable category)
+                    Nothing -> assertFailure "Expected seeded income salary category to exist"
+                  case (listedRoot, listedChild) of
+                    (Just rootCategoryRead, Just childCategoryRead) -> do
+                      assertEqual "Expected custom root to stay user-owned" FinanceCategoryUser (financeCategoryOwner rootCategoryRead)
+                      assertEqual "Expected custom child parent to reference built-in transport root" (Just "transport") (financeCategoryParentId childCategoryRead)
+                    _ -> assertFailure "Expected custom categories to appear in the effective list"
+            results -> assertFailure ("Unexpected finance category create results: " ++ show results)
+
+pgFinanceCategoryRepoCreateUpdateDeleteLifecycle :: IO ()
+pgFinanceCategoryRepoCreateUpdateDeleteLifecycle =
+  withOptionalPostgresContext "Skipping Finance category Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runExceptT (runFinanceMigrationsAtPath "." schemaConn MigrateUp)
+      case upResult of
+        Left err -> assertFailure ("Expected finance migration up success, got " ++ err)
+        Right () -> do
+          pool <- mkTestPostgresPool schemaConn
+          let repo = postgresFinanceCategoryRepository pool
+              userId = "finance-category-update-user"
+          created <- runExceptT $ repoCreateFinanceCategory repo userId FinanceCategoryWriteRequest
+            { financeCategoryWriteName = "Fuel Notes"
+            , financeCategoryWriteParentId = Just "transport"
+            }
+          case created of
+            Left err -> assertFailure ("Expected finance category create success, got " ++ show err)
+            Right category -> do
+              updated <- runExceptT $ repoUpdateFinanceCategory repo userId (financeCategoryId category) FinanceCategoryWriteRequest
+                { financeCategoryWriteName = "Fuel Notes Updated"
+                , financeCategoryWriteParentId = Just "personal"
+                }
+              case updated of
+                Left err -> assertFailure ("Expected finance category update success, got " ++ show err)
+                Right updatedCategory -> do
+                  assertEqual "Expected updated name" "Fuel Notes Updated" (financeCategoryName updatedCategory)
+                  assertEqual "Expected updated parent id" (Just "personal") (financeCategoryParentId updatedCategory)
+                  deleteResult <- runExceptT $ repoDeleteFinanceCategory repo userId (financeCategoryId updatedCategory)
+                  missingDeleteResult <- runExceptT $ repoDeleteFinanceCategory repo userId (financeCategoryId updatedCategory)
+                  case (deleteResult, missingDeleteResult) of
+                    (Right (), Left NotFound) -> pure ()
+                    results -> assertFailure ("Unexpected finance category delete results: " ++ show results)
+
+pgFinanceCategoryRepoRejectsInvalidParentAndCycles :: IO ()
+pgFinanceCategoryRepoRejectsInvalidParentAndCycles =
+  withOptionalPostgresContext "Skipping Finance category Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runExceptT (runFinanceMigrationsAtPath "." schemaConn MigrateUp)
+      case upResult of
+        Left err -> assertFailure ("Expected finance migration up success, got " ++ err)
+        Right () -> do
+          pool <- mkTestPostgresPool schemaConn
+          let repo = postgresFinanceCategoryRepository pool
+          ownerCategory <- runExceptT $ repoCreateFinanceCategory repo "user-a" FinanceCategoryWriteRequest
+            { financeCategoryWriteName = "Parent"
+            , financeCategoryWriteParentId = Nothing
+            }
+          foreignCategory <- runExceptT $ repoCreateFinanceCategory repo "user-b" FinanceCategoryWriteRequest
+            { financeCategoryWriteName = "Foreign Parent"
+            , financeCategoryWriteParentId = Nothing
+            }
+          case (ownerCategory, foreignCategory) of
+            (Right parentCategory, Right otherUserCategory) -> do
+              childCategory <- runExceptT $ repoCreateFinanceCategory repo "user-a" FinanceCategoryWriteRequest
+                { financeCategoryWriteName = "Child"
+                , financeCategoryWriteParentId = Just (financeCategoryId parentCategory)
+                }
+              invalidParent <- runExceptT $ repoCreateFinanceCategory repo "user-a" FinanceCategoryWriteRequest
+                { financeCategoryWriteName = "Invalid Parent"
+                , financeCategoryWriteParentId = Just "missing-parent"
+                }
+              foreignParent <- runExceptT $ repoCreateFinanceCategory repo "user-a" FinanceCategoryWriteRequest
+                { financeCategoryWriteName = "Foreign Parent Link"
+                , financeCategoryWriteParentId = Just (financeCategoryId otherUserCategory)
+                }
+              case childCategory of
+                Left err -> assertFailure ("Expected finance child category create success, got " ++ show err)
+                Right createdChild -> do
+                  cycleUpdate <- runExceptT $ repoUpdateFinanceCategory repo "user-a" (financeCategoryId parentCategory) FinanceCategoryWriteRequest
+                    { financeCategoryWriteName = "Parent"
+                    , financeCategoryWriteParentId = Just (financeCategoryId createdChild)
+                    }
+                  case (invalidParent, foreignParent, cycleUpdate) of
+                    (Left WriteFailure, Left WriteFailure, Left WriteFailure) -> pure ()
+                    results -> assertFailure ("Unexpected invalid parent or cycle results: " ++ show results)
+            results -> assertFailure ("Unexpected finance category setup results: " ++ show results)
+
+pgFinanceCategoryRepoProtectsBuiltInsAndParentDeletes :: IO ()
+pgFinanceCategoryRepoProtectsBuiltInsAndParentDeletes =
+  withOptionalPostgresContext "Skipping Finance category Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runExceptT (runFinanceMigrationsAtPath "." schemaConn MigrateUp)
+      case upResult of
+        Left err -> assertFailure ("Expected finance migration up success, got " ++ err)
+        Right () -> do
+          pool <- mkTestPostgresPool schemaConn
+          let repo = postgresFinanceCategoryRepository pool
+              userId = "finance-category-protected-user"
+          parentCategory <- runExceptT $ repoCreateFinanceCategory repo userId FinanceCategoryWriteRequest
+            { financeCategoryWriteName = "Deletable Parent"
+            , financeCategoryWriteParentId = Nothing
+            }
+          case parentCategory of
+            Left err -> assertFailure ("Expected finance parent category create success, got " ++ show err)
+            Right createdParent -> do
+              childCreate <- runExceptT $ repoCreateFinanceCategory repo userId FinanceCategoryWriteRequest
+                { financeCategoryWriteName = "Nested Child"
+                , financeCategoryWriteParentId = Just (financeCategoryId createdParent)
+                }
+              builtInUpdate <- runExceptT $ repoUpdateFinanceCategory repo userId "income" FinanceCategoryWriteRequest
+                { financeCategoryWriteName = "Nope"
+                , financeCategoryWriteParentId = Nothing
+                }
+              builtInDelete <- runExceptT $ repoDeleteFinanceCategory repo userId "income"
+              parentDelete <- runExceptT $ repoDeleteFinanceCategory repo userId (financeCategoryId createdParent)
+              case (childCreate, builtInUpdate, builtInDelete, parentDelete) of
+                (Right _, Left AlreadyExists, Left AlreadyExists, Left AlreadyExists) -> pure ()
+                results -> assertFailure ("Unexpected protected category results: " ++ show results)
 
 pgFinanceTransactionRepoCreateAndIdempotency :: IO ()
 pgFinanceTransactionRepoCreateAndIdempotency =

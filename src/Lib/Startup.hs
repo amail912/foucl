@@ -10,6 +10,7 @@ module Lib.Startup
   , makePostgresCalendarRepository
   , makePostgresTripSharingRepository
   , makePostgresFinanceAccountRepository
+  , makePostgresFinanceCategoryRepository
   , makePostgresFinanceTransactionRepository
   , makePostgresNoteRepository
   , makePostgresChecklistRepository
@@ -35,6 +36,7 @@ import Auth (AuthRepository, defaultAuthRepository)
 import qualified AuthRepository
 import CalendarRepository (CalendarRepository, defaultCalendarRepository, postgresCalendarRepository, calendarPostgresHealthChecks)
 import FinanceAccountRepository (FinanceAccountRepository, financeAccountPostgresHealthChecks, postgresFinanceAccountRepository)
+import FinanceCategoryRepository (FinanceCategoryRepository, financeCategoryPostgresHealthChecks, postgresFinanceCategoryRepository)
 import FinanceTransactionRepository (FinanceTransactionRepository, financeTransactionPostgresHealthChecks, postgresFinanceTransactionRepository)
 import Happstack.Server (Conf(..), askRq, nullConf, simpleHTTP)
 import Lib.Config
@@ -84,6 +86,7 @@ data DomainRepositories = DomainRepositories
   { domainCalendarRepo :: !CalendarRepository
   , domainTripSharingRepo :: !TripSharingRepository
   , domainFinanceAccountRepo :: !FinanceAccountRepository
+  , domainFinanceCategoryRepo :: !FinanceCategoryRepository
   , domainFinanceTransactionRepo :: !FinanceTransactionRepository
   , domainNoteRepo :: !NoteRepository
   , domainChecklistRepo :: !ChecklistRepository
@@ -170,6 +173,11 @@ wirePostgresDomainRepositories sharedPool = do
                                        lift $ putStrLn "[startup] finance backend wiring failed for: postgres"
                                        throwE err)
   lift $ putStrLn "[startup] finance backend wiring ready: postgres"
+  domainFinanceCategoryRepo <- catchE (makePostgresFinanceCategoryRepository sharedPool)
+                                      (\err -> do
+                                        lift $ putStrLn "[startup] finance category backend wiring failed for: postgres"
+                                        throwE err)
+  lift $ putStrLn "[startup] finance category backend wiring ready: postgres"
   domainFinanceTransactionRepo <- catchE (makePostgresFinanceTransactionRepository sharedPool)
                                          (\err -> do
                                            lift $ putStrLn "[startup] finance transaction backend wiring failed for: postgres"
@@ -208,6 +216,7 @@ startHttpServer StartupContext {..} CoreRepositories {..} DomainRepositories {..
             domainCalendarRepo
             domainTripSharingRepo
             domainFinanceAccountRepo
+            domainFinanceCategoryRepo
             domainFinanceTransactionRepo
             domainNoteRepo
             domainChecklistRepo
@@ -250,6 +259,11 @@ makePostgresFinanceAccountRepository :: Pool Connection -> ExceptT String IO Fin
 makePostgresFinanceAccountRepository pool = do
   verifyPostgresStorage "finance" pool financeAccountPostgresHealthChecks
   pure (postgresFinanceAccountRepository pool)
+
+makePostgresFinanceCategoryRepository :: Pool Connection -> ExceptT String IO FinanceCategoryRepository
+makePostgresFinanceCategoryRepository pool = do
+  verifyPostgresStorage "finance category" pool financeCategoryPostgresHealthChecks
+  pure (postgresFinanceCategoryRepository pool)
 
 makePostgresFinanceTransactionRepository :: Pool Connection -> ExceptT String IO FinanceTransactionRepository
 makePostgresFinanceTransactionRepository pool = do

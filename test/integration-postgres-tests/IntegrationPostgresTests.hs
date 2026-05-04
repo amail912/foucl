@@ -42,7 +42,7 @@ runIntegrationPostgresTests = do
 
         countAfter <- fetchSchemaMigrationCount
         assertEqual "Expected schema migration count to remain stable after no-op startup" countBefore countAfter
-        assertEqual "Expected all domain migrations to be applied" 8 countAfter
+        assertEqual "Expected all domain migrations to be applied" 9 countAfter
 
       it "aborts startup before serving when a migration fails" $ do
         resetPostgresToUnmigrated
@@ -868,6 +868,7 @@ pathJoin left right = left ++ "/" ++ right
 
 resetPostgresSchema :: IO ()
 resetPostgresSchema = do
+  _ <- runPsqlFile financeCategoriesDownMigration
   _ <- runPsqlFile financeTransactionsDownMigration
   _ <- runPsqlFile financeDownMigration
   _ <- runPsqlFile checklistDownMigration
@@ -904,6 +905,10 @@ resetPostgresSchema = do
   case financeTransactionsUpResult of
     Left err -> assertFailure ("Finance transaction up migration failed: " ++ err)
     Right () -> pure ()
+  financeCategoriesUpResult <- runPsqlFile financeCategoriesUpMigration
+  case financeCategoriesUpResult of
+    Left err -> assertFailure ("Finance category up migration failed: " ++ err)
+    Right () -> pure ()
 
   noteUpResult <- runPsqlFile noteUpMigration
   case noteUpResult of
@@ -921,6 +926,10 @@ resetPostgresSchema = do
   case truncateResult of
     Left err -> assertFailure ("Postgres table cleanup failed: " ++ err)
     Right () -> pure ()
+  deleteUserCategoriesResult <- runPsqlCommand "DELETE FROM finance_categories WHERE user_id IS NOT NULL"
+  case deleteUserCategoriesResult of
+    Left err -> assertFailure ("Finance category cleanup failed: " ++ err)
+    Right () -> pure ()
 
 ensureSchemaMigrationsSeeded :: IO ()
 ensureSchemaMigrationsSeeded = do
@@ -936,6 +945,7 @@ ensureSchemaMigrationsSeeded = do
         , "0001_trip_sharing_schema"
         , "0001_finance_schema"
         , "0002_finance_transactions"
+        , "0003_finance_categories"
         , "0001_note_schema"
         , "0001_checklist_schema"
         ]
@@ -949,6 +959,7 @@ ensureSchemaMigrationsSeeded = do
 
 resetPostgresToUnmigrated :: IO ()
 resetPostgresToUnmigrated = do
+  _ <- runPsqlFile financeCategoriesDownMigration
   _ <- runPsqlFile financeTransactionsDownMigration
   _ <- runPsqlFile financeDownMigration
   _ <- runPsqlFile checklistDownMigration
@@ -983,10 +994,11 @@ assertSchemaBootstrapped = do
   assertTableExists "finance_transaction_events"
   assertTableExists "finance_transactions"
   assertTableExists "finance_transaction_idempotency"
+  assertTableExists "finance_categories"
   assertTableExists "note_items"
   assertTableExists "checklist_items"
   migrationCount <- fetchSchemaMigrationCount
-  assertEqual "Expected all startup migrations to be recorded in schema_migrations" 8 migrationCount
+  assertEqual "Expected all startup migrations to be recorded in schema_migrations" 9 migrationCount
 
 assertTableExists :: String -> IO ()
 assertTableExists tableName = do
@@ -2082,6 +2094,12 @@ financeTransactionsUpMigration = "db/migrations/finance/0002_finance_transaction
 
 financeTransactionsDownMigration :: FilePath
 financeTransactionsDownMigration = "db/migrations/finance/0002_finance_transactions.down.sql"
+
+financeCategoriesUpMigration :: FilePath
+financeCategoriesUpMigration = "db/migrations/finance/0003_finance_categories.up.sql"
+
+financeCategoriesDownMigration :: FilePath
+financeCategoriesDownMigration = "db/migrations/finance/0003_finance_categories.down.sql"
 
 noteUpMigration :: FilePath
 noteUpMigration = "db/migrations/note/0001_note_schema.up.sql"

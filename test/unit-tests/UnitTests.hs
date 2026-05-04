@@ -30,6 +30,7 @@ import AgendaStorage
 import TripSharingStorage
 import CalendarRepository
 import FinanceAccountRepository
+import FinanceTransactionRepository
 import TripSharingRepository
 import NotesChecklistRepository
 import Auth
@@ -42,6 +43,7 @@ import Lib
   , makePostgresCalendarRepository
   , makePostgresTripSharingRepository
   , makePostgresFinanceAccountRepository
+  , makePostgresFinanceTransactionRepository
   , makePostgresNoteRepository
   , makePostgresChecklistRepository
   , DatabaseConfig(..)
@@ -70,7 +72,7 @@ import Database.PostgreSQL.Simple (Connection, close, connectPostgreSQL)
 import System.FilePath ((</>))
 
 runUnitTests :: IO ()
-runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, notesChecklistRepositoryContractTests, agendaStorageTests, tripSharingStorageTests, calendarRepositoryTests, tripSharingRepositoryTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionBackendConfigTests, calendarBackendConfigTests, tripSharingBackendConfigTests, noteBackendConfigTests, checklistBackendConfigTests, startupMigrationDomainSelectionTests, postgresMigrationTests, sessionTests, sessionFilesystemAdapterTests, sessionPostgresRepositoryTests, calendarPostgresRepositoryTests, tripSharingPostgresRepositoryTests, financeAccountPostgresRepositoryTests, notePostgresRepositoryTests, checklistPostgresRepositoryTests]
+runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, notesChecklistRepositoryContractTests, agendaStorageTests, tripSharingStorageTests, calendarRepositoryTests, tripSharingRepositoryTests, signupValidationTests, signinValidationTests, authRepositoryFilesystemTests, authBackendConfigTests, sessionBackendConfigTests, calendarBackendConfigTests, tripSharingBackendConfigTests, noteBackendConfigTests, checklistBackendConfigTests, startupMigrationDomainSelectionTests, postgresMigrationTests, sessionTests, sessionFilesystemAdapterTests, sessionPostgresRepositoryTests, calendarPostgresRepositoryTests, tripSharingPostgresRepositoryTests, financeAccountPostgresRepositoryTests, financeTransactionPostgresRepositoryTests, notePostgresRepositoryTests, checklistPostgresRepositoryTests]
 
 runTestTTAndExit tests = do
   c <- runTestTT tests
@@ -1917,18 +1919,30 @@ financeMigrationUpCreatesSchema =
         Right () -> do
           eventsTableExists <- fetchTableExists ctx "finance_account_events"
           projectionTableExists <- fetchTableExists ctx "finance_accounts"
+          transactionEventsTableExists <- fetchTableExists ctx "finance_transaction_events"
+          transactionsTableExists <- fetchTableExists ctx "finance_transactions"
+          idempotencyTableExists <- fetchTableExists ctx "finance_transaction_idempotency"
           assertBool "Expected finance_account_events table to exist" eventsTableExists
           assertBool "Expected finance_accounts table to exist" projectionTableExists
+          assertBool "Expected finance_transaction_events table to exist" transactionEventsTableExists
+          assertBool "Expected finance_transactions table to exist" transactionsTableExists
+          assertBool "Expected finance_transaction_idempotency table to exist" idempotencyTableExists
 
           eventTypeType <- fetchColumnType ctx "finance_account_events" "event_type"
           normalizedNameType <- fetchColumnType ctx "finance_accounts" "normalized_name"
           statusType <- fetchColumnType ctx "finance_accounts" "status"
+          transactionDirectionType <- fetchColumnType ctx "finance_transactions" "direction"
+          idempotencyFlagType <- fetchColumnType ctx "finance_transaction_idempotency" "occurred_at_supplied"
           assertEqual "Expected finance_account_events.event_type to be text" (Just "text") eventTypeType
           assertEqual "Expected finance_accounts.normalized_name to be text" (Just "text") normalizedNameType
           assertEqual "Expected finance_accounts.status to be text" (Just "text") statusType
+          assertEqual "Expected finance_transactions.direction to be text" (Just "text") transactionDirectionType
+          assertEqual "Expected finance_transaction_idempotency.occurred_at_supplied to be boolean" (Just "boolean") idempotencyFlagType
 
           nameIndexExists <- fetchIndexExists ctx "finance_accounts_user_status_name_idx"
+          transactionIndexExists <- fetchIndexExists ctx "finance_transactions_user_occurred_idx"
           assertBool "Expected finance_accounts_user_status_name_idx to exist" nameIndexExists
+          assertBool "Expected finance_transactions_user_occurred_idx to exist" transactionIndexExists
 
           insertAccount <- runSqlCommandCtx ctx "INSERT INTO finance_accounts (user_id, account_id, display_name, normalized_name, status) VALUES ('user-1', 'account-1', 'Wallet', 'wallet', 'active')"
           case insertAccount of
@@ -1947,6 +1961,12 @@ financeMigrationUpCreatesSchema =
               Left _ -> True
               Right () -> False
 
+          invalidTransactionDirection <- runSqlCommandCtx ctx "INSERT INTO finance_transactions (user_id, transaction_id, account_id, direction, amount, occurred_at, recorded_at) VALUES ('user-3', 'txn-1', 'account-3', 'sideways', 100, NOW(), NOW())"
+          assertBool "Expected invalid finance transaction direction insert to fail due to CHECK constraint" $
+            case invalidTransactionDirection of
+              Left _ -> True
+              Right () -> False
+
 financeMigrationDownRemovesSchema :: IO ()
 financeMigrationDownRemovesSchema =
   withOptionalPostgresContext "Skipping Postgres migration test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
@@ -1961,8 +1981,14 @@ financeMigrationDownRemovesSchema =
             Right () -> do
               eventsTableExists <- fetchTableExists ctx "finance_account_events"
               projectionTableExists <- fetchTableExists ctx "finance_accounts"
+              transactionEventsTableExists <- fetchTableExists ctx "finance_transaction_events"
+              transactionsTableExists <- fetchTableExists ctx "finance_transactions"
+              idempotencyTableExists <- fetchTableExists ctx "finance_transaction_idempotency"
               assertBool "Expected finance_account_events table to be removed" (not eventsTableExists)
               assertBool "Expected finance_accounts table to be removed" (not projectionTableExists)
+              assertBool "Expected finance_transaction_events table to be removed" (not transactionEventsTableExists)
+              assertBool "Expected finance_transactions table to be removed" (not transactionsTableExists)
+              assertBool "Expected finance_transaction_idempotency table to be removed" (not idempotencyTableExists)
 
 financeMigrationReapplyAfterDown :: IO ()
 financeMigrationReapplyAfterDown =
@@ -1982,8 +2008,14 @@ financeMigrationReapplyAfterDown =
                 Right () -> do
                   eventsTableExists <- fetchTableExists ctx "finance_account_events"
                   projectionTableExists <- fetchTableExists ctx "finance_accounts"
+                  transactionEventsTableExists <- fetchTableExists ctx "finance_transaction_events"
+                  transactionsTableExists <- fetchTableExists ctx "finance_transactions"
+                  idempotencyTableExists <- fetchTableExists ctx "finance_transaction_idempotency"
                   assertBool "Expected finance_account_events table to exist after reapply" eventsTableExists
                   assertBool "Expected finance_accounts table to exist after reapply" projectionTableExists
+                  assertBool "Expected finance_transaction_events table to exist after reapply" transactionEventsTableExists
+                  assertBool "Expected finance_transactions table to exist after reapply" transactionsTableExists
+                  assertBool "Expected finance_transaction_idempotency table to exist after reapply" idempotencyTableExists
 
 noteMigrationUpCreatesSchema :: IO ()
 noteMigrationUpCreatesSchema =
@@ -2284,7 +2316,13 @@ tripSharingPostgresRepositoryTests = test
 financeAccountPostgresRepositoryTests = test
   [ "Finance account Postgres adapter should create and list active accounts with trimmed names" ~: pgFinanceAccountRepoCreateAndListActive
   , "Finance account Postgres adapter should reject duplicate normalized names" ~: pgFinanceAccountRepoDuplicateNormalizedNameReturnsAlreadyExists
+  , "Finance account Postgres adapter should close accounts idempotently and return NotFound for missing ids" ~: pgFinanceAccountRepoCloseLifecycle
   , "Finance account Postgres adapter should filter by status and keep users isolated" ~: pgFinanceAccountRepoStatusFilteringAndIsolation
+  ]
+
+financeTransactionPostgresRepositoryTests = test
+  [ "Finance transaction Postgres adapter should create sent and received rows and preserve idempotent retries" ~: pgFinanceTransactionRepoCreateAndIdempotency
+  , "Finance transaction Postgres adapter should reject reused idempotency keys for different requests" ~: pgFinanceTransactionRepoRejectsIdempotencyConflicts
   ]
 
 notePostgresRepositoryTests = test
@@ -2922,17 +2960,16 @@ pgFinanceAccountRepoStatusFilteringAndIsolation =
         Right () -> do
           pool <- mkTestPostgresPool schemaConn
           let repo = postgresFinanceAccountRepository pool
-          _ <- runExceptT $ repoCreateFinanceAccount repo "user-a" "Alpha"
+          createdA <- runExceptT $ repoCreateFinanceAccount repo "user-a" "Alpha"
           _ <- runExceptT $ repoCreateFinanceAccount repo "user-b" "Beta"
-          closeResult <- do
-            result <- readProcessWithExitCode "psql" ["--dbname", schemaConn, "-v", "ON_ERROR_STOP=1", "-c", "UPDATE finance_accounts SET status = 'closed' WHERE user_id = 'user-a' AND display_name = 'Alpha'"] ""
-            pure $
-              case result of
-                (ExitSuccess, _, _) -> Right ()
-                (_, _, err) -> Left err
-          case closeResult of
-            Left err -> assertFailure ("Expected direct finance account close update success, got " ++ err)
-            Right () -> pure ()
+          case createdA of
+            Left err -> assertFailure ("Expected finance account create success for user-a, got " ++ show err)
+            Right createdAccountA -> do
+              closeResult <- runExceptT $ repoCloseFinanceAccount repo "user-a" (financeAccountId createdAccountA)
+              case closeResult of
+                Left err -> assertFailure ("Expected finance account close success, got " ++ show err)
+                Right closedAccount ->
+                  assertEqual "Expected close response to mark the account closed" FinanceAccountClosed (financeAccountStatus closedAccount)
 
           activeA <- runExceptT $ repoListFinanceAccounts repo "user-a" FinanceAccountsActive
           closedA <- runExceptT $ repoListFinanceAccounts repo "user-a" FinanceAccountsClosed
@@ -2954,6 +2991,114 @@ pgFinanceAccountRepoStatusFilteringAndIsolation =
               assertEqual "Expected user-b account name to remain isolated" "Beta" (financeAccountName onlyAccount)
             Right accounts -> assertFailure ("Expected exactly one isolated account for user-b, got " ++ show (length accounts))
             Left err -> assertFailure ("Expected all account list success for user-b, got " ++ show err)
+
+pgFinanceAccountRepoCloseLifecycle :: IO ()
+pgFinanceAccountRepoCloseLifecycle =
+  withOptionalPostgresContext "Skipping Finance Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runExceptT (runFinanceMigrationsAtPath "." schemaConn MigrateUp)
+      case upResult of
+        Left err -> assertFailure ("Expected finance migration up success, got " ++ err)
+        Right () -> do
+          pool <- mkTestPostgresPool schemaConn
+          let repo = postgresFinanceAccountRepository pool
+              userId = "finance-close-user"
+          created <- runExceptT $ repoCreateFinanceAccount repo userId "Archive"
+          case created of
+            Left err -> assertFailure ("Expected finance account create success, got " ++ show err)
+            Right createdAccount -> do
+              firstClose <- runExceptT $ repoCloseFinanceAccount repo userId (financeAccountId createdAccount)
+              secondClose <- runExceptT $ repoCloseFinanceAccount repo userId (financeAccountId createdAccount)
+              missingClose <- runExceptT $ repoCloseFinanceAccount repo userId "missing-account"
+              case (firstClose, secondClose, missingClose) of
+                (Right firstClosed, Right secondClosed, Left NotFound) -> do
+                  assertEqual "Expected first close to return closed status" FinanceAccountClosed (financeAccountStatus firstClosed)
+                  assertEqual "Expected second close to stay idempotent and return the same closed projection" firstClosed secondClosed
+                (firstResult, secondResult, missingResult) ->
+                  assertFailure ("Unexpected finance account close results: " ++ show (firstResult, secondResult, missingResult))
+
+pgFinanceTransactionRepoCreateAndIdempotency :: IO ()
+pgFinanceTransactionRepoCreateAndIdempotency =
+  withOptionalPostgresContext "Skipping Finance transaction Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runExceptT (runFinanceMigrationsAtPath "." schemaConn MigrateUp)
+      case upResult of
+        Left err -> assertFailure ("Expected finance migration up success, got " ++ err)
+        Right () -> do
+          pool <- mkTestPostgresPool schemaConn
+          let accountRepo = postgresFinanceAccountRepository pool
+              transactionRepo = postgresFinanceTransactionRepository pool
+              userId = "finance-txn-user"
+          createdAccount <- runExceptT $ repoCreateFinanceAccount accountRepo userId "Checking"
+          case createdAccount of
+            Left err -> assertFailure ("Expected finance account create success, got " ++ show err)
+            Right account -> do
+              sentCreated <- runExceptT $ repoCreateFinanceTransaction transactionRepo userId FinanceTransactionWriteRequest
+                { financeTransactionWriteIdempotencyKey = "idem-sent"
+                , financeTransactionWriteDirection = FinanceTransactionSent
+                , financeTransactionWriteAccountId = financeAccountId account
+                , financeTransactionWriteAmount = 2500
+                , financeTransactionWriteOccurredAt = read "2026-01-02 10:00:00 UTC"
+                , financeTransactionWriteOccurredAtSupplied = True
+                }
+              sentRetried <- runExceptT $ repoCreateFinanceTransaction transactionRepo userId FinanceTransactionWriteRequest
+                { financeTransactionWriteIdempotencyKey = "idem-sent"
+                , financeTransactionWriteDirection = FinanceTransactionSent
+                , financeTransactionWriteAccountId = financeAccountId account
+                , financeTransactionWriteAmount = 2500
+                , financeTransactionWriteOccurredAt = read "2026-01-02 10:00:00 UTC"
+                , financeTransactionWriteOccurredAtSupplied = True
+                }
+              receivedCreated <- runExceptT $ repoCreateFinanceTransaction transactionRepo userId FinanceTransactionWriteRequest
+                { financeTransactionWriteIdempotencyKey = "idem-received"
+                , financeTransactionWriteDirection = FinanceTransactionReceived
+                , financeTransactionWriteAccountId = financeAccountId account
+                , financeTransactionWriteAmount = 3200
+                , financeTransactionWriteOccurredAt = read "2026-01-03 10:00:00 UTC"
+                , financeTransactionWriteOccurredAtSupplied = True
+                }
+              case (sentCreated, sentRetried, receivedCreated) of
+                (Right firstSent, Right retriedSent, Right receivedTxn) -> do
+                  assertEqual "Expected idempotent retry to return the original sent transaction row" firstSent retriedSent
+                  assertEqual "Expected sent direction" FinanceTransactionSent (financeTransactionDirection firstSent)
+                  assertEqual "Expected received direction" FinanceTransactionReceived (financeTransactionDirection receivedTxn)
+                results -> assertFailure ("Unexpected finance transaction create results: " ++ show results)
+
+pgFinanceTransactionRepoRejectsIdempotencyConflicts :: IO ()
+pgFinanceTransactionRepoRejectsIdempotencyConflicts =
+  withOptionalPostgresContext "Skipping Finance transaction Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runExceptT (runFinanceMigrationsAtPath "." schemaConn MigrateUp)
+      case upResult of
+        Left err -> assertFailure ("Expected finance migration up success, got " ++ err)
+        Right () -> do
+          pool <- mkTestPostgresPool schemaConn
+          let accountRepo = postgresFinanceAccountRepository pool
+              transactionRepo = postgresFinanceTransactionRepository pool
+              userId = "finance-txn-conflict-user"
+          createdAccount <- runExceptT $ repoCreateFinanceAccount accountRepo userId "Salary"
+          case createdAccount of
+            Left err -> assertFailure ("Expected finance account create success, got " ++ show err)
+            Right account -> do
+              firstCreate <- runExceptT $ repoCreateFinanceTransaction transactionRepo userId FinanceTransactionWriteRequest
+                { financeTransactionWriteIdempotencyKey = "idem-conflict"
+                , financeTransactionWriteDirection = FinanceTransactionReceived
+                , financeTransactionWriteAccountId = financeAccountId account
+                , financeTransactionWriteAmount = 4200
+                , financeTransactionWriteOccurredAt = read "2026-02-01 09:00:00 UTC"
+                , financeTransactionWriteOccurredAtSupplied = True
+                }
+              conflictingRetry <- runExceptT $ repoCreateFinanceTransaction transactionRepo userId FinanceTransactionWriteRequest
+                { financeTransactionWriteIdempotencyKey = "idem-conflict"
+                , financeTransactionWriteDirection = FinanceTransactionReceived
+                , financeTransactionWriteAccountId = financeAccountId account
+                , financeTransactionWriteAmount = 4300
+                , financeTransactionWriteOccurredAt = read "2026-02-01 09:00:00 UTC"
+                , financeTransactionWriteOccurredAtSupplied = True
+                }
+              case (firstCreate, conflictingRetry) of
+                (Right _, Left AlreadyExists) -> assertBool "Expected conflicting idempotent retry to return AlreadyExists" True
+                results -> assertFailure ("Unexpected finance transaction idempotency results: " ++ show results)
 
 pgNoteRepoRoundTripLifecycle :: IO ()
 pgNoteRepoRoundTripLifecycle =

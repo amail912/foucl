@@ -35,7 +35,13 @@ import Auth (AuthError(..), AuthRepository, AuthRequest(..), AuthRequestError(..
 import CalendarRepository (CalendarRepository(..))
 import Crud
 import CrudStorage (createItem, deleteItem, modifyItem)
-import FinanceAccountRepository (FinanceAccount(..), FinanceAccountCreateRequest(..), FinanceAccountRepository(..), FinanceAccountStatusFilter(..), normalizeFinanceAccountName, parseFinanceAccountStatusFilter)
+import FinanceAccountRepository (FinanceAccount(..), FinanceAccountCreateRequest(..), FinanceAccountRepository(..), FinanceAccountStatus(..), FinanceAccountStatusFilter(..), normalizeFinanceAccountName, parseFinanceAccountStatusFilter)
+import FinanceTransactionRepository
+  ( FinanceTransactionCreateRequest(..)
+  , FinanceTransactionDirection(..)
+  , FinanceTransactionRepository(..)
+  , FinanceTransactionWriteRequest(..)
+  )
 import Lib.Config (AppConfig(..))
 import Model (Content, Identifiable(..))
 import NotesChecklistRepository (ChecklistRepository, NoteRepository, NotesChecklistRepository(..))
@@ -299,8 +305,8 @@ instance ToServerResponse AuthError where
   toServerResponse (ResourceConflict message) = setResponseCode 409 >> pure (jsonMessage message)
   toServerResponse (TechnicalError _) = internalServerError $ jsonMessage "Unable to process authentication"
 
-apiController :: AuthRepository -> CalendarRepository -> TripSharingRepository -> FinanceAccountRepository -> NoteRepository -> ChecklistRepository -> MVar [UTCTime] -> FilePath -> AppConfig -> SessionStore -> ServerPartT IO Response
-apiController authRepo calendarRepo tripSharingRepo financeAccountRepo noteRepo checklistRepo signupRateLimitState tmpDir appConfig sessionStore =
+apiController :: AuthRepository -> CalendarRepository -> TripSharingRepository -> FinanceAccountRepository -> FinanceTransactionRepository -> NoteRepository -> ChecklistRepository -> MVar [UTCTime] -> FilePath -> AppConfig -> SessionStore -> ServerPartT IO Response
+apiController authRepo calendarRepo tripSharingRepo financeAccountRepo financeTransactionRepo noteRepo checklistRepo signupRateLimitState tmpDir appConfig sessionStore =
   let sessionCfg = sessionConfig appConfig
       bootstrapAdmin = bootstrapAdminUsername appConfig
   in dir "api" $ msum [ signupController authRepo signupRateLimitState tmpDir bootstrapAdmin
@@ -314,7 +320,7 @@ apiController authRepo calendarRepo tripSharingRepo financeAccountRepo noteRepo 
                             [ dir "trip-places" $ requireAuth sessionCfg sessionStore tripPlacesController
                             , dir "trip-sharing" $ requireAuth sessionCfg sessionStore (tripSharingController authRepo tripSharingRepo calendarRepo)
                             , dir "calendar-items" $ requireAuth sessionCfg sessionStore (agendaController calendarRepo)
-                            , dir "finance" $ requireAuth sessionCfg sessionStore (financeController financeAccountRepo)
+                            , dir "finance" $ requireAuth sessionCfg sessionStore (financeController financeAccountRepo financeTransactionRepo)
                             , dir "admin" $ requireAuth sessionCfg sessionStore (adminController authRepo bootstrapAdmin)
                             ]
                       ]
@@ -596,13 +602,21 @@ tripPlacesController _ = do
   method GET
   ok (jsonResponse tripPlacesCatalog)
 
-financeController :: FinanceAccountRepository -> AppContext -> ServerPartT IO Response
-financeController financeAccountRepo AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
-  dir "accounts" $
-    msum
-      [ financeAccountsList
-      , financeAccountsCreate
-      ]
+financeController :: FinanceAccountRepository -> FinanceTransactionRepository -> AppContext -> ServerPartT IO Response
+financeController financeAccountRepo financeTransactionRepo AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =
+  msum
+    [ dir "accounts" $
+        msum
+          [ financeAccountsList
+          , financeAccountsCreate
+          , financeAccountsClose
+          ]
+    , dir "transactions" $
+        msum
+          [ dir "sent" (financeTransactionsCreate FinanceTransactionSent)
+          , dir "received" (financeTransactionsCreate FinanceTransactionReceived)
+          ]
+    ]
   where
     financeAccountsList = do
       nullDir
@@ -634,6 +648,70 @@ financeController financeAccountRepo AppContext { sessionPrincipal = SessionPrin
                 Left AlreadyExists -> setResponseCode 409 >> pure (jsonMessage "Account already exists")
                 Left _ -> internalServerError emptyResponse
                 Right account -> ok (jsonResponse account)
+
+    financeAccountsClose = path $ \accountId -> do
+      dir "close" $ do
+        nullDir
+        method POST
+        result <- liftIO $ runExceptT (repoCloseFinanceAccount financeAccountRepo principalUserId accountId)
+        case result of
+          Left NotFound -> notFound (jsonMessage "Account not found")
+          Left _ -> internalServerError emptyResponse
+          Right account -> ok (jsonResponse account)
+
+    financeTransactionsCreate direction = do
+      nullDir
+      method POST
+      mIdempotencyKey <- fmap unpack <$> getHeaderM "Idempotency-Key"
+      case mIdempotencyKey of
+        Nothing -> badRequest "Idempotency-Key header is required"
+        Just idempotencyKey -> do
+          body <- askRq >>= takeRequestBody
+          maybe (badRequest "Empty body") (handleTransactionBody direction idempotencyKey) body
+
+    handleTransactionBody :: FinanceTransactionDirection -> String -> RqBody -> ServerPartT IO Response
+    handleTransactionBody direction idempotencyKey rqBody =
+      case decode' (unBody rqBody) :: Maybe FinanceTransactionCreateRequest of
+        Nothing -> badRequest "Unable to decode the body as a FinanceTransactionCreateRequest"
+        Just FinanceTransactionCreateRequest
+          { financeTransactionCreateAccountId
+          , financeTransactionCreateAmount
+          , financeTransactionCreateOccurredAt
+          }
+            | financeTransactionCreateAmount <= 0 ->
+                badRequest "amount must be a positive integer"
+            | otherwise -> do
+                now <- liftIO getCurrentTime
+                let parsedOccurredAt = case financeTransactionCreateOccurredAt of
+                      Nothing -> Right (False, now)
+                      Just rawOccurredAt ->
+                        case iso8601ParseM rawOccurredAt of
+                          Nothing -> Left "occurredAt must be a valid ISO date-time string"
+                          Just occurredAt -> Right (True, occurredAt)
+                case parsedOccurredAt of
+                  Left message -> badRequest message
+                  Right (occurredAtSupplied, occurredAt) -> do
+                    accountResult <- liftIO $ runExceptT (repoGetFinanceAccountById financeAccountRepo principalUserId financeTransactionCreateAccountId)
+                    case accountResult of
+                      Left NotFound -> notFound (jsonMessage "Account not found")
+                      Left _ -> internalServerError emptyResponse
+                      Right FinanceAccount { financeAccountStatus = FinanceAccountClosed } ->
+                        setResponseCode 409 >> pure (jsonMessage "Closed accounts cannot accept new transactions")
+                      Right FinanceAccount {} -> do
+                        let writeRequest = FinanceTransactionWriteRequest
+                              { financeTransactionWriteIdempotencyKey = idempotencyKey
+                              , financeTransactionWriteDirection = direction
+                              , financeTransactionWriteAccountId = financeTransactionCreateAccountId
+                              , financeTransactionWriteAmount = financeTransactionCreateAmount
+                              , financeTransactionWriteOccurredAt = occurredAt
+                              , financeTransactionWriteOccurredAtSupplied = occurredAtSupplied
+                              }
+                        createResult <- liftIO $ runExceptT (repoCreateFinanceTransaction financeTransactionRepo principalUserId writeRequest)
+                        case createResult of
+                          Left NotFound -> notFound (jsonMessage "Account not found")
+                          Left AlreadyExists -> setResponseCode 409 >> pure (jsonMessage "Idempotency key already used for a different request")
+                          Left _ -> internalServerError emptyResponse
+                          Right transaction -> ok (jsonResponse transaction)
 
 adminController :: AuthRepository -> String -> AppContext -> ServerPartT IO Response
 adminController authRepo bootstrapAdminUsername appContext@AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =

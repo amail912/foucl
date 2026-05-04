@@ -126,7 +126,7 @@ The v1 transaction row shape used by create-success responses and `GET /transact
 - `splits`
 - `notes`
 
-### `POST /transactions/sent`
+### `POST /api/v1/finance/transactions/sent`
 Records one immutable expense transaction.
 
 Request fields:
@@ -134,7 +134,7 @@ Request fields:
 - `amount` (in cents)
 - optional `occurredAt`
 
-### `POST /transactions/received`
+### `POST /api/v1/finance/transactions/received`
 Records one immutable income transaction.
 
 Request fields:

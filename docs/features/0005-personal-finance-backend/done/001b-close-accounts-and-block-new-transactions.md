@@ -7,14 +7,14 @@ As a user, I want to close finance accounts without losing their history, so ina
 - Closing an account marks it as closed.
 - Closing an already closed account is idempotent success.
 - Closing an unknown account returns `404`.
-- Closing an account does not delete its history or remove it from `GET /accounts?status=closed` or `GET /accounts?status=all`.
-- Closed accounts reject new transaction creation through both `POST /transactions/sent` and `POST /transactions/received`.
+- Closing an account does not delete its history or remove it from `GET /api/v1/finance/accounts?status=closed` or `GET /api/v1/finance/accounts?status=all`.
+- Closed accounts reject new transaction creation through both `POST /api/v1/finance/transactions/sent` and `POST /api/v1/finance/transactions/received`.
 - Reopening accounts is out of scope for v1.
 
 ## Data And Contracts
-- Defines `POST /accounts/{id}/close`.
+- Defines `POST /api/v1/finance/accounts/{id}/close`.
 - Success response returns the closed account projection with `id`, `name`, and `status`.
-- Requires `POST /transactions/sent` and `POST /transactions/received` to treat closed accounts as invalid write targets.
+- Requires `POST /api/v1/finance/transactions/sent` and `POST /api/v1/finance/transactions/received` to treat closed accounts as invalid write targets.
 - Unknown accounts return `404`.
 - Known but closed accounts remain readable and reject new transaction writes with `409`.
 - Must preserve read compatibility for closed accounts through account listing filters.

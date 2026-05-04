@@ -30,6 +30,7 @@ library
       , CalendarRepository
       , TripSharingRepository
       , FinanceAccountRepository
+      , FinanceTransactionRepository
       , Auth
       , AuthRepository
       , PostgresMigrations

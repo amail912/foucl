@@ -10,6 +10,7 @@ module FinanceAccountRepository
   , financeAccountStatusText
   , parseFinanceAccountStatusFilter
   , normalizeFinanceAccountName
+  , parseFinanceAccountStatus
   , postgresFinanceAccountRepository
   , financeAccountPostgresHealthChecks
   ) where
@@ -37,6 +38,8 @@ import Repository (RepositoryError(..))
 data FinanceAccountRepository = FinanceAccountRepository
   { repoCreateFinanceAccount :: !(String -> String -> ExceptT RepositoryError IO FinanceAccount)
   , repoListFinanceAccounts :: !(String -> FinanceAccountStatusFilter -> ExceptT RepositoryError IO [FinanceAccount])
+  , repoGetFinanceAccountById :: !(String -> String -> ExceptT RepositoryError IO FinanceAccount)
+  , repoCloseFinanceAccount :: !(String -> String -> ExceptT RepositoryError IO FinanceAccount)
   }
 
 data FinanceAccountCreateRequest = FinanceAccountCreateRequest
@@ -93,6 +96,8 @@ postgresFinanceAccountRepository pool =
   FinanceAccountRepository
     { repoCreateFinanceAccount = pgCreateFinanceAccount pool
     , repoListFinanceAccounts = pgListFinanceAccounts pool
+    , repoGetFinanceAccountById = pgGetFinanceAccountById pool
+    , repoCloseFinanceAccount = pgCloseFinanceAccount pool
     }
 
 financeAccountPostgresHealthChecks :: Connection -> ExceptT String IO ()
@@ -153,9 +158,59 @@ pgListFinanceAccounts pool userId statusFilter =
             "SELECT account_id, display_name, status FROM finance_accounts WHERE user_id = ? ORDER BY display_name, account_id"
             (Only userId)
 
+pgGetFinanceAccountById :: Pool Connection -> String -> String -> ExceptT RepositoryError IO FinanceAccount
+pgGetFinanceAccountById pool userId accountId =
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    rows <- tryExcept
+      (query conn
+        "SELECT account_id, display_name, status FROM finance_accounts WHERE user_id = ? AND account_id = ?"
+        (userId, accountId))
+      mapSqlReadException
+    case rows of
+      [] -> throwError NotFound
+      [row] -> decodeFinanceAccount row
+      _ -> throwError ReadFailure
+
+pgCloseFinanceAccount :: Pool Connection -> String -> String -> ExceptT RepositoryError IO FinanceAccount
+pgCloseFinanceAccount pool userId accountId =
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    eventId <- liftIO (toString <$> nextRandom)
+    result <- tryExcept
+      (withTransaction conn $ do
+        rows <- query conn
+          "SELECT account_id, display_name, normalized_name, status FROM finance_accounts WHERE user_id = ? AND account_id = ? FOR UPDATE"
+          (userId, accountId)
+          :: IO [(String, String, String, Text)]
+        case rows of
+          [] -> pure Nothing
+          [(rowAccountId, displayName, normalizedName, statusText)] ->
+            if statusText == financeAccountStatusText FinanceAccountClosed
+              then pure (Just (rowAccountId, displayName, statusText))
+              else do
+                _ <- execute conn
+                  "INSERT INTO finance_account_events (event_id, user_id, account_id, event_type, display_name, normalized_name, status) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                  (eventId, userId, accountId, ("AccountClosed" :: String), displayName, normalizedName, financeAccountStatusText FinanceAccountClosed)
+                _ <- execute conn
+                  "UPDATE finance_accounts SET status = ? WHERE user_id = ? AND account_id = ?"
+                  (financeAccountStatusText FinanceAccountClosed, userId, accountId)
+                pure (Just (rowAccountId, displayName, financeAccountStatusText FinanceAccountClosed))
+          _ -> pure Nothing)
+      mapSqlWriteException
+    case result of
+      Nothing -> throwError NotFound
+      Just (rowAccountId, displayName, statusText) ->
+        case parseFinanceAccountStatus statusText of
+          Nothing -> throwError ReadFailure
+          Just financeAccountStatus ->
+            pure FinanceAccount
+              { financeAccountId = rowAccountId
+              , financeAccountName = displayName
+              , financeAccountStatus = financeAccountStatus
+              }
+
 decodeFinanceAccount :: (String, String, Text) -> ExceptT RepositoryError IO FinanceAccount
 decodeFinanceAccount (accountId, displayName, statusText) =
-  case statusFromText statusText of
+  case parseFinanceAccountStatus statusText of
     Nothing -> throwError ReadFailure
     Just financeAccountStatus ->
       pure FinanceAccount
@@ -164,11 +219,10 @@ decodeFinanceAccount (accountId, displayName, statusText) =
         , financeAccountStatus = financeAccountStatus
         }
 
-statusFromText :: Text -> Maybe FinanceAccountStatus
-statusFromText "active" = Just FinanceAccountActive
-statusFromText "closed" = Just FinanceAccountClosed
-statusFromText _ = Nothing
+parseFinanceAccountStatus :: Text -> Maybe FinanceAccountStatus
+parseFinanceAccountStatus "active" = Just FinanceAccountActive
+parseFinanceAccountStatus "closed" = Just FinanceAccountClosed
+parseFinanceAccountStatus _ = Nothing
 
 trim :: String -> String
 trim = Text.unpack . Text.strip . Text.pack
-

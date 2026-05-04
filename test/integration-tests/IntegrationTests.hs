@@ -10,6 +10,7 @@ module IntegrationTests (runIntegrationTests) where
 import Prelude hiding (id)
 import qualified Prelude
 import           Data.Aeson
+import qualified Data.Aeson.Key as Key
 import           Data.Aeson.Types (parseMaybe)
 import           Data.ByteString       (ByteString)
 import           Data.ByteString.UTF8
@@ -37,6 +38,8 @@ import Model
 noteEndpoint = "/note"
 checklistEndpoint = "/checklist"
 financeAccountsEndpoint = "/api/v1/finance/accounts"
+financeTransactionsSentEndpoint = "/api/v1/finance/transactions/sent"
+financeTransactionsReceivedEndpoint = "/api/v1/finance/transactions/received"
 
 runIntegrationTests :: IO ()
 runIntegrationTests = do
@@ -372,6 +375,25 @@ runIntegrationTests = do
         assertStatusCode "Finance account create should require auth" 401 createResp
         assertMessageResponse "Not authenticated" createResp
 
+        closeReq <- parseRequest "POST http://localhost:8081/api/v1/finance/accounts/missing/close"
+        closeResp <- httpJSON $ setRequestMethod "POST" closeReq
+        assertStatusCode "Finance account close should require auth" 401 closeResp
+        assertMessageResponse "Not authenticated" closeResp
+
+        sentReq <- parseRequest "POST http://localhost:8081/api/v1/finance/transactions/sent"
+        sentResp <- httpJSON $ setRequestMethod "POST"
+                              $ setRequestHeader "Content-Type" ["application/json"]
+                              $ setRequestBodyJSON (object ["accountId" .= ("missing" :: String), "amount" .= (100 :: Int)]) sentReq
+        assertStatusCode "Finance sent transaction create should require auth" 401 sentResp
+        assertMessageResponse "Not authenticated" sentResp
+
+        receivedReq <- parseRequest "POST http://localhost:8081/api/v1/finance/transactions/received"
+        receivedResp <- httpJSON $ setRequestMethod "POST"
+                                  $ setRequestHeader "Content-Type" ["application/json"]
+                                  $ setRequestBodyJSON (object ["accountId" .= ("missing" :: String), "amount" .= (100 :: Int)]) receivedReq
+        assertStatusCode "Finance received transaction create should require auth" 401 receivedResp
+        assertMessageResponse "Not authenticated" receivedResp
+
       it "should create and list finance accounts for the authenticated user" $ do
         cookie <- signinOnly baseUsername basePassword
         created <- createFinanceAccount cookie "  Cash Wallet  "
@@ -400,6 +422,82 @@ runIntegrationTests = do
         invalidStatusResp <- getFinanceAccountsExpectValue cookie "archived"
         assertStatusCode "Invalid finance account status should return 400" 400 invalidStatusResp
         assertMessageResponse "status must be one of: active, closed, all" invalidStatusResp
+
+      it "should close finance accounts idempotently and expose them through closed/all filters" $ do
+        cookie <- signinOnly baseUsername basePassword
+        created <- createFinanceAccount cookie "Archive Me"
+        accountId <- requireObjectStringField "id" created
+
+        firstClose <- closeFinanceAccount cookie accountId
+        assertFinanceAccountNameAndStatus "Archive Me" "closed" firstClose
+
+        secondClose <- closeFinanceAccount cookie accountId
+        assertFinanceAccountNameAndStatus "Archive Me" "closed" secondClose
+
+        activeAccounts <- getFinanceAccounts cookie Nothing
+        assertBool "Expected closed account to disappear from the default active list" (all ((/= "Archive Me") . financeAccountNameValue) activeAccounts)
+
+        closedAccounts <- getFinanceAccounts cookie (Just "closed")
+        assertEqual "Expected closed filter to return the closed finance account" ["Archive Me"] (map financeAccountNameValue closedAccounts)
+
+        allAccounts <- getFinanceAccounts cookie (Just "all")
+        assertBool "Expected all filter to include the closed finance account" ("Archive Me" `elem` map financeAccountNameValue allAccounts)
+
+      it "should reject closing unknown finance accounts" $ do
+        cookie <- signinOnly baseUsername basePassword
+        closeResp <- closeFinanceAccountExpectValue cookie "missing-account"
+        assertStatusCode "Closing an unknown finance account should return 404" 404 closeResp
+        assertMessageResponse "Account not found" closeResp
+
+      it "should create sent and received finance transactions and enforce closed-account and idempotency rules" $ do
+        cookie <- signinOnly baseUsername basePassword
+        account <- createFinanceAccount cookie "Daily Checking"
+        accountId <- requireObjectStringField "id" account
+
+        sentResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "sent-key-1" (object ["accountId" .= accountId, "amount" .= (2500 :: Int), "occurredAt" .= ("2026-03-01T09:00:00Z" :: String)])
+        assertStatusCode "Sent transaction create should succeed" 200 sentResp
+        assertFinanceTransactionDirectionAndAmount "sent" 2500 (getResponseBody sentResp)
+
+        sentRetryResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "sent-key-1" (object ["accountId" .= accountId, "amount" .= (2500 :: Int), "occurredAt" .= ("2026-03-01T09:00:00Z" :: String)])
+        assertStatusCode "Idempotent sent transaction retry should succeed" 200 sentRetryResp
+        assertEqual "Expected idempotent sent transaction retry to return the original row" (getResponseBody sentResp) (getResponseBody sentRetryResp)
+
+        receivedResp <- createFinanceTransactionExpectValue cookie financeTransactionsReceivedEndpoint "received-key-1" (object ["accountId" .= accountId, "amount" .= (4200 :: Int)])
+        assertStatusCode "Received transaction create should succeed" 200 receivedResp
+        assertFinanceTransactionDirectionAndAmount "received" 4200 (getResponseBody receivedResp)
+
+        missingKeyResp <- createFinanceTransactionWithoutIdempotencyHeader cookie financeTransactionsSentEndpoint (object ["accountId" .= accountId, "amount" .= (120 :: Int)])
+        assertStatusCode "Missing idempotency key should return 400" 400 missingKeyResp
+        assertMessageResponse "Idempotency-Key header is required" missingKeyResp
+
+        invalidAmountResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "sent-key-invalid-amount" (object ["accountId" .= accountId, "amount" .= (0 :: Int)])
+        assertStatusCode "Non-positive transaction amount should return 400" 400 invalidAmountResp
+        assertMessageResponse "amount must be a positive integer" invalidAmountResp
+
+        invalidOccurredAtResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "sent-key-invalid-occurred" (object ["accountId" .= accountId, "amount" .= (120 :: Int), "occurredAt" .= ("not-a-time" :: String)])
+        assertStatusCode "Invalid occurredAt should return 400" 400 invalidOccurredAtResp
+        assertMessageResponse "occurredAt must be a valid ISO date-time string" invalidOccurredAtResp
+
+        malformedResp <- createFinanceTransactionMalformed cookie financeTransactionsSentEndpoint "sent-key-malformed"
+        assertStatusCode "Malformed transaction payload should return 400" 400 malformedResp
+        assertMessageResponse "Unable to decode the body as a FinanceTransactionCreateRequest" malformedResp
+
+        unknownAccountResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "sent-key-missing-account" (object ["accountId" .= ("missing-account" :: String), "amount" .= (100 :: Int)])
+        assertStatusCode "Unknown transaction account should return 404" 404 unknownAccountResp
+        assertMessageResponse "Account not found" unknownAccountResp
+
+        conflictingIdempotencyResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "sent-key-1" (object ["accountId" .= accountId, "amount" .= (2600 :: Int), "occurredAt" .= ("2026-03-01T09:00:00Z" :: String)])
+        assertStatusCode "Reusing an idempotency key with a different request should return 409" 409 conflictingIdempotencyResp
+        assertMessageResponse "Idempotency key already used for a different request" conflictingIdempotencyResp
+
+        _ <- closeFinanceAccount cookie accountId
+        closedSentResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "sent-key-closed" (object ["accountId" .= accountId, "amount" .= (200 :: Int)])
+        assertStatusCode "Closed account sent transaction create should return 409" 409 closedSentResp
+        assertMessageResponse "Closed accounts cannot accept new transactions" closedSentResp
+
+        closedReceivedResp <- createFinanceTransactionExpectValue cookie financeTransactionsReceivedEndpoint "received-key-closed" (object ["accountId" .= accountId, "amount" .= (200 :: Int)])
+        assertStatusCode "Closed account received transaction create should return 409" 409 closedReceivedResp
+        assertMessageResponse "Closed accounts cannot accept new transactions" closedReceivedResp
 
       it "should keep finance account lists isolated per authenticated user" $ do
         uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
@@ -1645,6 +1743,45 @@ financeAccountsRequest cookie mStatus = do
   let query = maybe [] (\statusValue -> [("status", Just (BS.pack statusValue))]) mStatus
   pure $ setRequestHeader "Cookie" [BS.pack cookie] $ setRequestMethod "GET" $ setRequestQueryString query req
 
+closeFinanceAccount :: String -> String -> IO Value
+closeFinanceAccount cookie accountId = do
+  resp <- closeFinanceAccountExpectValue cookie accountId
+  assertStatusCode "Finance account close should succeed" 200 resp
+  pure (getResponseBody resp)
+
+closeFinanceAccountExpectValue :: String -> String -> IO (Response Value)
+closeFinanceAccountExpectValue cookie accountId = do
+  req <- parseRequest ("POST http://localhost:8081" ++ financeAccountsEndpoint ++ "/" ++ accountId ++ "/close")
+  httpJSON $ setRequestMethod "POST"
+         $ setRequestHeader "Cookie" [BS.pack cookie]
+         req
+
+createFinanceTransactionExpectValue :: String -> String -> String -> Value -> IO (Response Value)
+createFinanceTransactionExpectValue cookie endpoint idempotencyKey body = do
+  req <- parseRequest ("POST http://localhost:8081" ++ endpoint)
+  httpJSON $ setRequestMethod "POST"
+         $ setRequestHeader "Cookie" [BS.pack cookie]
+         $ setRequestHeader "Idempotency-Key" [BS.pack idempotencyKey]
+         $ setRequestHeader "Content-Type" ["application/json"]
+         $ setRequestBodyJSON body req
+
+createFinanceTransactionWithoutIdempotencyHeader :: String -> String -> Value -> IO (Response Value)
+createFinanceTransactionWithoutIdempotencyHeader cookie endpoint body = do
+  req <- parseRequest ("POST http://localhost:8081" ++ endpoint)
+  httpJSON $ setRequestMethod "POST"
+         $ setRequestHeader "Cookie" [BS.pack cookie]
+         $ setRequestHeader "Content-Type" ["application/json"]
+         $ setRequestBodyJSON body req
+
+createFinanceTransactionMalformed :: String -> String -> String -> IO (Response Value)
+createFinanceTransactionMalformed cookie endpoint idempotencyKey = do
+  req <- parseRequest ("POST http://localhost:8081" ++ endpoint)
+  httpJSON $ setRequestMethod "POST"
+         $ setRequestHeader "Cookie" [BS.pack cookie]
+         $ setRequestHeader "Idempotency-Key" [BS.pack idempotencyKey]
+         $ setRequestHeader "Content-Type" ["application/json"]
+         $ setRequestBodyJSON (object []) req
+
 assertFinanceAccountNameAndStatus :: String -> String -> Value -> Assertion
 assertFinanceAccountNameAndStatus expectedName expectedStatus responseBody =
   case responseBody of
@@ -1659,6 +1796,33 @@ assertFinanceAccountNameAndStatus expectedName expectedStatus responseBody =
         Just actualId -> assertBool "Expected finance account id to be non-empty" (not (null (actualId :: String)))
         Nothing -> assertFailure "Expected finance account id"
     _ -> assertFailure "Expected finance account response object"
+
+assertFinanceTransactionDirectionAndAmount :: String -> Int -> Value -> Assertion
+assertFinanceTransactionDirectionAndAmount expectedDirection expectedAmount responseBody =
+  case responseBody of
+    Object value -> do
+      case parseMaybe (.: "direction") value of
+        Just actualDirection -> assertEqual "Expected finance transaction direction" expectedDirection (actualDirection :: String)
+        Nothing -> assertFailure "Expected finance transaction direction"
+      case parseMaybe (.: "amount") value of
+        Just actualAmount -> assertEqual "Expected finance transaction amount" expectedAmount (actualAmount :: Int)
+        Nothing -> assertFailure "Expected finance transaction amount"
+      case parseMaybe (.: "accountId") value of
+        Just actualAccountId -> assertBool "Expected finance transaction account id to be non-empty" (not (null (actualAccountId :: String)))
+        Nothing -> assertFailure "Expected finance transaction account id"
+      case parseMaybe (.: "id") value of
+        Just actualId -> assertBool "Expected finance transaction id to be non-empty" (not (null (actualId :: String)))
+        Nothing -> assertFailure "Expected finance transaction id"
+    _ -> assertFailure "Expected finance transaction response object"
+
+requireObjectStringField :: String -> Value -> IO String
+requireObjectStringField fieldName responseBody =
+  case responseBody of
+    Object value ->
+      case parseMaybe (.: Key.fromString fieldName) value of
+        Just actualValue -> pure actualValue
+        Nothing -> assertFailure ("Expected field " ++ fieldName) >> pure ""
+    _ -> assertFailure "Expected response object" >> pure ""
 
 financeAccountNameValue :: Value -> String
 financeAccountNameValue responseBody =

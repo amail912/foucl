@@ -4,8 +4,8 @@
 As a user, I want to record income and expense entries manually, so my financial history is complete and auditable.
 
 ## Behavior And Business Rules
-- `POST /transactions/sent` records one immutable `MoneySent` event.
-- `POST /transactions/received` records one immutable `MoneyReceived` event.
+- `POST /api/v1/finance/transactions/sent` records one immutable `MoneySent` event.
+- `POST /api/v1/finance/transactions/received` records one immutable `MoneyReceived` event.
 - `amount` must be a positive integer for all money-entry writes and is expressed in cents.
 - `occurredAt` is optional and defaults to now when omitted.
 - Each transaction must have exactly one money event and cannot be mutated later into the opposite direction.
@@ -17,9 +17,10 @@ As a user, I want to record income and expense entries manually, so my financial
 - Reusing an `Idempotency-Key` with a different effective request is a conflict.
 
 ## Data And Contracts
-- Defines `POST /transactions/sent` and `POST /transactions/received`.
+- Defines `POST /api/v1/finance/transactions/sent` and `POST /api/v1/finance/transactions/received`.
 - Request fields are `accountId`, `amount`, and optional `occurredAt`.
 - Success responses return the created transaction row with `id`, `direction`, `accountId`, `amount`, `occurredAt`, `recordedAt`, `transfer`, `category`, `splits`, and `notes`.
+- In this implementation slice, `transfer` and `category` are `null`, and `splits` and `notes` are empty until later stories add those behaviors.
 - Must keep `404` for unknown accounts distinct from `409` for closed accounts.
 - Missing `Idempotency-Key`, missing required fields, invalid timestamps, and invalid money amounts return `400`.
 - Reusing an idempotency key with a different effective request returns `409`.

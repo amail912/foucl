@@ -42,7 +42,7 @@ runIntegrationPostgresTests = do
 
         countAfter <- fetchSchemaMigrationCount
         assertEqual "Expected schema migration count to remain stable after no-op startup" countBefore countAfter
-        assertEqual "Expected all domain migrations to be applied" 13 countAfter
+        assertEqual "Expected all domain migrations to be applied" 14 countAfter
 
       it "aborts startup before serving when a migration fails" $ do
         resetPostgresToUnmigrated
@@ -925,6 +925,10 @@ resetPostgresSchema = do
   case financeNoteLifecycleUpResult of
     Left err -> assertFailure ("Finance note lifecycle up migration failed: " ++ err)
     Right () -> pure ()
+  financeBalanceSnapshotsUpResult <- runPsqlFile financeBalanceSnapshotsUpMigration
+  case financeBalanceSnapshotsUpResult of
+    Left err -> assertFailure ("Finance balance snapshots up migration failed: " ++ err)
+    Right () -> pure ()
 
   noteUpResult <- runPsqlFile noteUpMigration
   case noteUpResult of
@@ -938,7 +942,7 @@ resetPostgresSchema = do
 
   ensureSchemaMigrationsSeeded
 
-  truncateResult <- runPsqlCommand "TRUNCATE TABLE auth_users, session_handles, session_user_bindings, session_states, calendar_items, trip_shares, trip_subscriptions, finance_transaction_notes, finance_transaction_note_events, finance_transaction_links, finance_transaction_link_events, finance_transaction_splits, finance_transaction_categories, finance_transaction_classification_events, finance_transaction_idempotency, finance_transaction_events, finance_transactions, finance_account_events, finance_accounts, note_items, checklist_items"
+  truncateResult <- runPsqlCommand "TRUNCATE TABLE auth_users, session_handles, session_user_bindings, session_states, calendar_items, trip_shares, trip_subscriptions, finance_balance_snapshots, finance_balance_snapshot_events, finance_transaction_notes, finance_transaction_note_events, finance_transaction_links, finance_transaction_link_events, finance_transaction_splits, finance_transaction_categories, finance_transaction_classification_events, finance_transaction_idempotency, finance_transaction_events, finance_transactions, finance_account_events, finance_accounts, note_items, checklist_items"
   case truncateResult of
     Left err -> assertFailure ("Postgres table cleanup failed: " ++ err)
     Right () -> pure ()
@@ -966,6 +970,7 @@ ensureSchemaMigrationsSeeded = do
         , "0005_finance_transaction_links"
         , "0006_finance_transaction_notes"
         , "0007_finance_transaction_note_lifecycle"
+        , "0008_finance_balance_snapshots"
         , "0001_note_schema"
         , "0001_checklist_schema"
         ]
@@ -979,6 +984,7 @@ ensureSchemaMigrationsSeeded = do
 
 resetPostgresToUnmigrated :: IO ()
 resetPostgresToUnmigrated = do
+  _ <- runPsqlFile financeBalanceSnapshotsDownMigration
   _ <- runPsqlFile financeNoteLifecycleDownMigration
   _ <- runPsqlFile financeNotesDownMigration
   _ <- runPsqlFile financeLinksDownMigration
@@ -1026,10 +1032,12 @@ assertSchemaBootstrapped = do
   assertTableExists "finance_transaction_links"
   assertTableExists "finance_transaction_note_events"
   assertTableExists "finance_transaction_notes"
+  assertTableExists "finance_balance_snapshot_events"
+  assertTableExists "finance_balance_snapshots"
   assertTableExists "note_items"
   assertTableExists "checklist_items"
   migrationCount <- fetchSchemaMigrationCount
-  assertEqual "Expected all startup migrations to be recorded in schema_migrations" 13 migrationCount
+  assertEqual "Expected all startup migrations to be recorded in schema_migrations" 14 migrationCount
 
 assertTableExists :: String -> IO ()
 assertTableExists tableName = do
@@ -2155,6 +2163,12 @@ financeNoteLifecycleUpMigration = "db/migrations/finance/0007_finance_transactio
 
 financeNoteLifecycleDownMigration :: FilePath
 financeNoteLifecycleDownMigration = "db/migrations/finance/0007_finance_transaction_note_lifecycle.down.sql"
+
+financeBalanceSnapshotsUpMigration :: FilePath
+financeBalanceSnapshotsUpMigration = "db/migrations/finance/0008_finance_balance_snapshots.up.sql"
+
+financeBalanceSnapshotsDownMigration :: FilePath
+financeBalanceSnapshotsDownMigration = "db/migrations/finance/0008_finance_balance_snapshots.down.sql"
 
 noteUpMigration :: FilePath
 noteUpMigration = "db/migrations/note/0001_note_schema.up.sql"

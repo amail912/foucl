@@ -191,6 +191,11 @@ financeMigrations =
       , upSqlPath = "db/migrations/finance/0007_finance_transaction_note_lifecycle.up.sql"
       , downSqlPath = "db/migrations/finance/0007_finance_transaction_note_lifecycle.down.sql"
       }
+  , SqlMigration
+      { migrationId = "0008_finance_balance_snapshots"
+      , upSqlPath = "db/migrations/finance/0008_finance_balance_snapshots.up.sql"
+      , downSqlPath = "db/migrations/finance/0008_finance_balance_snapshots.down.sql"
+      }
   ]
 
 noteMigrations :: [SqlMigration]

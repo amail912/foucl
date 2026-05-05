@@ -1932,6 +1932,8 @@ financeMigrationUpCreatesSchema =
           linksTableExists <- fetchTableExists ctx "finance_transaction_links"
           noteEventsTableExists <- fetchTableExists ctx "finance_transaction_note_events"
           notesTableExists <- fetchTableExists ctx "finance_transaction_notes"
+          snapshotEventsTableExists <- fetchTableExists ctx "finance_balance_snapshot_events"
+          snapshotsTableExists <- fetchTableExists ctx "finance_balance_snapshots"
           assertBool "Expected finance_account_events table to exist" eventsTableExists
           assertBool "Expected finance_accounts table to exist" projectionTableExists
           assertBool "Expected finance_transaction_events table to exist" transactionEventsTableExists
@@ -1945,6 +1947,8 @@ financeMigrationUpCreatesSchema =
           assertBool "Expected finance_transaction_links table to exist" linksTableExists
           assertBool "Expected finance_transaction_note_events table to exist" noteEventsTableExists
           assertBool "Expected finance_transaction_notes table to exist" notesTableExists
+          assertBool "Expected finance_balance_snapshot_events table to exist" snapshotEventsTableExists
+          assertBool "Expected finance_balance_snapshots table to exist" snapshotsTableExists
 
           eventTypeType <- fetchColumnType ctx "finance_account_events" "event_type"
           normalizedNameType <- fetchColumnType ctx "finance_accounts" "normalized_name"
@@ -1959,6 +1963,8 @@ financeMigrationUpCreatesSchema =
           linkTypeType <- fetchColumnType ctx "finance_transaction_links" "link_type"
           noteEventTypeType <- fetchColumnType ctx "finance_transaction_note_events" "event_type"
           noteTextType <- fetchColumnType ctx "finance_transaction_notes" "note_text"
+          snapshotEventTypeType <- fetchColumnType ctx "finance_balance_snapshot_events" "event_type"
+          snapshotBalanceType <- fetchColumnType ctx "finance_balance_snapshots" "balance"
           assertEqual "Expected finance_account_events.event_type to be text" (Just "text") eventTypeType
           assertEqual "Expected finance_accounts.normalized_name to be text" (Just "text") normalizedNameType
           assertEqual "Expected finance_accounts.status to be text" (Just "text") statusType
@@ -1972,6 +1978,8 @@ financeMigrationUpCreatesSchema =
           assertEqual "Expected finance_transaction_links.link_type to be text" (Just "text") linkTypeType
           assertEqual "Expected finance_transaction_note_events.event_type to be text" (Just "text") noteEventTypeType
           assertEqual "Expected finance_transaction_notes.note_text to be text" (Just "text") noteTextType
+          assertEqual "Expected finance_balance_snapshot_events.event_type to be text" (Just "text") snapshotEventTypeType
+          assertEqual "Expected finance_balance_snapshots.balance to be bigint" (Just "bigint") snapshotBalanceType
 
           nameIndexExists <- fetchIndexExists ctx "finance_accounts_user_status_name_idx"
           transactionIndexExists <- fetchIndexExists ctx "finance_transactions_user_occurred_idx"
@@ -1979,12 +1987,14 @@ financeMigrationUpCreatesSchema =
           splitIndexExists <- fetchIndexExists ctx "finance_transaction_splits_user_transaction_idx"
           linksPeerIndexExists <- fetchIndexExists ctx "finance_transaction_links_user_peer_idx"
           notesCreatedIndexExists <- fetchIndexExists ctx "finance_transaction_notes_user_transaction_created_idx"
+          snapshotsOccurredIndexExists <- fetchIndexExists ctx "finance_balance_snapshots_user_account_occurred_idx"
           assertBool "Expected finance_accounts_user_status_name_idx to exist" nameIndexExists
           assertBool "Expected finance_transactions_user_occurred_idx to exist" transactionIndexExists
           assertBool "Expected finance_categories_user_parent_name_idx to exist" categoryIndexExists
           assertBool "Expected finance_transaction_splits_user_transaction_idx to exist" splitIndexExists
           assertBool "Expected finance_transaction_links_user_peer_idx to exist" linksPeerIndexExists
           assertBool "Expected finance_transaction_notes_user_transaction_created_idx to exist" notesCreatedIndexExists
+          assertBool "Expected finance_balance_snapshots_user_account_occurred_idx to exist" snapshotsOccurredIndexExists
 
           insertAccount <- runSqlCommandCtx ctx "INSERT INTO finance_accounts (user_id, account_id, display_name, normalized_name, status) VALUES ('user-1', 'account-1', 'Wallet', 'wallet', 'active')"
           case insertAccount of
@@ -2048,6 +2058,8 @@ financeMigrationDownRemovesSchema =
               linksTableExists <- fetchTableExists ctx "finance_transaction_links"
               noteEventsTableExists <- fetchTableExists ctx "finance_transaction_note_events"
               notesTableExists <- fetchTableExists ctx "finance_transaction_notes"
+              snapshotEventsTableExists <- fetchTableExists ctx "finance_balance_snapshot_events"
+              snapshotsTableExists <- fetchTableExists ctx "finance_balance_snapshots"
               assertBool "Expected finance_account_events table to be removed" (not eventsTableExists)
               assertBool "Expected finance_accounts table to be removed" (not projectionTableExists)
               assertBool "Expected finance_transaction_events table to be removed" (not transactionEventsTableExists)
@@ -2061,6 +2073,8 @@ financeMigrationDownRemovesSchema =
               assertBool "Expected finance_transaction_links table to be removed" (not linksTableExists)
               assertBool "Expected finance_transaction_note_events table to be removed" (not noteEventsTableExists)
               assertBool "Expected finance_transaction_notes table to be removed" (not notesTableExists)
+              assertBool "Expected finance_balance_snapshot_events table to be removed" (not snapshotEventsTableExists)
+              assertBool "Expected finance_balance_snapshots table to be removed" (not snapshotsTableExists)
 
 financeMigrationReapplyAfterDown :: IO ()
 financeMigrationReapplyAfterDown =
@@ -2091,6 +2105,8 @@ financeMigrationReapplyAfterDown =
                   linksTableExists <- fetchTableExists ctx "finance_transaction_links"
                   noteEventsTableExists <- fetchTableExists ctx "finance_transaction_note_events"
                   notesTableExists <- fetchTableExists ctx "finance_transaction_notes"
+                  snapshotEventsTableExists <- fetchTableExists ctx "finance_balance_snapshot_events"
+                  snapshotsTableExists <- fetchTableExists ctx "finance_balance_snapshots"
                   assertBool "Expected finance_account_events table to exist after reapply" eventsTableExists
                   assertBool "Expected finance_accounts table to exist after reapply" projectionTableExists
                   assertBool "Expected finance_transaction_events table to exist after reapply" transactionEventsTableExists
@@ -2104,6 +2120,8 @@ financeMigrationReapplyAfterDown =
                   assertBool "Expected finance_transaction_links table to exist after reapply" linksTableExists
                   assertBool "Expected finance_transaction_note_events table to exist after reapply" noteEventsTableExists
                   assertBool "Expected finance_transaction_notes table to exist after reapply" notesTableExists
+                  assertBool "Expected finance_balance_snapshot_events table to exist after reapply" snapshotEventsTableExists
+                  assertBool "Expected finance_balance_snapshots table to exist after reapply" snapshotsTableExists
 
 noteMigrationUpCreatesSchema :: IO ()
 noteMigrationUpCreatesSchema =
@@ -2406,6 +2424,7 @@ financeAccountPostgresRepositoryTests = test
   , "Finance account Postgres adapter should reject duplicate normalized names" ~: pgFinanceAccountRepoDuplicateNormalizedNameReturnsAlreadyExists
   , "Finance account Postgres adapter should close accounts idempotently and return NotFound for missing ids" ~: pgFinanceAccountRepoCloseLifecycle
   , "Finance account Postgres adapter should filter by status and keep users isolated" ~: pgFinanceAccountRepoStatusFilteringAndIsolation
+  , "Finance account Postgres adapter should manage snapshots and compute reconciliation" ~: pgFinanceAccountRepoSnapshotsAndReconciliation
   ]
 
 financeCategoryPostgresRepositoryTests = test
@@ -3114,6 +3133,70 @@ pgFinanceAccountRepoCloseLifecycle =
                   assertEqual "Expected second close to stay idempotent and return the same closed projection" firstClosed secondClosed
                 (firstResult, secondResult, missingResult) ->
                   assertFailure ("Unexpected finance account close results: " ++ show (firstResult, secondResult, missingResult))
+
+pgFinanceAccountRepoSnapshotsAndReconciliation :: IO ()
+pgFinanceAccountRepoSnapshotsAndReconciliation =
+  withOptionalPostgresContext "Skipping Finance account Postgres repository snapshot test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
+    withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
+      upResult <- runExceptT (runFinanceMigrationsAtPath "." schemaConn MigrateUp)
+      case upResult of
+        Left err -> assertFailure ("Expected finance migration up success, got " ++ err)
+        Right () -> do
+          pool <- mkTestPostgresPool schemaConn
+          let accountRepo = postgresFinanceAccountRepository pool
+              transactionRepo = postgresFinanceTransactionRepository pool
+              userId = "finance-snapshot-user"
+          account <- runExceptT $ repoCreateFinanceAccount accountRepo userId "Snapshot Account"
+          case account of
+            Left err -> assertFailure ("Expected finance account create success, got " ++ show err)
+            Right createdAccount -> do
+              _ <- runExceptT $ repoCreateFinanceTransaction transactionRepo userId FinanceTransactionWriteRequest
+                { financeTransactionWriteIdempotencyKey = "snap-key-1"
+                , financeTransactionWriteDirection = FinanceTransactionReceived
+                , financeTransactionWriteAccountId = financeAccountId createdAccount
+                , financeTransactionWriteAmount = 5000
+                , financeTransactionWriteOccurredAt = read "2026-04-01 10:00:00 UTC"
+                , financeTransactionWriteOccurredAtSupplied = True
+                }
+              _ <- runExceptT $ repoCreateFinanceTransaction transactionRepo userId FinanceTransactionWriteRequest
+                { financeTransactionWriteIdempotencyKey = "snap-key-2"
+                , financeTransactionWriteDirection = FinanceTransactionSent
+                , financeTransactionWriteAccountId = financeAccountId createdAccount
+                , financeTransactionWriteAmount = 1200
+                , financeTransactionWriteOccurredAt = read "2026-04-02 10:00:00 UTC"
+                , financeTransactionWriteOccurredAtSupplied = True
+                }
+              createSnapshot <- runExceptT $ repoCreateFinanceAccountSnapshot accountRepo userId (financeAccountId createdAccount) 3500 (read "2026-04-02 10:00:00 UTC")
+              duplicateSnapshot <- runExceptT $ repoCreateFinanceAccountSnapshot accountRepo userId (financeAccountId createdAccount) 3550 (read "2026-04-02 10:00:00 UTC")
+              missingSnapshot <- runExceptT $ repoCreateFinanceAccountSnapshot accountRepo userId "missing-account" 3500 (read "2026-04-02 10:00:00 UTC")
+              case (createSnapshot, duplicateSnapshot, missingSnapshot) of
+                (Right firstRecon, Left AlreadyExists, Left NotFound) -> do
+                  assertEqual "Expected derived balance at first snapshot to follow signed transaction sum" 3800 (financeAccountReconciliationDerivedBalanceAtSnapshot firstRecon)
+                  assertEqual "Expected discrepancy to be observed minus derived" (-300) (financeAccountReconciliationDiscrepancy firstRecon)
+                  secondRecon <- runExceptT $ repoCreateFinanceAccountSnapshot accountRepo userId (financeAccountId createdAccount) 3000 (read "2026-04-03 10:00:00 UTC")
+                  case secondRecon of
+                    Left err -> assertFailure ("Expected second snapshot create success, got " ++ show err)
+                    Right createdSecondRecon -> do
+                      _ <- runExceptT $ repoCreateFinanceTransaction transactionRepo userId FinanceTransactionWriteRequest
+                        { financeTransactionWriteIdempotencyKey = "snap-key-3"
+                        , financeTransactionWriteDirection = FinanceTransactionSent
+                        , financeTransactionWriteAccountId = financeAccountId createdAccount
+                        , financeTransactionWriteAmount = 500
+                        , financeTransactionWriteOccurredAt = read "2026-04-04 10:00:00 UTC"
+                        , financeTransactionWriteOccurredAtSupplied = True
+                        }
+                      listed <- runExceptT $ repoListFinanceAccountSnapshots accountRepo userId (financeAccountId createdAccount)
+                      latestRecon <- runExceptT $ repoGetFinanceAccountReconciliationLatest accountRepo userId (financeAccountId createdAccount)
+                      byFirstSnapshot <- runExceptT $ repoGetFinanceAccountReconciliationBySnapshotId accountRepo userId (financeAccountId createdAccount) (financeAccountReconciliationSnapshotId firstRecon)
+                      missingSnapshotRecon <- runExceptT $ repoGetFinanceAccountReconciliationBySnapshotId accountRepo userId (financeAccountId createdAccount) "missing-snapshot"
+                      case (listed, latestRecon, byFirstSnapshot, missingSnapshotRecon) of
+                        (Right snapshots, Right latest, Right firstById, Left NotFound) -> do
+                          assertEqual "Expected two snapshots listed" 2 (length snapshots)
+                          assertEqual "Expected latest reconciliation to use latest snapshot" (financeAccountReconciliationSnapshotId createdSecondRecon) (financeAccountReconciliationSnapshotId latest)
+                          assertEqual "Expected derived balance at latest snapshot to include transactions up to that timestamp only" 3800 (financeAccountReconciliationDerivedBalanceAtSnapshot latest)
+                          assertEqual "Expected first snapshot reconciliation to stay stable despite later transactions" 3800 (financeAccountReconciliationDerivedBalanceAtSnapshot firstById)
+                        outcomes -> assertFailure ("Unexpected snapshot listing/reconciliation outcomes: " ++ show outcomes)
+                outcomes -> assertFailure ("Unexpected snapshot creation outcomes: " ++ show outcomes)
 
 pgFinanceCategoryRepoListsBuiltInsAndUserCategories :: IO ()
 pgFinanceCategoryRepoListsBuiltInsAndUserCategories =

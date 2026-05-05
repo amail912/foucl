@@ -36,6 +36,7 @@ import CalendarRepository (CalendarRepository(..))
 import Crud
 import CrudStorage (createItem, deleteItem, modifyItem)
 import FinanceAccountRepository (FinanceAccount(..), FinanceAccountCreateRequest(..), FinanceAccountRepository(..), FinanceAccountStatus(..), FinanceAccountStatusFilter(..), normalizeFinanceAccountName, parseFinanceAccountStatusFilter)
+import FinanceAccountRepository (FinanceAccountSnapshotCreateRequest(..))
 import FinanceCategoryRepository
   ( FinanceCategoryRepository(..)
   , FinanceCategoryWriteRequest(..)
@@ -621,6 +622,8 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
           [ financeAccountsList
           , financeAccountsCreate
           , financeAccountsClose
+          , financeAccountsSnapshots
+          , financeAccountsReconciliation
           ]
     , dir "categories" $
         msum
@@ -681,6 +684,59 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
           Left NotFound -> notFound (jsonMessage "Account not found")
           Left _ -> internalServerError emptyResponse
           Right account -> ok (jsonResponse account)
+
+    financeAccountsSnapshots = path $ \accountId -> do
+      dir "snapshots" $ do
+        msum [financeAccountsSnapshotsCreate accountId, financeAccountsSnapshotsList accountId]
+
+    financeAccountsSnapshotsCreate :: String -> ServerPartT IO Response
+    financeAccountsSnapshotsCreate accountId = do
+      nullDir
+      method POST
+      body <- askRq >>= takeRequestBody
+      maybe (badRequest "Empty body") (handleSnapshotCreateBody accountId) body
+
+    financeAccountsSnapshotsList :: String -> ServerPartT IO Response
+    financeAccountsSnapshotsList accountId = do
+      nullDir
+      method GET
+      result <- liftIO $ runExceptT (repoListFinanceAccountSnapshots financeAccountRepo principalUserId accountId)
+      case result of
+        Left NotFound -> notFound (jsonMessage "Account not found")
+        Left _ -> internalServerError emptyResponse
+        Right snapshots -> ok (jsonResponse snapshots)
+
+    financeAccountsReconciliation = path $ \accountId -> do
+      dir "reconciliation" $ do
+        nullDir
+        method GET
+        mSnapshotId <- (Just <$> look "snapshotId") `mplus` pure Nothing
+        result <- liftIO $ runExceptT $
+          case mSnapshotId of
+            Nothing -> repoGetFinanceAccountReconciliationLatest financeAccountRepo principalUserId accountId
+            Just snapshotId -> repoGetFinanceAccountReconciliationBySnapshotId financeAccountRepo principalUserId accountId snapshotId
+        case result of
+          Left NotFound -> notFound (jsonMessage "Account or snapshot not found")
+          Left _ -> internalServerError emptyResponse
+          Right reconciliation -> ok (jsonResponse reconciliation)
+
+    handleSnapshotCreateBody :: String -> RqBody -> ServerPartT IO Response
+    handleSnapshotCreateBody accountId rqBody =
+      case decode' (unBody rqBody) :: Maybe FinanceAccountSnapshotCreateRequest of
+        Nothing -> badRequest "Unable to decode the body as a FinanceAccountSnapshotCreateRequest"
+        Just FinanceAccountSnapshotCreateRequest
+          { financeAccountSnapshotCreateBalance
+          , financeAccountSnapshotCreateOccurredAt
+          } ->
+            case iso8601ParseM financeAccountSnapshotCreateOccurredAt of
+              Nothing -> badRequest "occurredAt must be a valid ISO date-time string"
+              Just occurredAt -> do
+                result <- liftIO $ runExceptT (repoCreateFinanceAccountSnapshot financeAccountRepo principalUserId accountId financeAccountSnapshotCreateBalance occurredAt)
+                case result of
+                  Left NotFound -> notFound (jsonMessage "Account not found")
+                  Left AlreadyExists -> setResponseCode 409 >> pure (jsonMessage "Snapshot already exists for that account and timestamp")
+                  Left _ -> internalServerError emptyResponse
+                  Right reconciliation -> ok (jsonResponse reconciliation)
 
     financeTransactionsCreate direction = do
       nullDir

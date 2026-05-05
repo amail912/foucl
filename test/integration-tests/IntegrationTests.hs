@@ -383,6 +383,23 @@ runIntegrationTests = do
         assertStatusCode "Finance account close should require auth" 401 closeResp
         assertMessageResponse "Not authenticated" closeResp
 
+        snapshotsCreateReq <- parseRequest "POST http://localhost:8081/api/v1/finance/accounts/missing/snapshots"
+        snapshotsCreateResp <- httpJSON $ setRequestMethod "POST"
+                                       $ setRequestHeader "Content-Type" ["application/json"]
+                                       $ setRequestBodyJSON (object ["balance" .= (1000 :: Int), "occurredAt" .= ("2026-04-01T10:00:00Z" :: String)]) snapshotsCreateReq
+        assertStatusCode "Finance account snapshot create should require auth" 401 snapshotsCreateResp
+        assertMessageResponse "Not authenticated" snapshotsCreateResp
+
+        snapshotsListReq <- parseRequest "GET http://localhost:8081/api/v1/finance/accounts/missing/snapshots"
+        snapshotsListResp <- httpJSON $ setRequestMethod "GET" snapshotsListReq
+        assertStatusCode "Finance account snapshot list should require auth" 401 snapshotsListResp
+        assertMessageResponse "Not authenticated" snapshotsListResp
+
+        reconciliationReq <- parseRequest "GET http://localhost:8081/api/v1/finance/accounts/missing/reconciliation"
+        reconciliationResp <- httpJSON $ setRequestMethod "GET" reconciliationReq
+        assertStatusCode "Finance account reconciliation should require auth" 401 reconciliationResp
+        assertMessageResponse "Not authenticated" reconciliationResp
+
         listCategoriesReq <- parseRequest "GET http://localhost:8081/api/v1/finance/categories"
         listCategoriesResp <- httpJSON $ setRequestMethod "GET" listCategoriesReq
         assertStatusCode "Finance category list should require auth" 401 listCategoriesResp
@@ -512,6 +529,57 @@ runIntegrationTests = do
         closeResp <- closeFinanceAccountExpectValue cookie "missing-account"
         assertStatusCode "Closing an unknown finance account should return 404" 404 closeResp
         assertMessageResponse "Account not found" closeResp
+
+      it "should record account snapshots and compute reconciliation views" $ do
+        uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
+        let snapshotUsername = "fin-snap-" ++ show uniquenessSuffix
+        ensureApprovedSandboxUser baseUsername snapshotUsername basePassword
+        cookie <- signinOnly snapshotUsername basePassword
+        account <- createFinanceAccount cookie "Snapshot Account"
+        accountId <- requireObjectStringField "id" account
+
+        _ <- createFinanceTransactionExpectValue cookie financeTransactionsReceivedEndpoint "snapshot-key-1" (object ["accountId" .= accountId, "amount" .= (5000 :: Int), "occurredAt" .= ("2026-04-01T10:00:00Z" :: String)])
+        _ <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "snapshot-key-2" (object ["accountId" .= accountId, "amount" .= (1200 :: Int), "occurredAt" .= ("2026-04-02T10:00:00Z" :: String)])
+
+        snapshotCreateResp <- createFinanceAccountSnapshotExpectValue cookie accountId 3500 "2026-04-02T10:00:00Z"
+        assertStatusCode "Snapshot create should succeed" 200 snapshotCreateResp
+        assertFinanceReconciliationValues 3800 (-300) (getResponseBody snapshotCreateResp)
+        firstSnapshotId <- requireObjectStringField "snapshotId" (getResponseBody snapshotCreateResp)
+
+        duplicateSnapshotResp <- createFinanceAccountSnapshotExpectValue cookie accountId 3550 "2026-04-02T10:00:00Z"
+        assertStatusCode "Duplicate account+timestamp snapshot should return 409" 409 duplicateSnapshotResp
+        assertMessageResponse "Snapshot already exists for that account and timestamp" duplicateSnapshotResp
+
+        secondSnapshotResp <- createFinanceAccountSnapshotExpectValue cookie accountId 3000 "2026-04-03T10:00:00Z"
+        assertStatusCode "Second snapshot create should succeed" 200 secondSnapshotResp
+        secondSnapshotId <- requireObjectStringField "snapshotId" (getResponseBody secondSnapshotResp)
+
+        _ <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "snapshot-key-3" (object ["accountId" .= accountId, "amount" .= (500 :: Int), "occurredAt" .= ("2026-04-04T10:00:00Z" :: String)])
+
+        snapshots <- getFinanceAccountSnapshots cookie accountId
+        assertEqual "Expected two snapshots listed" 2 (Prelude.length snapshots)
+        assertEqual "Expected latest snapshot first in list order" secondSnapshotId (financeSnapshotIdValue (head snapshots))
+
+        latestReconciliationResp <- getFinanceAccountReconciliationExpectValue cookie accountId Nothing
+        assertStatusCode "Latest reconciliation should succeed" 200 latestReconciliationResp
+        assertEqual "Expected latest reconciliation to use latest snapshot id" secondSnapshotId (financeReconciliationSnapshotIdValue (getResponseBody latestReconciliationResp))
+        assertFinanceReconciliationValues 3800 (-800) (getResponseBody latestReconciliationResp)
+
+        firstReconciliationResp <- getFinanceAccountReconciliationExpectValue cookie accountId (Just firstSnapshotId)
+        assertStatusCode "Reconciliation by snapshot id should succeed" 200 firstReconciliationResp
+        assertFinanceReconciliationValues 3800 (-300) (getResponseBody firstReconciliationResp)
+
+        missingSnapshotResp <- getFinanceAccountReconciliationExpectValue cookie accountId (Just "missing-snapshot")
+        assertStatusCode "Unknown snapshot reconciliation should return 404" 404 missingSnapshotResp
+        assertMessageResponse "Account or snapshot not found" missingSnapshotResp
+
+        missingAccountSnapshotResp <- createFinanceAccountSnapshotExpectValue cookie "missing-account" 1000 "2026-04-02T10:00:00Z"
+        assertStatusCode "Snapshot create on unknown account should return 404" 404 missingAccountSnapshotResp
+        assertMessageResponse "Account not found" missingAccountSnapshotResp
+
+        _ <- closeFinanceAccount cookie accountId
+        closedSnapshotResp <- createFinanceAccountSnapshotExpectValue cookie accountId 2500 "2026-04-05T10:00:00Z"
+        assertStatusCode "Snapshot create on a closed account should succeed" 200 closedSnapshotResp
 
       it "should list built-in finance categories and support user-owned category lifecycle" $ do
         uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
@@ -2177,6 +2245,31 @@ closeFinanceAccountExpectValue cookie accountId = do
          $ setRequestHeader "Cookie" [BS.pack cookie]
          req
 
+createFinanceAccountSnapshotExpectValue :: String -> String -> Int -> String -> IO (Response Value)
+createFinanceAccountSnapshotExpectValue cookie accountId balance occurredAt = do
+  req <- parseRequest ("POST http://localhost:8081" ++ financeAccountsEndpoint ++ "/" ++ accountId ++ "/snapshots")
+  httpJSON $ setRequestMethod "POST"
+         $ setRequestHeader "Cookie" [BS.pack cookie]
+         $ setRequestHeader "Content-Type" ["application/json"]
+         $ setRequestBodyJSON (object ["balance" .= balance, "occurredAt" .= occurredAt]) req
+
+getFinanceAccountSnapshots :: String -> String -> IO [Value]
+getFinanceAccountSnapshots cookie accountId = do
+  req <- parseRequest ("GET http://localhost:8081" ++ financeAccountsEndpoint ++ "/" ++ accountId ++ "/snapshots")
+  resp <- httpJSON $ setRequestMethod "GET"
+                  $ setRequestHeader "Cookie" [BS.pack cookie]
+                  req
+  assertStatusCode "Finance account snapshot list should succeed" 200 (resp :: Response [Value])
+  pure (getResponseBody resp)
+
+getFinanceAccountReconciliationExpectValue :: String -> String -> Maybe String -> IO (Response Value)
+getFinanceAccountReconciliationExpectValue cookie accountId mSnapshotId = do
+  req <- parseRequest ("GET http://localhost:8081" ++ financeAccountsEndpoint ++ "/" ++ accountId ++ "/reconciliation")
+  let query = maybe [] (\snapshotId -> [("snapshotId", Just (BS.pack snapshotId))]) mSnapshotId
+  httpJSON $ setRequestMethod "GET"
+         $ setRequestHeader "Cookie" [BS.pack cookie]
+         $ setRequestQueryString query req
+
 createFinanceCategory :: String -> String -> Maybe String -> IO Value
 createFinanceCategory cookie name parentId = do
   resp <- createFinanceCategoryExpectValue cookie name parentId
@@ -2383,6 +2476,44 @@ financeAccountNameValue responseBody =
         Just actualName -> actualName
         Nothing -> error "Expected finance account name field"
     _ -> error "Expected finance account response object"
+
+financeSnapshotIdValue :: Value -> String
+financeSnapshotIdValue responseBody =
+  case responseBody of
+    Object value ->
+      case parseMaybe (.: "id") value of
+        Just actualId -> actualId
+        Nothing -> error "Expected finance snapshot id field"
+    _ -> error "Expected finance snapshot response object"
+
+financeReconciliationSnapshotIdValue :: Value -> String
+financeReconciliationSnapshotIdValue responseBody =
+  case responseBody of
+    Object value ->
+      case parseMaybe (.: "snapshotId") value of
+        Just actualId -> actualId
+        Nothing -> error "Expected reconciliation snapshotId field"
+    _ -> error "Expected finance reconciliation response object"
+
+assertFinanceReconciliationValues :: Int -> Int -> Value -> Assertion
+assertFinanceReconciliationValues expectedDerivedBalance expectedDiscrepancy responseBody =
+  case responseBody of
+    Object value -> do
+      case parseMaybe (.: "derivedBalanceAtSnapshot") value of
+        Just actualDerived -> assertEqual "Expected reconciliation derivedBalanceAtSnapshot" expectedDerivedBalance (actualDerived :: Int)
+        Nothing -> assertFailure "Expected reconciliation derivedBalanceAtSnapshot"
+      case parseMaybe (.: "discrepancy") value of
+        Just actualDiscrepancy -> assertEqual "Expected reconciliation discrepancy" expectedDiscrepancy (actualDiscrepancy :: Int)
+        Nothing -> assertFailure "Expected reconciliation discrepancy"
+      case ( parseMaybe (.: "snapshotId") value
+           , parseMaybe (.: "snapshotOccurredAt") value
+           , parseMaybe (.: "observedBalance") value
+           ) of
+        (Just snapshotId, Just snapshotOccurredAt, Just (_ :: Int)) -> do
+          assertBool "Expected reconciliation snapshotId to be non-empty" (not (null (snapshotId :: String)))
+          assertBool "Expected reconciliation snapshotOccurredAt to be non-empty" (not (null (snapshotOccurredAt :: String)))
+        _ -> assertFailure "Expected reconciliation snapshot fields"
+    _ -> assertFailure "Expected finance reconciliation response object"
 
 financeTransactionAmountValue :: Value -> Int
 financeTransactionAmountValue responseBody =

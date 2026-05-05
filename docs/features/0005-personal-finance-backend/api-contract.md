@@ -198,7 +198,7 @@ Read rules:
 - `from > to` returns `400`
 
 ## Snapshots And Reconciliation
-### `POST /accounts/{id}/snapshots`
+### `POST /api/v1/finance/accounts/{id}/snapshots`
 Records an observed balance snapshot for an account.
 
 Request fields:
@@ -213,7 +213,7 @@ Rules:
 - unknown accounts return `404`
 - success returns the reconciliation state for the snapshot that was just created
 
-### `GET /accounts/{id}/snapshots`
+### `GET /api/v1/finance/accounts/{id}/snapshots`
 Returns snapshot discovery data for one account.
 
 Default behavior:
@@ -224,7 +224,7 @@ Response fields per snapshot:
 - `occurredAt`
 - `balance`
 
-### `GET /accounts/{id}/reconciliation`
+### `GET /api/v1/finance/accounts/{id}/reconciliation`
 Returns reconciliation for one account.
 
 Query parameters:

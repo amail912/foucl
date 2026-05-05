@@ -296,11 +296,11 @@ Draft shape:
 - `notes` exposes the current non-deleted note list with `id`, `text`, `createdAt`, and `updatedAt`
 
 ### Snapshots
-- `GET /accounts/{id}/snapshots` returns snapshot discovery rows with `id`, `occurredAt`, and `balance`
+- `GET /api/v1/finance/accounts/{id}/snapshots` returns snapshot discovery rows with `id`, `occurredAt`, and `balance`
 - snapshots are ordered by `occurredAt` descending with snapshot `id` as deterministic tie-breaker
-- `GET /accounts/{id}/reconciliation` returns the latest reconciliation by default
-- `POST /accounts/{id}/snapshots` returns reconciliation for the created snapshot rather than necessarily the latest snapshot on the account
-- `GET /accounts/{id}/reconciliation?snapshotId=...` returns reconciliation for the selected snapshot
+- `GET /api/v1/finance/accounts/{id}/reconciliation` returns the latest reconciliation by default
+- `POST /api/v1/finance/accounts/{id}/snapshots` returns reconciliation for the created snapshot rather than necessarily the latest snapshot on the account
+- `GET /api/v1/finance/accounts/{id}/reconciliation?snapshotId=...` returns reconciliation for the selected snapshot
 - reconciliation responses expose `snapshotId`, `snapshotOccurredAt`, `observedBalance`, `derivedBalanceAtSnapshot`, and `discrepancy`
 
 ### Ledger

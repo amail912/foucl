@@ -6,6 +6,7 @@ module FinanceTransactionRepository
   , FinanceTransaction(..)
   , FinanceTransactionNote(..)
   , FinanceTransactionNoteCreateRequest(..)
+  , FinanceTransactionNoteUpdateRequest(..)
   , FinanceTransactionLinkRequest(..)
   , FinanceTransactionSplitRow(..)
   , FinanceTransactionTransfer(..)
@@ -47,6 +48,8 @@ data FinanceTransactionRepository = FinanceTransactionRepository
   , repoLoadFinanceTransactionById :: !(String -> String -> ExceptT RepositoryError IO FinanceTransaction)
   , repoListFinanceTransactions :: !(String -> Maybe String -> Maybe UTCTime -> Maybe UTCTime -> ExceptT RepositoryError IO [FinanceTransaction])
   , repoAddFinanceTransactionNote :: !(String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction)
+  , repoUpdateFinanceTransactionNote :: !(String -> String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction)
+  , repoDeleteFinanceTransactionNote :: !(String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction)
   , repoCategorizeFinanceTransaction :: !(String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction)
   , repoSplitFinanceTransaction :: !(String -> String -> [FinanceTransactionSplitWriteRow] -> ExceptT RepositoryError IO FinanceTransaction)
   , repoLinkFinanceTransactions :: !(String -> String -> String -> String -> ExceptT RepositoryError IO (FinanceTransaction, FinanceTransaction))
@@ -60,6 +63,10 @@ data FinanceTransactionCreateRequest = FinanceTransactionCreateRequest
 
 data FinanceTransactionNoteCreateRequest = FinanceTransactionNoteCreateRequest
   { financeTransactionNoteCreateText :: !String
+  }
+
+data FinanceTransactionNoteUpdateRequest = FinanceTransactionNoteUpdateRequest
+  { financeTransactionNoteUpdateText :: !String
   }
 
 data FinanceTransactionLinkRequest = FinanceTransactionLinkRequest
@@ -137,7 +144,11 @@ instance FromJSON FinanceTransactionCreateRequest where
 
 instance FromJSON FinanceTransactionNoteCreateRequest where
   parseJSON = withObject "FinanceTransactionNoteCreateRequest" $ \value ->
-    FinanceTransactionNoteCreateRequest <$> value .: "text"
+    FinanceTransactionNoteCreateRequest . trimWhitespace <$> value .: "text"
+
+instance FromJSON FinanceTransactionNoteUpdateRequest where
+  parseJSON = withObject "FinanceTransactionNoteUpdateRequest" $ \value ->
+    FinanceTransactionNoteUpdateRequest . trimWhitespace <$> value .: "text"
 
 instance FromJSON FinanceTransactionLinkRequest where
   parseJSON = withObject "FinanceTransactionLinkRequest" $ \value ->
@@ -234,6 +245,8 @@ postgresFinanceTransactionRepository pool =
     , repoLoadFinanceTransactionById = pgLoadFinanceTransactionById pool
     , repoListFinanceTransactions = pgListFinanceTransactions pool
     , repoAddFinanceTransactionNote = pgAddFinanceTransactionNote pool
+    , repoUpdateFinanceTransactionNote = pgUpdateFinanceTransactionNote pool
+    , repoDeleteFinanceTransactionNote = pgDeleteFinanceTransactionNote pool
     , repoCategorizeFinanceTransaction = pgCategorizeFinanceTransaction pool
     , repoSplitFinanceTransaction = pgSplitFinanceTransaction pool
     , repoLinkFinanceTransactions = pgLinkFinanceTransactions pool
@@ -284,7 +297,7 @@ financeTransactionPostgresHealthChecks conn = do
   tryExcept
     (query_ conn
       "SELECT event_id, user_id, transaction_id, note_id, event_type, note_text, recorded_at FROM finance_transaction_note_events LIMIT 0"
-      :: IO [(String, String, String, String, String, String, UTCTime)])
+      :: IO [(String, String, String, String, String, Maybe String, UTCTime)])
     (\err -> "Finance schema check failed for finance_transaction_note_events: " ++ show err)
   tryExcept
     (query_ conn
@@ -409,9 +422,9 @@ pgListFinanceTransactions pool userId mAccountId mFrom mTo =
 pgAddFinanceTransactionNote :: Pool Connection -> String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction
 pgAddFinanceTransactionNote pool userId transactionId noteText =
   withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
-    if not (isValidNoteText noteText)
-      then throwError WriteFailure
-      else do
+    case normalizeNoteText noteText of
+      Nothing -> throwError WriteFailure
+      Just normalizedText -> do
         _ <- requireTransactionAmount conn userId transactionId
         eventId <- liftIO (toString <$> nextRandom)
         noteId <- liftIO (toString <$> nextRandom)
@@ -419,25 +432,89 @@ pgAddFinanceTransactionNote pool userId transactionId noteText =
           (withTransaction conn $ do
             recordedRows <- query conn
               "INSERT INTO finance_transaction_note_events (event_id, user_id, transaction_id, note_id, event_type, note_text) VALUES (?, ?, ?, ?, ?, ?) RETURNING recorded_at"
-              (eventId, userId, transactionId, noteId, ("TransactionNoteAdded" :: String), noteText)
+              (eventId, userId, transactionId, noteId, ("TransactionNoteAdded" :: String), Just normalizedText)
               :: IO [Only UTCTime]
             recordedAt <- case recordedRows of
               [Only rowRecordedAt] -> pure rowRecordedAt
               _ -> fail "Unexpected recorded_at row count for finance transaction note event insert"
             _ <- execute conn
               "INSERT INTO finance_transaction_notes (user_id, transaction_id, note_id, note_text, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
-              (userId, transactionId, noteId, noteText, recordedAt, recordedAt)
+              (userId, transactionId, noteId, normalizedText, recordedAt, recordedAt)
             pure ())
           mapSqlWriteException
         pgLoadFinanceTransactionByIdInConn conn userId transactionId
 
-isValidNoteText :: String -> Bool
-isValidNoteText text =
+pgUpdateFinanceTransactionNote :: Pool Connection -> String -> String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction
+pgUpdateFinanceTransactionNote pool userId transactionId noteId noteText =
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    case normalizeNoteText noteText of
+      Nothing -> throwError WriteFailure
+      Just normalizedText -> do
+        _ <- requireTransactionAmount conn userId transactionId
+        _ <- requireTransactionNote conn userId transactionId noteId
+        eventId <- liftIO (toString <$> nextRandom)
+        _ <- tryExcept
+          (withTransaction conn $ do
+            recordedRows <- query conn
+              "INSERT INTO finance_transaction_note_events (event_id, user_id, transaction_id, note_id, event_type, note_text) VALUES (?, ?, ?, ?, ?, ?) RETURNING recorded_at"
+              (eventId, userId, transactionId, noteId, ("TransactionNoteUpdated" :: String), Just normalizedText)
+              :: IO [Only UTCTime]
+            recordedAt <- case recordedRows of
+              [Only rowRecordedAt] -> pure rowRecordedAt
+              _ -> fail "Unexpected recorded_at row count for finance transaction note update event insert"
+            updatedRows <- execute conn
+              "UPDATE finance_transaction_notes SET note_text = ?, updated_at = ? WHERE user_id = ? AND transaction_id = ? AND note_id = ?"
+              (normalizedText, recordedAt, userId, transactionId, noteId)
+            if updatedRows == 1
+              then pure ()
+              else fail "Unexpected updated row count for finance transaction note update"
+          )
+          mapSqlWriteException
+        pgLoadFinanceTransactionByIdInConn conn userId transactionId
+
+pgDeleteFinanceTransactionNote :: Pool Connection -> String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction
+pgDeleteFinanceTransactionNote pool userId transactionId noteId =
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    _ <- requireTransactionAmount conn userId transactionId
+    _ <- requireTransactionNote conn userId transactionId noteId
+    eventId <- liftIO (toString <$> nextRandom)
+    _ <- tryExcept
+      (withTransaction conn $ do
+        _ <- execute conn
+          "INSERT INTO finance_transaction_note_events (event_id, user_id, transaction_id, note_id, event_type, note_text) VALUES (?, ?, ?, ?, ?, ?)"
+          (eventId, userId, transactionId, noteId, ("TransactionNoteDeleted" :: String), Nothing :: Maybe String)
+        deletedRows <- execute conn
+          "DELETE FROM finance_transaction_notes WHERE user_id = ? AND transaction_id = ? AND note_id = ?"
+          (userId, transactionId, noteId)
+        if deletedRows == 1
+          then pure ()
+          else fail "Unexpected deleted row count for finance transaction note delete"
+      )
+      mapSqlWriteException
+    pgLoadFinanceTransactionByIdInConn conn userId transactionId
+
+normalizeNoteText :: String -> Maybe String
+normalizeNoteText text =
   let trimmed = trimWhitespace text
-   in not (null trimmed) && length text <= 2000
+   in if null trimmed || length trimmed > 2000
+        then Nothing
+        else Just trimmed
 
 trimWhitespace :: String -> String
 trimWhitespace = dropWhile isSpace . dropWhileEnd isSpace
+
+requireTransactionNote :: Connection -> String -> String -> String -> ExceptT RepositoryError IO ()
+requireTransactionNote conn userId transactionId noteId = do
+  rows <- tryExcept
+    (query conn
+      "SELECT note_id FROM finance_transaction_notes WHERE user_id = ? AND transaction_id = ? AND note_id = ? LIMIT 1"
+      (userId, transactionId, noteId)
+      :: IO [Only String])
+    mapSqlReadException
+  case rows of
+    [] -> throwError NotFound
+    [_] -> pure ()
+    _ -> throwError ReadFailure
 
 pgCategorizeFinanceTransaction :: Pool Connection -> String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction
 pgCategorizeFinanceTransaction pool userId transactionId categorySlug =

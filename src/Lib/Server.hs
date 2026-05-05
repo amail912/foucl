@@ -47,6 +47,7 @@ import FinanceTransactionRepository
   , FinanceTransactionDirection(..)
   , FinanceTransactionLinkRequest(..)
   , FinanceTransactionNoteCreateRequest(..)
+  , FinanceTransactionNoteUpdateRequest(..)
   , FinanceTransactionSplitRequest(..)
   , FinanceTransaction
   , FinanceTransactionRepository(..)
@@ -777,10 +778,31 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
 
     financeTransactionsNotes = path $ \transactionId -> do
       dir "notes" $ do
-        nullDir
-        method POST
-        body <- askRq >>= takeRequestBody
-        maybe (badRequest "Empty body") (handleTransactionNotesBody transactionId) body
+        msum [financeTransactionNoteCreate transactionId, financeTransactionNoteUpdate transactionId, financeTransactionNoteDelete transactionId]
+
+    financeTransactionNoteCreate :: String -> ServerPartT IO Response
+    financeTransactionNoteCreate transactionId = do
+      nullDir
+      method POST
+      body <- askRq >>= takeRequestBody
+      maybe (badRequest "Empty body") (handleTransactionNoteCreateBody transactionId) body
+
+    financeTransactionNoteUpdate :: String -> ServerPartT IO Response
+    financeTransactionNoteUpdate transactionId = path $ \noteId -> do
+      nullDir
+      method PUT
+      body <- askRq >>= takeRequestBody
+      maybe (badRequest "Empty body") (handleTransactionNoteUpdateBody transactionId noteId) body
+
+    financeTransactionNoteDelete :: String -> ServerPartT IO Response
+    financeTransactionNoteDelete transactionId = path $ \noteId -> do
+      nullDir
+      method DELETE
+      result <- liftIO $ runExceptT (repoDeleteFinanceTransactionNote financeTransactionRepo principalUserId transactionId noteId)
+      case result of
+        Left NotFound -> notFound (jsonMessage "Transaction or note not found")
+        Left _ -> internalServerError emptyResponse
+        Right transaction -> ok (jsonResponse transaction)
 
     handleTransactionCategorizeBody :: String -> RqBody -> ServerPartT IO Response
     handleTransactionCategorizeBody transactionId rqBody =
@@ -828,14 +850,26 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
                   Right (sourceTransaction, targetTransaction) ->
                     ok (jsonResponse (object ["source" .= sourceTransaction, "target" .= targetTransaction]))
 
-    handleTransactionNotesBody :: String -> RqBody -> ServerPartT IO Response
-    handleTransactionNotesBody transactionId rqBody =
+    handleTransactionNoteCreateBody :: String -> RqBody -> ServerPartT IO Response
+    handleTransactionNoteCreateBody transactionId rqBody =
       case decode' (unBody rqBody) :: Maybe FinanceTransactionNoteCreateRequest of
         Nothing -> badRequest "Unable to decode the body as a FinanceTransactionNoteCreateRequest"
         Just FinanceTransactionNoteCreateRequest { financeTransactionNoteCreateText } -> do
           result <- liftIO $ runExceptT (repoAddFinanceTransactionNote financeTransactionRepo principalUserId transactionId financeTransactionNoteCreateText)
           case result of
             Left NotFound -> notFound (jsonMessage "Transaction not found")
+            Left WriteFailure -> badRequest "text must not be blank and must not exceed 2000 characters"
+            Left _ -> internalServerError emptyResponse
+            Right transaction -> ok (jsonResponse transaction)
+
+    handleTransactionNoteUpdateBody :: String -> String -> RqBody -> ServerPartT IO Response
+    handleTransactionNoteUpdateBody transactionId noteId rqBody =
+      case decode' (unBody rqBody) :: Maybe FinanceTransactionNoteUpdateRequest of
+        Nothing -> badRequest "Unable to decode the body as a FinanceTransactionNoteUpdateRequest"
+        Just FinanceTransactionNoteUpdateRequest { financeTransactionNoteUpdateText } -> do
+          result <- liftIO $ runExceptT (repoUpdateFinanceTransactionNote financeTransactionRepo principalUserId transactionId noteId financeTransactionNoteUpdateText)
+          case result of
+            Left NotFound -> notFound (jsonMessage "Transaction or note not found")
             Left WriteFailure -> badRequest "text must not be blank and must not exceed 2000 characters"
             Left _ -> internalServerError emptyResponse
             Right transaction -> ok (jsonResponse transaction)

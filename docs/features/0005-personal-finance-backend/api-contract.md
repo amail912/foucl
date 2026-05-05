@@ -136,6 +136,9 @@ Request fields:
 - `amount` (in cents)
 - optional `occurredAt`
 
+Notes:
+- transaction create payloads do not embed note text in v1; note writes use dedicated note endpoints
+
 ### `POST /api/v1/finance/transactions/received`
 Records one immutable income transaction.
 
@@ -304,12 +307,13 @@ Request fields:
 
 Rules:
 - note text is free text only in v1
+- note text is trimmed before persistence
 - note text must not be empty or whitespace-only after validation trimming
-- note text length must not exceed 2000 characters
+- note text length must not exceed 2000 characters after trimming
 - blank or oversized note text returns `400`
 - success returns the updated transaction row
 
-### `POST /api/v1/finance/transactions/{transactionId}/notes/{noteId}`
+### `PUT /api/v1/finance/transactions/{transactionId}/notes/{noteId}`
 Updates one existing transaction note.
 
 Request fields:
@@ -317,8 +321,9 @@ Request fields:
 
 Rules:
 - updates replace the note's current text in current reads
+- note text is trimmed before persistence
 - note text must not be empty or whitespace-only after validation trimming
-- note text length must not exceed 2000 characters
+- note text length must not exceed 2000 characters after trimming
 - blank or oversized note text returns `400`
 - unknown or foreign-scope transaction or note ids return `404`
 - success returns the updated transaction row

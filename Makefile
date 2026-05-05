@@ -55,6 +55,7 @@ _prepare-sandbox:
 
 _prepare-postgres-test-db:
 	@set -euo pipefail; \
+	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/finance/0007_finance_transaction_note_lifecycle.down.sql"; \
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/finance/0006_finance_transaction_notes.down.sql"; \
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/finance/0005_finance_transaction_links.down.sql"; \
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/finance/0004_finance_transaction_classification.down.sql"; \

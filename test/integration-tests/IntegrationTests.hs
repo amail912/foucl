@@ -24,6 +24,7 @@ import           Network.HTTP.Simple
 import           Test.Hspec
 import           Test.Hspec.Runner (configRandomize, defaultConfig, hspecWith)
 import           Test.HUnit
+import           Control.Concurrent (threadDelay)
 import           Control.Monad (when)
 import           Data.Time.Clock.POSIX (getPOSIXTime)
 import           Data.List (isInfixOf, sort, sortOn)
@@ -445,6 +446,18 @@ runIntegrationTests = do
         assertStatusCode "Finance transaction note append should require auth" 401 notesResp
         assertMessageResponse "Not authenticated" notesResp
 
+        notesUpdateReq <- parseRequest "PUT http://localhost:8081/api/v1/finance/transactions/missing/notes/missing"
+        notesUpdateResp <- httpJSON $ setRequestMethod "PUT"
+                                     $ setRequestHeader "Content-Type" ["application/json"]
+                                     $ setRequestBodyJSON (object ["text" .= ("hello" :: String)]) notesUpdateReq
+        assertStatusCode "Finance transaction note update should require auth" 401 notesUpdateResp
+        assertMessageResponse "Not authenticated" notesUpdateResp
+
+        notesDeleteReq <- parseRequest "DELETE http://localhost:8081/api/v1/finance/transactions/missing/notes/missing"
+        notesDeleteResp <- httpJSON $ setRequestMethod "DELETE" notesDeleteReq
+        assertStatusCode "Finance transaction note delete should require auth" 401 notesDeleteResp
+        assertMessageResponse "Not authenticated" notesDeleteResp
+
       it "should create and list finance accounts for the authenticated user" $ do
         cookie <- signinOnly baseUsername basePassword
         created <- createFinanceAccount cookie "  Cash Wallet  "
@@ -819,7 +832,7 @@ runIntegrationTests = do
         assertStatusCode "Unknown transfer link transaction should return 404" 404 unknownTransactionResp
         assertMessageResponse "Transaction not found" unknownTransactionResp
 
-      it "should append transaction notes and validate note text rules" $ do
+      it "should append, update, and delete transaction notes with shared trim and validation rules" $ do
         uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
         let noteUsername = "fin-note-" ++ show uniquenessSuffix
             foreignUsername = "fin-nf-" ++ show uniquenessSuffix
@@ -841,9 +854,11 @@ runIntegrationTests = do
         assertStatusCode "Foreign transaction create should succeed" 200 foreignTxResp
         foreignTxId <- requireObjectStringField "id" (getResponseBody foreignTxResp)
 
-        appendResp <- appendFinanceTransactionNoteExpectValue cookie txId "First note"
+        appendResp <- appendFinanceTransactionNoteExpectValue cookie txId "  First note  "
         assertStatusCode "Appending a note should succeed" 200 appendResp
         assertFinanceTransactionNotesTexts ["First note"] (getResponseBody appendResp)
+        firstNoteId <- requireFinanceTransactionSingleNoteId (getResponseBody appendResp)
+        firstNoteUpdatedAt <- requireFinanceTransactionSingleNoteUpdatedAt (getResponseBody appendResp)
 
         exact2000Resp <- appendFinanceTransactionNoteExpectValue cookie txId (replicate 2000 'a')
         assertStatusCode "Appending a 2000-char note should succeed" 200 exact2000Resp
@@ -865,9 +880,44 @@ runIntegrationTests = do
         assertStatusCode "Appending note to foreign transaction should return 404" 404 foreignResp
         assertMessageResponse "Transaction not found" foreignResp
 
+        threadDelay 1100000
+        updateResp <- updateFinanceTransactionNoteExpectValue cookie txId firstNoteId "  Revised note  "
+        assertStatusCode "Updating note should succeed" 200 updateResp
+        assertFinanceTransactionNotesTexts ["Revised note", replicate 2000 'a'] (getResponseBody updateResp)
+        updatedNoteUpdatedAt <- requireFinanceTransactionFirstNoteUpdatedAt (getResponseBody updateResp)
+        assertBool "Expected updatedAt to change after note update" (updatedNoteUpdatedAt /= firstNoteUpdatedAt)
+
+        updateTooLongResp <- updateFinanceTransactionNoteExpectValue cookie txId firstNoteId (replicate 2001 'a')
+        assertStatusCode "Updating note with >2000 chars should return 400" 400 updateTooLongResp
+        assertMessageResponse "text must not be blank and must not exceed 2000 characters" updateTooLongResp
+
+        updateBlankResp <- updateFinanceTransactionNoteExpectValue cookie txId firstNoteId "   "
+        assertStatusCode "Updating note with blank text should return 400" 400 updateBlankResp
+        assertMessageResponse "text must not be blank and must not exceed 2000 characters" updateBlankResp
+
+        updateUnknownResp <- updateFinanceTransactionNoteExpectValue cookie txId "missing-note" "hello"
+        assertStatusCode "Updating unknown note should return 404" 404 updateUnknownResp
+        assertMessageResponse "Transaction or note not found" updateUnknownResp
+
+        updateForeignResp <- updateFinanceTransactionNoteExpectValue cookie foreignTxId firstNoteId "hello"
+        assertStatusCode "Updating foreign note should return 404" 404 updateForeignResp
+        assertMessageResponse "Transaction or note not found" updateForeignResp
+
+        deleteResp <- deleteFinanceTransactionNoteExpectValue cookie txId firstNoteId
+        assertStatusCode "Deleting note should succeed" 200 deleteResp
+        assertFinanceTransactionNotesTexts [replicate 2000 'a'] (getResponseBody deleteResp)
+
+        deleteUnknownResp <- deleteFinanceTransactionNoteExpectValue cookie txId firstNoteId
+        assertStatusCode "Deleting unknown note should return 404" 404 deleteUnknownResp
+        assertMessageResponse "Transaction or note not found" deleteUnknownResp
+
+        deleteForeignResp <- deleteFinanceTransactionNoteExpectValue cookie foreignTxId firstNoteId
+        assertStatusCode "Deleting foreign note should return 404" 404 deleteForeignResp
+        assertMessageResponse "Transaction or note not found" deleteForeignResp
+
         listed <- getFinanceTransactions cookie []
         case filter (\row -> financeTransactionIdValue row == txId) listed of
-          [row] -> assertFinanceTransactionNotesTexts ["First note", replicate 2000 'a'] row
+          [row] -> assertFinanceTransactionNotesTexts [replicate 2000 'a'] row
           _ -> assertFailure "Expected one matching transaction row for appended notes"
 
       it "should keep finance account lists isolated per authenticated user" $ do
@@ -2267,6 +2317,22 @@ appendFinanceTransactionNoteExpectValue cookie transactionId textValue = do
          $ setRequestHeader "Content-Type" ["application/json"]
          $ setRequestBodyJSON (object ["text" .= textValue]) req
 
+updateFinanceTransactionNoteExpectValue :: String -> String -> String -> String -> IO (Response Value)
+updateFinanceTransactionNoteExpectValue cookie transactionId noteId textValue = do
+  req <- parseRequest ("PUT http://localhost:8081" ++ financeTransactionsEndpoint ++ "/" ++ transactionId ++ "/notes/" ++ noteId)
+  httpJSON $ setRequestMethod "PUT"
+         $ setRequestHeader "Cookie" [BS.pack cookie]
+         $ setRequestHeader "Content-Type" ["application/json"]
+         $ setRequestBodyJSON (object ["text" .= textValue]) req
+
+deleteFinanceTransactionNoteExpectValue :: String -> String -> String -> IO (Response Value)
+deleteFinanceTransactionNoteExpectValue cookie transactionId noteId = do
+  req <- parseRequest ("DELETE http://localhost:8081" ++ financeTransactionsEndpoint ++ "/" ++ transactionId ++ "/notes/" ++ noteId)
+  httpJSON $ setRequestMethod "DELETE"
+         $ setRequestHeader "Cookie" [BS.pack cookie]
+         $ setRequestHeader "Content-Type" ["application/json"]
+         req
+
 assertFinanceAccountNameAndStatus :: String -> String -> Value -> Assertion
 assertFinanceAccountNameAndStatus expectedName expectedStatus responseBody =
   case responseBody of
@@ -2432,6 +2498,33 @@ assertFinanceTransactionNotesTexts expectedTexts responseBody = do
               assertBool "Expected note updatedAt to be non-empty" (not (null (updatedAt :: String)))
             _ -> assertFailure "Expected note object to include id, createdAt, updatedAt"
         _ -> assertFailure "Expected note entry to be an object"
+
+requireFinanceTransactionSingleNoteId :: Value -> IO String
+requireFinanceTransactionSingleNoteId responseBody =
+  case financeTransactionNotesValue responseBody of
+    [Object noteObj] ->
+      case parseMaybe (.: "id") noteObj of
+        Just noteId -> pure noteId
+        Nothing -> assertFailure "Expected note id field" >> pure ""
+    _ -> assertFailure "Expected one note in transaction response" >> pure ""
+
+requireFinanceTransactionSingleNoteUpdatedAt :: Value -> IO String
+requireFinanceTransactionSingleNoteUpdatedAt responseBody =
+  case financeTransactionNotesValue responseBody of
+    [Object noteObj] ->
+      case parseMaybe (.: "updatedAt") noteObj of
+        Just updatedAt -> pure updatedAt
+        Nothing -> assertFailure "Expected note updatedAt field" >> pure ""
+    _ -> assertFailure "Expected one note in transaction response" >> pure ""
+
+requireFinanceTransactionFirstNoteUpdatedAt :: Value -> IO String
+requireFinanceTransactionFirstNoteUpdatedAt responseBody =
+  case financeTransactionNotesValue responseBody of
+    (Object noteObj:_) ->
+      case parseMaybe (.: "updatedAt") noteObj of
+        Just updatedAt -> pure updatedAt
+        Nothing -> assertFailure "Expected note updatedAt field" >> pure ""
+    _ -> assertFailure "Expected at least one note in transaction response" >> pure ""
 
 financeCategoryIdValue :: Value -> String
 financeCategoryIdValue responseBody =

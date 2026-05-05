@@ -42,7 +42,7 @@ runIntegrationPostgresTests = do
 
         countAfter <- fetchSchemaMigrationCount
         assertEqual "Expected schema migration count to remain stable after no-op startup" countBefore countAfter
-        assertEqual "Expected all domain migrations to be applied" 12 countAfter
+        assertEqual "Expected all domain migrations to be applied" 13 countAfter
 
       it "aborts startup before serving when a migration fails" $ do
         resetPostgresToUnmigrated
@@ -921,6 +921,10 @@ resetPostgresSchema = do
   case financeNotesUpResult of
     Left err -> assertFailure ("Finance notes up migration failed: " ++ err)
     Right () -> pure ()
+  financeNoteLifecycleUpResult <- runPsqlFile financeNoteLifecycleUpMigration
+  case financeNoteLifecycleUpResult of
+    Left err -> assertFailure ("Finance note lifecycle up migration failed: " ++ err)
+    Right () -> pure ()
 
   noteUpResult <- runPsqlFile noteUpMigration
   case noteUpResult of
@@ -961,6 +965,7 @@ ensureSchemaMigrationsSeeded = do
         , "0004_finance_transaction_classification"
         , "0005_finance_transaction_links"
         , "0006_finance_transaction_notes"
+        , "0007_finance_transaction_note_lifecycle"
         , "0001_note_schema"
         , "0001_checklist_schema"
         ]
@@ -974,6 +979,7 @@ ensureSchemaMigrationsSeeded = do
 
 resetPostgresToUnmigrated :: IO ()
 resetPostgresToUnmigrated = do
+  _ <- runPsqlFile financeNoteLifecycleDownMigration
   _ <- runPsqlFile financeNotesDownMigration
   _ <- runPsqlFile financeLinksDownMigration
   _ <- runPsqlFile financeClassificationDownMigration
@@ -1023,7 +1029,7 @@ assertSchemaBootstrapped = do
   assertTableExists "note_items"
   assertTableExists "checklist_items"
   migrationCount <- fetchSchemaMigrationCount
-  assertEqual "Expected all startup migrations to be recorded in schema_migrations" 12 migrationCount
+  assertEqual "Expected all startup migrations to be recorded in schema_migrations" 13 migrationCount
 
 assertTableExists :: String -> IO ()
 assertTableExists tableName = do
@@ -2143,6 +2149,12 @@ financeNotesUpMigration = "db/migrations/finance/0006_finance_transaction_notes.
 
 financeNotesDownMigration :: FilePath
 financeNotesDownMigration = "db/migrations/finance/0006_finance_transaction_notes.down.sql"
+
+financeNoteLifecycleUpMigration :: FilePath
+financeNoteLifecycleUpMigration = "db/migrations/finance/0007_finance_transaction_note_lifecycle.up.sql"
+
+financeNoteLifecycleDownMigration :: FilePath
+financeNoteLifecycleDownMigration = "db/migrations/finance/0007_finance_transaction_note_lifecycle.down.sql"
 
 noteUpMigration :: FilePath
 noteUpMigration = "db/migrations/note/0001_note_schema.up.sql"

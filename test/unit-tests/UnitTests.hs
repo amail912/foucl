@@ -2420,7 +2420,7 @@ financeTransactionPostgresRepositoryTests = test
   , "Finance transaction Postgres adapter should reject reused idempotency keys for different requests" ~: pgFinanceTransactionRepoRejectsIdempotencyConflicts
   , "Finance transaction Postgres adapter should list deterministically with account and half-open time filters" ~: pgFinanceTransactionRepoListWithFilters
   , "Finance transaction Postgres adapter should link valid transfer pairs and reject invalid matches" ~: pgFinanceTransactionRepoTransferLinking
-  , "Finance transaction Postgres adapter should append notes with validation" ~: pgFinanceTransactionRepoAddNotes
+  , "Finance transaction Postgres adapter should append, update, and delete notes with validation" ~: pgFinanceTransactionRepoNoteLifecycle
   ]
 
 notePostgresRepositoryTests = test
@@ -3484,8 +3484,8 @@ pgFinanceTransactionRepoTransferLinking =
                 outcomes -> assertFailure ("Unexpected finance transaction setup outcomes for transfer linking: " ++ show outcomes)
             outcomes -> assertFailure ("Unexpected account setup outcomes for transfer linking: " ++ show outcomes)
 
-pgFinanceTransactionRepoAddNotes :: IO ()
-pgFinanceTransactionRepoAddNotes =
+pgFinanceTransactionRepoNoteLifecycle :: IO ()
+pgFinanceTransactionRepoNoteLifecycle =
   withOptionalPostgresContext "Skipping Finance transaction Postgres repository test: set FOUCL_TEST_POSTGRES_URL and install psql" $ \ctx ->
     withIsolatedPostgresSchemaConn ctx $ \schemaConn -> do
       upResult <- runExceptT (runFinanceMigrationsAtPath "." schemaConn MigrateUp)
@@ -3511,7 +3511,7 @@ pgFinanceTransactionRepoAddNotes =
               case createdTxn of
                 Left err -> assertFailure ("Expected finance transaction create success, got " ++ show err)
                 Right txn -> do
-                  appended <- runExceptT $ repoAddFinanceTransactionNote transactionRepo userId (financeTransactionId txn) "first note"
+                  appended <- runExceptT $ repoAddFinanceTransactionNote transactionRepo userId (financeTransactionId txn) "  first note  "
                   tooLong <- runExceptT $ repoAddFinanceTransactionNote transactionRepo userId (financeTransactionId txn) (replicate 2001 'a')
                   blank <- runExceptT $ repoAddFinanceTransactionNote transactionRepo userId (financeTransactionId txn) "   "
                   missing <- runExceptT $ repoAddFinanceTransactionNote transactionRepo userId "missing-transaction" "note"
@@ -3519,8 +3519,29 @@ pgFinanceTransactionRepoAddNotes =
                     (Right appendedTxn, Left WriteFailure, Left WriteFailure, Left NotFound) ->
                       case financeTransactionNotes appendedTxn of
                         [note] -> do
-                          assertEqual "Expected appended note text" "first note" (financeTransactionNoteText note)
+                          assertEqual "Expected appended note text to be trimmed" "first note" (financeTransactionNoteText note)
                           assertEqual "Expected note createdAt and updatedAt to match on create" (financeTransactionNoteCreatedAt note) (financeTransactionNoteUpdatedAt note)
+                          let noteId = financeTransactionNoteId note
+                          threadDelay 1100000
+                          updated <- runExceptT $ repoUpdateFinanceTransactionNote transactionRepo userId (financeTransactionId txn) noteId "  revised note  "
+                          updatedTooLong <- runExceptT $ repoUpdateFinanceTransactionNote transactionRepo userId (financeTransactionId txn) noteId (replicate 2001 'a')
+                          updatedBlank <- runExceptT $ repoUpdateFinanceTransactionNote transactionRepo userId (financeTransactionId txn) noteId "  "
+                          updatedMissing <- runExceptT $ repoUpdateFinanceTransactionNote transactionRepo userId (financeTransactionId txn) "missing-note" "hello"
+                          case (updated, updatedTooLong, updatedBlank, updatedMissing) of
+                            (Right updatedTxn, Left WriteFailure, Left WriteFailure, Left NotFound) ->
+                              case financeTransactionNotes updatedTxn of
+                                [updatedNote] -> do
+                                  assertEqual "Expected updated note text to be trimmed" "revised note" (financeTransactionNoteText updatedNote)
+                                  assertEqual "Expected note id to stay stable after update" noteId (financeTransactionNoteId updatedNote)
+                                  assertBool "Expected note updatedAt to change after update" (financeTransactionNoteUpdatedAt updatedNote > financeTransactionNoteCreatedAt updatedNote)
+                                  deleted <- runExceptT $ repoDeleteFinanceTransactionNote transactionRepo userId (financeTransactionId txn) noteId
+                                  deletedMissing <- runExceptT $ repoDeleteFinanceTransactionNote transactionRepo userId (financeTransactionId txn) "missing-note"
+                                  case (deleted, deletedMissing) of
+                                    (Right deletedTxn, Left NotFound) ->
+                                      assertEqual "Expected no notes after soft delete projection update" [] (financeTransactionNotes deletedTxn)
+                                    outcomes -> assertFailure ("Unexpected transaction note delete outcomes: " ++ show outcomes)
+                                notes -> assertFailure ("Expected one updated note, got " ++ show notes)
+                            outcomes -> assertFailure ("Unexpected transaction note update outcomes: " ++ show outcomes)
                         notes -> assertFailure ("Expected one appended note, got " ++ show notes)
                     outcomes -> assertFailure ("Unexpected transaction note add outcomes: " ++ show outcomes)
 

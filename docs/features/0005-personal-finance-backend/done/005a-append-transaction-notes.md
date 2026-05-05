@@ -7,8 +7,9 @@ As a user, I want to add notes to transactions, so I can preserve context alongs
 - Users can append notes to their own transactions.
 - Note creation must not alter the underlying money facts, categorization, or transfer semantics of a transaction.
 - Note text is free text only in v1.
+- Note text is trimmed before persistence.
 - Note text must not be empty or whitespace-only after validation trimming.
-- Note text length must not exceed 2000 characters.
+- Note text length must not exceed 2000 characters after trimming.
 - Appended notes appear in the transaction row's `notes` array.
 
 ## Data And Contracts

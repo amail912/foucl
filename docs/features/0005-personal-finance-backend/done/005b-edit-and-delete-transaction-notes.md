@@ -10,16 +10,18 @@ As a user, I want to correct or remove transaction notes, so current transaction
 - Soft-deleted notes are hidden from the current `notes` array.
 - Audit history remains preserved in event history.
 - Note edits and deletes must not alter money facts, categorization, or transfer semantics.
+- Note text is trimmed before persistence for append and update writes.
 - Updated note text must not be empty or whitespace-only after validation trimming.
 - Updated note text length must not exceed 2000 characters.
 
 ## Data And Contracts
-- Defines `POST /api/v1/finance/transactions/{transactionId}/notes/{noteId}` and `DELETE /api/v1/finance/transactions/{transactionId}/notes/{noteId}`.
+- Defines `PUT /api/v1/finance/transactions/{transactionId}/notes/{noteId}` and `DELETE /api/v1/finance/transactions/{transactionId}/notes/{noteId}`.
 - The update request payload contains `text`.
 - Blank or oversized updated note text returns `400`.
 - Unknown or foreign-scope transaction or note ids return `404`.
 - Update and delete success responses return the updated transaction row.
 - Current transaction rows expose only non-deleted notes, each with `id`, `text`, `createdAt`, and `updatedAt`.
+- Transaction create requests do not embed notes in this iteration; note text normalization rules apply to note append and note update endpoints.
 
 ## Technical Details
 - Notes must use stable note ids so edit and delete target one logical note.

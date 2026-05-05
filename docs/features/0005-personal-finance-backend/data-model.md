@@ -158,8 +158,9 @@ Rules:
 - note creation is append-only at the event level
 - each note has a stable note id
 - note text is free text only in v1
+- note text is trimmed before persistence
 - note text must be non-empty after validation trimming
-- note text length is limited to 2000 characters
+- note text length is limited to 2000 characters after trimming
 - note edits replace current text in current reads while preserving event history
 - note delete is soft delete in v1
 - deleted notes are omitted from the current transaction-row note list
@@ -198,6 +199,8 @@ Draft shape:
 - `TransactionSplit`
 - `TransactionLinked`
 - `TransactionNoteAdded`
+- `TransactionNoteUpdated`
+- `TransactionNoteDeleted`
 - `BalanceSnapshotRecorded`
 
 ## Core Invariants

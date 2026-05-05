@@ -59,6 +59,15 @@ Notes:
 - Preserve current API/test contracts unless the task explicitly changes behavior.
 - Prefer small, behavior-preserving edits and re-run tests early.
 
+## Story Delivery Conventions
+- For implementation requests tied to a story:
+  - Update relevant docs when behavior or API contracts change.
+  - Move the implemented story from `ready/` to `done/`.
+  - Update the feature backlog.
+  - Commit only after required checks pass.
+- Story commit messages should use:
+  - `[xxxx-yyy] Functional description of the story`
+
 ## Common Pitfalls / Regression Traps
 - Export wiring regressions:
   - Removing/reworking symbols in `Lib.Config` and `Lib` can break broad unit tests quickly.
@@ -66,8 +75,16 @@ Notes:
   - Refactors in filesystem adapters (Auth/Session) can silently alter expected `RepositoryError` outcomes.
 - Integration environment assumptions:
   - If Docker containers/network already exist or tests are run in parallel, target startup can fail due to name/network conflicts.
+- Test fixture validity:
+  - Keep generated test fixture values within existing validation constraints (for example username length), or failures may surface far from the real cause.
 - Over-eager abstraction:
   - New wrappers are not always desirable; prefer existing helpers unless abstraction materially improves clarity without semantic risk.
+
+## Migration Hygiene
+- When adding domain migrations, update all affected migration touchpoints:
+  - Migration registration/wiring.
+  - Test database reset/rollback flows.
+  - Migration-count and seeded-migration assertions in integration tests.
 
 ## Validation Checklist After Repository/Storage Refactors
 Run, in order:

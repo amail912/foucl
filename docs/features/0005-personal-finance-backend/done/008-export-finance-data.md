@@ -28,7 +28,7 @@ As a user, I want to export my finance data, so I keep ownership of my records a
 - If the export includes both raw events and convenience views, the contract must identify raw events as canonical.
 - Convenience views may evolve independently from the canonical event section.
 - This story owns implementation of `GET /api/v1/finance/export`.
-- Follow-up cutover and replay parity work remains in `010c`.
+- Legacy-storage cleanup and rollout finalization continue in `010d`.
 
 ## Testing
 - Export returns only authenticated user data.
@@ -44,4 +44,4 @@ As a user, I want to export my finance data, so I keep ownership of my records a
 - Backward-compatible because this is a new API surface.
 - Export format changes after first release should require explicit `formatVersion` evolution.
 - Story dependency note:
-  - `010c` depends on this story being complete.
+  - `010d` depends on this story being complete.

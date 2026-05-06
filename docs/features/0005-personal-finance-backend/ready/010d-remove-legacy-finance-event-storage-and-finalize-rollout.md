@@ -14,7 +14,7 @@ As a backend maintainer, I want to finalize canonical finance event sourcing and
 - Updates migration/test expectations to canonical-only finance event storage.
 
 ## Technical Details
-- Remove stale legacy plumbing no longer needed after `010a-010c` cutovers.
+- Remove stale legacy plumbing no longer needed after `010a-010b`.
 - Remove legacy finance event-table dependencies now that `010b` routes runtime writes only through `finance_events`.
 - Keep projection contracts and domain error semantics intact.
 - Align integration reset/verification flows and supporting docs to final canonical model.
@@ -34,4 +34,4 @@ As a backend maintainer, I want to finalize canonical finance event sourcing and
 - Internal simplification after canonical cutover confidence is established.
 - No fallback to deprecated legacy storage paths after this story.
 - Story dependency note:
-  - starts only after `010c` cutover and parity verification are complete.
+  - starts only after `010a` and `010b` are complete.

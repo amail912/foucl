@@ -22,8 +22,7 @@ Provide an authenticated personal finance backend for manual transaction entry, 
 - [009 Snapshot Reconciliation Status And Basis Selection](to-refine/009-snapshot-reconciliation-status-and-basis-selection.md) - Define persisted snapshot reconciliation status and trusted-basis selection rules for future discrepancy computation.
 
 ### Ready
-- [010c Cut Over Export And Read Projections To Canonical Events](ready/010c-cut-over-export-and-read-projections-to-canonical-events.md) - Cut over canonical event sourcing and introduce replay/rebuild parity guarantees for derived finance views (depends on `008`).
-- [010d Remove Legacy Finance Event Storage And Finalize Rollout](ready/010d-remove-legacy-finance-event-storage-and-finalize-rollout.md) - Retire legacy finance event storage paths after `010c` cutover/parity verification and align migrations/tests/docs.
+- [010d Remove Legacy Finance Event Storage And Finalize Rollout](ready/010d-remove-legacy-finance-event-storage-and-finalize-rollout.md) - Retire legacy finance event storage paths after canonical write/export cutovers (`010a`, `010b`, `008`) and align migrations/tests/docs.
 
 ### Done
 - [001a Open And List Accounts](done/001a-open-and-list-accounts.md) - Define account creation, normalized per-user naming rules, and authenticated account listing behavior.
@@ -37,10 +36,11 @@ Provide an authenticated personal finance backend for manual transaction entry, 
 - [005b Edit And Delete Transaction Notes](done/005b-edit-and-delete-transaction-notes.md) - Define mutable note lifecycle, trim-on-write note rules, and soft-delete behavior on stable note ids.
 - [006 Record And Apply Balance Snapshots](done/006-record-and-apply-balance-snapshots.md) - Define snapshot-centered reconciliation writes, latest reconciliation reads, and additive balance-basis behavior.
 - [007 Build Reporting And Ledger Projections](done/007-build-reporting-and-ledger-projections.md) - Define split-aware aggregate report behavior, repeated-param filters, and deterministic projection reads.
-- [008 Export Finance Data](done/008-export-finance-data.md) - Implement `GET /api/v1/finance/export` with canonical `events` and projection-backed convenience `views`; prerequisite for `010c`.
+- [008 Export Finance Data](done/008-export-finance-data.md) - Implement `GET /api/v1/finance/export` with canonical `events` and projection-backed convenience `views`; prerequisite for `010d`.
 - [010a Unify Finance Event Log Foundation](done/010a-unify-finance-event-log-foundation.md) - Establish one canonical append-only finance event-log foundation and deterministic ordering guarantees.
 - [010b Migrate Finance Write Paths To Canonical Log](done/010b-migrate-finance-write-paths-to-canonical-log.md) - Route finance write behavior through canonical event append flows while keeping API semantics stable.
 
 ### Canceled
+- [010c Cut Over Export And Read Projections To Canonical Events](canceled/010c-cut-over-export-and-read-projections-to-canonical-events.md) - Canceled because export canonical sourcing was already delivered in `008`, and replay/rebuild parity was dropped from current scope.
 
 ### Postponed

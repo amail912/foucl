@@ -1,5 +1,8 @@
 # Cut Over Export And Read Projections To Canonical Events
 
+## Status
+Canceled on 2026-05-06.
+
 ## Goal
 As a backend maintainer, I want export and projection rebuild flows to consume canonical events, so all derived finance views are deterministically reproducible.
 
@@ -38,3 +41,8 @@ As a backend maintainer, I want export and projection rebuild flows to consume c
 - Story dependency notes:
   - depends on `008` for export endpoint availability
   - must be completed before `010d` legacy cleanup.
+
+## Cancellation Rationale
+- Export canonical sourcing is already implemented and covered by story `008`.
+- Replay/rebuild parity work is intentionally dropped from the current rollout scope.
+- Remaining canonicalization cleanup work continues in `010d`.

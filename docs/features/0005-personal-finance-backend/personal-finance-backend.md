@@ -22,7 +22,6 @@ Provide an authenticated personal finance backend for manual transaction entry, 
 - [009 Snapshot Reconciliation Status And Basis Selection](to-refine/009-snapshot-reconciliation-status-and-basis-selection.md) - Define persisted snapshot reconciliation status and trusted-basis selection rules for future discrepancy computation.
 
 ### Ready
-- [010d Remove Legacy Finance Event Storage And Finalize Rollout](ready/010d-remove-legacy-finance-event-storage-and-finalize-rollout.md) - Retire legacy finance event storage paths after canonical write/export cutovers (`010a`, `010b`, `008`) and align migrations/tests/docs.
 
 ### Done
 - [001a Open And List Accounts](done/001a-open-and-list-accounts.md) - Define account creation, normalized per-user naming rules, and authenticated account listing behavior.
@@ -39,6 +38,7 @@ Provide an authenticated personal finance backend for manual transaction entry, 
 - [008 Export Finance Data](done/008-export-finance-data.md) - Implement `GET /api/v1/finance/export` with canonical `events` and projection-backed convenience `views`; prerequisite for `010d`.
 - [010a Unify Finance Event Log Foundation](done/010a-unify-finance-event-log-foundation.md) - Establish one canonical append-only finance event-log foundation and deterministic ordering guarantees.
 - [010b Migrate Finance Write Paths To Canonical Log](done/010b-migrate-finance-write-paths-to-canonical-log.md) - Route finance write behavior through canonical event append flows while keeping API semantics stable.
+- [010d Remove Legacy Finance Event Storage And Finalize Rollout](done/010d-remove-legacy-finance-event-storage-and-finalize-rollout.md) - Finalize canonical-only finance storage by collapsing migration history to the canonical baseline and removing legacy event-table dependencies from tests/wiring.
 
 ### Canceled
 - [010c Cut Over Export And Read Projections To Canonical Events](canceled/010c-cut-over-export-and-read-projections-to-canonical-events.md) - Canceled because export canonical sourcing was already delivered in `008`, and replay/rebuild parity was dropped from current scope.

@@ -55,13 +55,6 @@ _prepare-sandbox:
 
 _prepare-postgres-test-db:
 	@set -euo pipefail; \
-	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/finance/0008_finance_balance_snapshots.down.sql"; \
-	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/finance/0007_finance_transaction_note_lifecycle.down.sql"; \
-	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/finance/0006_finance_transaction_notes.down.sql"; \
-	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/finance/0005_finance_transaction_links.down.sql"; \
-	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/finance/0004_finance_transaction_classification.down.sql"; \
-	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/finance/0003_finance_categories.down.sql"; \
-	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/finance/0002_finance_transactions.down.sql"; \
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/finance/0001_finance_schema.down.sql"; \
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/checklist/0001_checklist_schema.down.sql"; \
 	psql --dbname "$(AUTH_PG_TEST_CONN)" -v ON_ERROR_STOP=1 -f "$(CURDIR)/db/migrations/note/0001_note_schema.down.sql"; \

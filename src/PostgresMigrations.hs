@@ -161,41 +161,6 @@ financeMigrations =
       , upSqlPath = "db/migrations/finance/0001_finance_schema.up.sql"
       , downSqlPath = "db/migrations/finance/0001_finance_schema.down.sql"
       }
-  , SqlMigration
-      { migrationId = "0002_finance_transactions"
-      , upSqlPath = "db/migrations/finance/0002_finance_transactions.up.sql"
-      , downSqlPath = "db/migrations/finance/0002_finance_transactions.down.sql"
-      }
-  , SqlMigration
-      { migrationId = "0003_finance_categories"
-      , upSqlPath = "db/migrations/finance/0003_finance_categories.up.sql"
-      , downSqlPath = "db/migrations/finance/0003_finance_categories.down.sql"
-      }
-  , SqlMigration
-      { migrationId = "0004_finance_transaction_classification"
-      , upSqlPath = "db/migrations/finance/0004_finance_transaction_classification.up.sql"
-      , downSqlPath = "db/migrations/finance/0004_finance_transaction_classification.down.sql"
-      }
-  , SqlMigration
-      { migrationId = "0005_finance_transaction_links"
-      , upSqlPath = "db/migrations/finance/0005_finance_transaction_links.up.sql"
-      , downSqlPath = "db/migrations/finance/0005_finance_transaction_links.down.sql"
-      }
-  , SqlMigration
-      { migrationId = "0006_finance_transaction_notes"
-      , upSqlPath = "db/migrations/finance/0006_finance_transaction_notes.up.sql"
-      , downSqlPath = "db/migrations/finance/0006_finance_transaction_notes.down.sql"
-      }
-  , SqlMigration
-      { migrationId = "0007_finance_transaction_note_lifecycle"
-      , upSqlPath = "db/migrations/finance/0007_finance_transaction_note_lifecycle.up.sql"
-      , downSqlPath = "db/migrations/finance/0007_finance_transaction_note_lifecycle.down.sql"
-      }
-  , SqlMigration
-      { migrationId = "0008_finance_balance_snapshots"
-      , upSqlPath = "db/migrations/finance/0008_finance_balance_snapshots.up.sql"
-      , downSqlPath = "db/migrations/finance/0008_finance_balance_snapshots.down.sql"
-      }
   ]
 
 noteMigrations :: [SqlMigration]

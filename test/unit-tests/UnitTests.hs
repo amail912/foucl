@@ -1920,73 +1920,51 @@ financeMigrationUpCreatesSchema =
         Left err -> assertFailure ("Expected finance migration up success, got " ++ err)
         Right () -> do
           canonicalEventsTableExists <- fetchTableExists ctx "finance_events"
-          eventsTableExists <- fetchTableExists ctx "finance_account_events"
           projectionTableExists <- fetchTableExists ctx "finance_accounts"
-          transactionEventsTableExists <- fetchTableExists ctx "finance_transaction_events"
           transactionsTableExists <- fetchTableExists ctx "finance_transactions"
           idempotencyTableExists <- fetchTableExists ctx "finance_transaction_idempotency"
           categoriesTableExists <- fetchTableExists ctx "finance_categories"
-          classificationEventsTableExists <- fetchTableExists ctx "finance_transaction_classification_events"
           transactionCategoriesTableExists <- fetchTableExists ctx "finance_transaction_categories"
           transactionSplitsTableExists <- fetchTableExists ctx "finance_transaction_splits"
-          linkEventsTableExists <- fetchTableExists ctx "finance_transaction_link_events"
           linksTableExists <- fetchTableExists ctx "finance_transaction_links"
-          noteEventsTableExists <- fetchTableExists ctx "finance_transaction_note_events"
           notesTableExists <- fetchTableExists ctx "finance_transaction_notes"
-          snapshotEventsTableExists <- fetchTableExists ctx "finance_balance_snapshot_events"
           snapshotsTableExists <- fetchTableExists ctx "finance_balance_snapshots"
           assertBool "Expected finance_events table to exist" canonicalEventsTableExists
-          assertBool "Expected finance_account_events table to exist" eventsTableExists
           assertBool "Expected finance_accounts table to exist" projectionTableExists
-          assertBool "Expected finance_transaction_events table to exist" transactionEventsTableExists
           assertBool "Expected finance_transactions table to exist" transactionsTableExists
           assertBool "Expected finance_transaction_idempotency table to exist" idempotencyTableExists
           assertBool "Expected finance_categories table to exist" categoriesTableExists
-          assertBool "Expected finance_transaction_classification_events table to exist" classificationEventsTableExists
           assertBool "Expected finance_transaction_categories table to exist" transactionCategoriesTableExists
           assertBool "Expected finance_transaction_splits table to exist" transactionSplitsTableExists
-          assertBool "Expected finance_transaction_link_events table to exist" linkEventsTableExists
           assertBool "Expected finance_transaction_links table to exist" linksTableExists
-          assertBool "Expected finance_transaction_note_events table to exist" noteEventsTableExists
           assertBool "Expected finance_transaction_notes table to exist" notesTableExists
-          assertBool "Expected finance_balance_snapshot_events table to exist" snapshotEventsTableExists
           assertBool "Expected finance_balance_snapshots table to exist" snapshotsTableExists
 
           eventNumberType <- fetchColumnType ctx "finance_events" "event_number"
           streamVersionType <- fetchColumnType ctx "finance_events" "stream_version"
           payloadType <- fetchColumnType ctx "finance_events" "payload"
-          eventTypeType <- fetchColumnType ctx "finance_account_events" "event_type"
           normalizedNameType <- fetchColumnType ctx "finance_accounts" "normalized_name"
           statusType <- fetchColumnType ctx "finance_accounts" "status"
           transactionDirectionType <- fetchColumnType ctx "finance_transactions" "direction"
           idempotencyFlagType <- fetchColumnType ctx "finance_transaction_idempotency" "occurred_at_supplied"
           categoryOwnerType <- fetchColumnType ctx "finance_categories" "owner"
           categorySelectableType <- fetchColumnType ctx "finance_categories" "selectable"
-          classificationEventTypeType <- fetchColumnType ctx "finance_transaction_classification_events" "event_type"
           splitAmountType <- fetchColumnType ctx "finance_transaction_splits" "amount"
-          linkEventTypeType <- fetchColumnType ctx "finance_transaction_link_events" "link_type"
           linkTypeType <- fetchColumnType ctx "finance_transaction_links" "link_type"
-          noteEventTypeType <- fetchColumnType ctx "finance_transaction_note_events" "event_type"
           noteTextType <- fetchColumnType ctx "finance_transaction_notes" "note_text"
-          snapshotEventTypeType <- fetchColumnType ctx "finance_balance_snapshot_events" "event_type"
           snapshotBalanceType <- fetchColumnType ctx "finance_balance_snapshots" "balance"
           assertEqual "Expected finance_events.event_number to be bigint" (Just "bigint") eventNumberType
           assertEqual "Expected finance_events.stream_version to be bigint" (Just "bigint") streamVersionType
           assertEqual "Expected finance_events.payload to be jsonb" (Just "jsonb") payloadType
-          assertEqual "Expected finance_account_events.event_type to be text" (Just "text") eventTypeType
           assertEqual "Expected finance_accounts.normalized_name to be text" (Just "text") normalizedNameType
           assertEqual "Expected finance_accounts.status to be text" (Just "text") statusType
           assertEqual "Expected finance_transactions.direction to be text" (Just "text") transactionDirectionType
           assertEqual "Expected finance_transaction_idempotency.occurred_at_supplied to be boolean" (Just "boolean") idempotencyFlagType
           assertEqual "Expected finance_categories.owner to be text" (Just "text") categoryOwnerType
           assertEqual "Expected finance_categories.selectable to be boolean" (Just "boolean") categorySelectableType
-          assertEqual "Expected finance_transaction_classification_events.event_type to be text" (Just "text") classificationEventTypeType
           assertEqual "Expected finance_transaction_splits.amount to be bigint" (Just "bigint") splitAmountType
-          assertEqual "Expected finance_transaction_link_events.link_type to be text" (Just "text") linkEventTypeType
           assertEqual "Expected finance_transaction_links.link_type to be text" (Just "text") linkTypeType
-          assertEqual "Expected finance_transaction_note_events.event_type to be text" (Just "text") noteEventTypeType
           assertEqual "Expected finance_transaction_notes.note_text to be text" (Just "text") noteTextType
-          assertEqual "Expected finance_balance_snapshot_events.event_type to be text" (Just "text") snapshotEventTypeType
           assertEqual "Expected finance_balance_snapshots.balance to be bigint" (Just "bigint") snapshotBalanceType
 
           canonicalOrderingIndexExists <- fetchIndexExists ctx "finance_events_user_event_number_idx"
@@ -2084,36 +2062,24 @@ financeMigrationDownRemovesSchema =
             Left err -> assertFailure ("Expected finance migration down success, got " ++ err)
             Right () -> do
               canonicalEventsTableExists <- fetchTableExists ctx "finance_events"
-              eventsTableExists <- fetchTableExists ctx "finance_account_events"
               projectionTableExists <- fetchTableExists ctx "finance_accounts"
-              transactionEventsTableExists <- fetchTableExists ctx "finance_transaction_events"
               transactionsTableExists <- fetchTableExists ctx "finance_transactions"
               idempotencyTableExists <- fetchTableExists ctx "finance_transaction_idempotency"
               categoriesTableExists <- fetchTableExists ctx "finance_categories"
-              classificationEventsTableExists <- fetchTableExists ctx "finance_transaction_classification_events"
               transactionCategoriesTableExists <- fetchTableExists ctx "finance_transaction_categories"
               transactionSplitsTableExists <- fetchTableExists ctx "finance_transaction_splits"
-              linkEventsTableExists <- fetchTableExists ctx "finance_transaction_link_events"
               linksTableExists <- fetchTableExists ctx "finance_transaction_links"
-              noteEventsTableExists <- fetchTableExists ctx "finance_transaction_note_events"
               notesTableExists <- fetchTableExists ctx "finance_transaction_notes"
-              snapshotEventsTableExists <- fetchTableExists ctx "finance_balance_snapshot_events"
               snapshotsTableExists <- fetchTableExists ctx "finance_balance_snapshots"
               assertBool "Expected finance_events table to be removed" (not canonicalEventsTableExists)
-              assertBool "Expected finance_account_events table to be removed" (not eventsTableExists)
               assertBool "Expected finance_accounts table to be removed" (not projectionTableExists)
-              assertBool "Expected finance_transaction_events table to be removed" (not transactionEventsTableExists)
               assertBool "Expected finance_transactions table to be removed" (not transactionsTableExists)
               assertBool "Expected finance_transaction_idempotency table to be removed" (not idempotencyTableExists)
               assertBool "Expected finance_categories table to be removed" (not categoriesTableExists)
-              assertBool "Expected finance_transaction_classification_events table to be removed" (not classificationEventsTableExists)
               assertBool "Expected finance_transaction_categories table to be removed" (not transactionCategoriesTableExists)
               assertBool "Expected finance_transaction_splits table to be removed" (not transactionSplitsTableExists)
-              assertBool "Expected finance_transaction_link_events table to be removed" (not linkEventsTableExists)
               assertBool "Expected finance_transaction_links table to be removed" (not linksTableExists)
-              assertBool "Expected finance_transaction_note_events table to be removed" (not noteEventsTableExists)
               assertBool "Expected finance_transaction_notes table to be removed" (not notesTableExists)
-              assertBool "Expected finance_balance_snapshot_events table to be removed" (not snapshotEventsTableExists)
               assertBool "Expected finance_balance_snapshots table to be removed" (not snapshotsTableExists)
 
 financeMigrationReapplyAfterDown :: IO ()
@@ -2133,36 +2099,24 @@ financeMigrationReapplyAfterDown =
                 Left err -> assertFailure ("Expected second finance migration up success, got " ++ err)
                 Right () -> do
                   canonicalEventsTableExists <- fetchTableExists ctx "finance_events"
-                  eventsTableExists <- fetchTableExists ctx "finance_account_events"
                   projectionTableExists <- fetchTableExists ctx "finance_accounts"
-                  transactionEventsTableExists <- fetchTableExists ctx "finance_transaction_events"
                   transactionsTableExists <- fetchTableExists ctx "finance_transactions"
                   idempotencyTableExists <- fetchTableExists ctx "finance_transaction_idempotency"
                   categoriesTableExists <- fetchTableExists ctx "finance_categories"
-                  classificationEventsTableExists <- fetchTableExists ctx "finance_transaction_classification_events"
                   transactionCategoriesTableExists <- fetchTableExists ctx "finance_transaction_categories"
                   transactionSplitsTableExists <- fetchTableExists ctx "finance_transaction_splits"
-                  linkEventsTableExists <- fetchTableExists ctx "finance_transaction_link_events"
                   linksTableExists <- fetchTableExists ctx "finance_transaction_links"
-                  noteEventsTableExists <- fetchTableExists ctx "finance_transaction_note_events"
                   notesTableExists <- fetchTableExists ctx "finance_transaction_notes"
-                  snapshotEventsTableExists <- fetchTableExists ctx "finance_balance_snapshot_events"
                   snapshotsTableExists <- fetchTableExists ctx "finance_balance_snapshots"
                   assertBool "Expected finance_events table to exist after reapply" canonicalEventsTableExists
-                  assertBool "Expected finance_account_events table to exist after reapply" eventsTableExists
                   assertBool "Expected finance_accounts table to exist after reapply" projectionTableExists
-                  assertBool "Expected finance_transaction_events table to exist after reapply" transactionEventsTableExists
                   assertBool "Expected finance_transactions table to exist after reapply" transactionsTableExists
                   assertBool "Expected finance_transaction_idempotency table to exist after reapply" idempotencyTableExists
                   assertBool "Expected finance_categories table to exist after reapply" categoriesTableExists
-                  assertBool "Expected finance_transaction_classification_events table to exist after reapply" classificationEventsTableExists
                   assertBool "Expected finance_transaction_categories table to exist after reapply" transactionCategoriesTableExists
                   assertBool "Expected finance_transaction_splits table to exist after reapply" transactionSplitsTableExists
-                  assertBool "Expected finance_transaction_link_events table to exist after reapply" linkEventsTableExists
                   assertBool "Expected finance_transaction_links table to exist after reapply" linksTableExists
-                  assertBool "Expected finance_transaction_note_events table to exist after reapply" noteEventsTableExists
                   assertBool "Expected finance_transaction_notes table to exist after reapply" notesTableExists
-                  assertBool "Expected finance_balance_snapshot_events table to exist after reapply" snapshotEventsTableExists
                   assertBool "Expected finance_balance_snapshots table to exist after reapply" snapshotsTableExists
 
 noteMigrationUpCreatesSchema :: IO ()

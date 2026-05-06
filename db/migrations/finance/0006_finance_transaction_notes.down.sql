@@ -1,3 +1,0 @@
-DROP INDEX IF EXISTS finance_transaction_notes_user_transaction_created_idx;
-DROP TABLE IF EXISTS finance_transaction_notes;
-DROP TABLE IF EXISTS finance_transaction_note_events;

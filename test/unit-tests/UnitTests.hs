@@ -1919,6 +1919,7 @@ financeMigrationUpCreatesSchema =
       case result of
         Left err -> assertFailure ("Expected finance migration up success, got " ++ err)
         Right () -> do
+          canonicalEventsTableExists <- fetchTableExists ctx "finance_events"
           eventsTableExists <- fetchTableExists ctx "finance_account_events"
           projectionTableExists <- fetchTableExists ctx "finance_accounts"
           transactionEventsTableExists <- fetchTableExists ctx "finance_transaction_events"
@@ -1934,6 +1935,7 @@ financeMigrationUpCreatesSchema =
           notesTableExists <- fetchTableExists ctx "finance_transaction_notes"
           snapshotEventsTableExists <- fetchTableExists ctx "finance_balance_snapshot_events"
           snapshotsTableExists <- fetchTableExists ctx "finance_balance_snapshots"
+          assertBool "Expected finance_events table to exist" canonicalEventsTableExists
           assertBool "Expected finance_account_events table to exist" eventsTableExists
           assertBool "Expected finance_accounts table to exist" projectionTableExists
           assertBool "Expected finance_transaction_events table to exist" transactionEventsTableExists
@@ -1950,6 +1952,9 @@ financeMigrationUpCreatesSchema =
           assertBool "Expected finance_balance_snapshot_events table to exist" snapshotEventsTableExists
           assertBool "Expected finance_balance_snapshots table to exist" snapshotsTableExists
 
+          eventNumberType <- fetchColumnType ctx "finance_events" "event_number"
+          streamVersionType <- fetchColumnType ctx "finance_events" "stream_version"
+          payloadType <- fetchColumnType ctx "finance_events" "payload"
           eventTypeType <- fetchColumnType ctx "finance_account_events" "event_type"
           normalizedNameType <- fetchColumnType ctx "finance_accounts" "normalized_name"
           statusType <- fetchColumnType ctx "finance_accounts" "status"
@@ -1965,6 +1970,9 @@ financeMigrationUpCreatesSchema =
           noteTextType <- fetchColumnType ctx "finance_transaction_notes" "note_text"
           snapshotEventTypeType <- fetchColumnType ctx "finance_balance_snapshot_events" "event_type"
           snapshotBalanceType <- fetchColumnType ctx "finance_balance_snapshots" "balance"
+          assertEqual "Expected finance_events.event_number to be bigint" (Just "bigint") eventNumberType
+          assertEqual "Expected finance_events.stream_version to be bigint" (Just "bigint") streamVersionType
+          assertEqual "Expected finance_events.payload to be jsonb" (Just "jsonb") payloadType
           assertEqual "Expected finance_account_events.event_type to be text" (Just "text") eventTypeType
           assertEqual "Expected finance_accounts.normalized_name to be text" (Just "text") normalizedNameType
           assertEqual "Expected finance_accounts.status to be text" (Just "text") statusType
@@ -1981,6 +1989,7 @@ financeMigrationUpCreatesSchema =
           assertEqual "Expected finance_balance_snapshot_events.event_type to be text" (Just "text") snapshotEventTypeType
           assertEqual "Expected finance_balance_snapshots.balance to be bigint" (Just "bigint") snapshotBalanceType
 
+          canonicalOrderingIndexExists <- fetchIndexExists ctx "finance_events_user_event_number_idx"
           nameIndexExists <- fetchIndexExists ctx "finance_accounts_user_status_name_idx"
           transactionIndexExists <- fetchIndexExists ctx "finance_transactions_user_occurred_idx"
           categoryIndexExists <- fetchIndexExists ctx "finance_categories_user_parent_name_idx"
@@ -1988,6 +1997,7 @@ financeMigrationUpCreatesSchema =
           linksPeerIndexExists <- fetchIndexExists ctx "finance_transaction_links_user_peer_idx"
           notesCreatedIndexExists <- fetchIndexExists ctx "finance_transaction_notes_user_transaction_created_idx"
           snapshotsOccurredIndexExists <- fetchIndexExists ctx "finance_balance_snapshots_user_account_occurred_idx"
+          assertBool "Expected finance_events_user_event_number_idx to exist" canonicalOrderingIndexExists
           assertBool "Expected finance_accounts_user_status_name_idx to exist" nameIndexExists
           assertBool "Expected finance_transactions_user_occurred_idx to exist" transactionIndexExists
           assertBool "Expected finance_categories_user_parent_name_idx to exist" categoryIndexExists
@@ -1995,6 +2005,34 @@ financeMigrationUpCreatesSchema =
           assertBool "Expected finance_transaction_links_user_peer_idx to exist" linksPeerIndexExists
           assertBool "Expected finance_transaction_notes_user_transaction_created_idx to exist" notesCreatedIndexExists
           assertBool "Expected finance_balance_snapshots_user_account_occurred_idx to exist" snapshotsOccurredIndexExists
+
+          insertCanonicalEvent1 <- runSqlCommandCtx ctx "INSERT INTO finance_events (event_id, user_id, stream_id, stream_version, event_type, event_version, occurred_at, idempotency_key, payload) VALUES ('evt-1', 'user-evt', 'stream-1', 1, 'AccountOpened', 1, NOW(), 'idem-1', '{}'::jsonb)"
+          case insertCanonicalEvent1 of
+            Left err -> assertFailure ("Expected first insert into finance_events success, got " ++ err)
+            Right () -> pure ()
+
+          insertCanonicalEvent2 <- runSqlCommandCtx ctx "INSERT INTO finance_events (event_id, user_id, stream_id, stream_version, event_type, event_version, occurred_at, idempotency_key, payload) VALUES ('evt-2', 'user-evt', 'stream-1', 2, 'AccountRenamed', 1, NOW(), NULL, '{}'::jsonb)"
+          case insertCanonicalEvent2 of
+            Left err -> assertFailure ("Expected second insert into finance_events success, got " ++ err)
+            Right () -> pure ()
+
+          canonicalOrderResult <- runScalarQueryCtx ctx "SELECT string_agg(event_number::text, ',' ORDER BY event_number ASC) FROM finance_events WHERE user_id = 'user-evt'"
+          case canonicalOrderResult of
+            Left err -> assertFailure ("Expected finance_events ordering query success, got " ++ err)
+            Right rows ->
+              assertEqual "Expected deterministic finance event_number ordering" "1,2" (trimTrailingNewline rows)
+
+          duplicateCanonicalEventId <- runSqlCommandCtx ctx "INSERT INTO finance_events (event_id, user_id, stream_id, stream_version, event_type, event_version, occurred_at, idempotency_key, payload) VALUES ('evt-1', 'user-evt', 'stream-2', 1, 'AccountOpened', 1, NOW(), NULL, '{}'::jsonb)"
+          assertBool "Expected duplicate finance_events.event_id insert to fail by unique constraint" $
+            case duplicateCanonicalEventId of
+              Left _ -> True
+              Right () -> False
+
+          duplicateStreamVersion <- runSqlCommandCtx ctx "INSERT INTO finance_events (event_id, user_id, stream_id, stream_version, event_type, event_version, occurred_at, idempotency_key, payload) VALUES ('evt-3', 'user-evt', 'stream-1', 2, 'AccountClosed', 1, NOW(), NULL, '{}'::jsonb)"
+          assertBool "Expected duplicate (stream_id, stream_version) insert to fail by unique constraint" $
+            case duplicateStreamVersion of
+              Left _ -> True
+              Right () -> False
 
           insertAccount <- runSqlCommandCtx ctx "INSERT INTO finance_accounts (user_id, account_id, display_name, normalized_name, status) VALUES ('user-1', 'account-1', 'Wallet', 'wallet', 'active')"
           case insertAccount of
@@ -2045,6 +2083,7 @@ financeMigrationDownRemovesSchema =
           case downResult of
             Left err -> assertFailure ("Expected finance migration down success, got " ++ err)
             Right () -> do
+              canonicalEventsTableExists <- fetchTableExists ctx "finance_events"
               eventsTableExists <- fetchTableExists ctx "finance_account_events"
               projectionTableExists <- fetchTableExists ctx "finance_accounts"
               transactionEventsTableExists <- fetchTableExists ctx "finance_transaction_events"
@@ -2060,6 +2099,7 @@ financeMigrationDownRemovesSchema =
               notesTableExists <- fetchTableExists ctx "finance_transaction_notes"
               snapshotEventsTableExists <- fetchTableExists ctx "finance_balance_snapshot_events"
               snapshotsTableExists <- fetchTableExists ctx "finance_balance_snapshots"
+              assertBool "Expected finance_events table to be removed" (not canonicalEventsTableExists)
               assertBool "Expected finance_account_events table to be removed" (not eventsTableExists)
               assertBool "Expected finance_accounts table to be removed" (not projectionTableExists)
               assertBool "Expected finance_transaction_events table to be removed" (not transactionEventsTableExists)
@@ -2092,6 +2132,7 @@ financeMigrationReapplyAfterDown =
               case secondUp of
                 Left err -> assertFailure ("Expected second finance migration up success, got " ++ err)
                 Right () -> do
+                  canonicalEventsTableExists <- fetchTableExists ctx "finance_events"
                   eventsTableExists <- fetchTableExists ctx "finance_account_events"
                   projectionTableExists <- fetchTableExists ctx "finance_accounts"
                   transactionEventsTableExists <- fetchTableExists ctx "finance_transaction_events"
@@ -2107,6 +2148,7 @@ financeMigrationReapplyAfterDown =
                   notesTableExists <- fetchTableExists ctx "finance_transaction_notes"
                   snapshotEventsTableExists <- fetchTableExists ctx "finance_balance_snapshot_events"
                   snapshotsTableExists <- fetchTableExists ctx "finance_balance_snapshots"
+                  assertBool "Expected finance_events table to exist after reapply" canonicalEventsTableExists
                   assertBool "Expected finance_account_events table to exist after reapply" eventsTableExists
                   assertBool "Expected finance_accounts table to exist after reapply" projectionTableExists
                   assertBool "Expected finance_transaction_events table to exist after reapply" transactionEventsTableExists

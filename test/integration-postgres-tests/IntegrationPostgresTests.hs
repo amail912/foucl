@@ -942,7 +942,7 @@ resetPostgresSchema = do
 
   ensureSchemaMigrationsSeeded
 
-  truncateResult <- runPsqlCommand "TRUNCATE TABLE auth_users, session_handles, session_user_bindings, session_states, calendar_items, trip_shares, trip_subscriptions, finance_balance_snapshots, finance_balance_snapshot_events, finance_transaction_notes, finance_transaction_note_events, finance_transaction_links, finance_transaction_link_events, finance_transaction_splits, finance_transaction_categories, finance_transaction_classification_events, finance_transaction_idempotency, finance_transaction_events, finance_transactions, finance_account_events, finance_accounts, note_items, checklist_items"
+  truncateResult <- runPsqlCommand "TRUNCATE TABLE auth_users, session_handles, session_user_bindings, session_states, calendar_items, trip_shares, trip_subscriptions, finance_balance_snapshots, finance_balance_snapshot_events, finance_transaction_notes, finance_transaction_note_events, finance_transaction_links, finance_transaction_link_events, finance_transaction_splits, finance_transaction_categories, finance_transaction_classification_events, finance_transaction_idempotency, finance_transaction_events, finance_transactions, finance_account_events, finance_accounts, finance_events, note_items, checklist_items"
   case truncateResult of
     Left err -> assertFailure ("Postgres table cleanup failed: " ++ err)
     Right () -> pure ()
@@ -1019,6 +1019,7 @@ assertSchemaBootstrapped = do
   assertTableExists "calendar_items"
   assertTableExists "trip_shares"
   assertTableExists "trip_subscriptions"
+  assertTableExists "finance_events"
   assertTableExists "finance_account_events"
   assertTableExists "finance_accounts"
   assertTableExists "finance_transaction_events"

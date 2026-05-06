@@ -211,7 +211,23 @@ Rules:
 - recording a snapshot does not rewrite transaction history
 - duplicate snapshots for the same account and exact `occurredAt` return `409`
 - unknown accounts return `404`
-- success returns the reconciliation state for the snapshot that was just created
+- success returns the reconciliation state for the snapshot that was just created, including its reconciliation status and selected basis metadata
+
+### `PUT /api/v1/finance/accounts/{id}/snapshots/{snapshotId}/reconciliation-status`
+Marks or unmarks a snapshot as reconciled.
+
+Request fields:
+- `status`
+
+Allowed values:
+- `unreconciled`
+- `reconciled`
+
+Rules:
+- snapshot reconciliation status changes are idempotent
+- unknown accounts or snapshots return `404`
+- invalid status values return `400`
+- success returns the updated snapshot reconciliation state
 
 ### `GET /api/v1/finance/accounts/{id}/snapshots`
 Returns snapshot discovery data for one account.
@@ -223,6 +239,7 @@ Response fields per snapshot:
 - `id`
 - `occurredAt`
 - `balance`
+- `reconciliationStatus`
 
 ### `GET /api/v1/finance/accounts/{id}/reconciliation`
 Returns reconciliation for one account.
@@ -237,14 +254,18 @@ Default behavior:
 Response fields:
 - `snapshotId`
 - `snapshotOccurredAt`
+- `basisSnapshotId`
+- `basisSnapshotOccurredAt`
 - `observedBalance`
 - `derivedBalanceAtSnapshot`
 - `discrepancy`
 
 Rules:
 - reconciliation is computed from the selected snapshot and transaction history, not stored as its own persisted object
-- the selected snapshot becomes the balance basis at its timestamp
-- later transactions adjust forward from that basis
+- the selected snapshot becomes the balance basis when its status is `reconciled`
+- later reconciled snapshots replace earlier reconciled bases for later target timestamps
+- later transactions adjust forward from the selected reconciled basis
+- when no reconciled basis exists, reconciliation falls back to the current transaction-derived baseline behavior
 - unknown accounts or snapshot ids return `404`
 
 ## Operations

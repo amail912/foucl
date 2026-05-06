@@ -173,6 +173,9 @@ Rules:
 - snapshots are allowed on active and closed accounts
 - duplicate account-plus-timestamp snapshots are invalid
 - each snapshot has a one-to-one correspondence with one reconciliation result
+- snapshots carry a persisted reconciliation status of `unreconciled` or `reconciled`
+- a reconciled snapshot can serve as a trusted basis for later reconciliation reads on the same account
+- when no reconciled basis exists, reconciliation falls back to transaction-derived behavior
 
 ## Event Envelope
 Draft shape:
@@ -202,6 +205,7 @@ Draft shape:
 - `TransactionNoteUpdated`
 - `TransactionNoteDeleted`
 - `BalanceSnapshotRecorded`
+- `BalanceSnapshotReconciliationStatusSet`
 
 ## Core Invariants
 ### Money
@@ -254,11 +258,12 @@ Draft shape:
 
 ### Snapshots
 - reconciliation is computed from a snapshot plus transaction history, not stored as its own persisted object
-- a selected snapshot becomes the balance basis at its timestamp
-- later transactions adjust forward from that basis
+- a selected reconciled snapshot becomes the balance basis at its timestamp
+- later transactions adjust forward from the latest reconciled basis
 - snapshot-write success responses are centered on the snapshot that was just created, even when it is backdated
 - snapshots do not change report aggregates
 - snapshot list may appear in convenience export views, but reconciliation does not
+- snapshot list rows expose reconciliation status
 
 ### Export
 - raw event history is canonical in exports
@@ -296,12 +301,12 @@ Draft shape:
 - `notes` exposes the current non-deleted note list with `id`, `text`, `createdAt`, and `updatedAt`
 
 ### Snapshots
-- `GET /api/v1/finance/accounts/{id}/snapshots` returns snapshot discovery rows with `id`, `occurredAt`, and `balance`
+- `GET /api/v1/finance/accounts/{id}/snapshots` returns snapshot discovery rows with `id`, `occurredAt`, `balance`, and `reconciliationStatus`
 - snapshots are ordered by `occurredAt` descending with snapshot `id` as deterministic tie-breaker
 - `GET /api/v1/finance/accounts/{id}/reconciliation` returns the latest reconciliation by default
 - `POST /api/v1/finance/accounts/{id}/snapshots` returns reconciliation for the created snapshot rather than necessarily the latest snapshot on the account
 - `GET /api/v1/finance/accounts/{id}/reconciliation?snapshotId=...` returns reconciliation for the selected snapshot
-- reconciliation responses expose `snapshotId`, `snapshotOccurredAt`, `observedBalance`, `derivedBalanceAtSnapshot`, and `discrepancy`
+- reconciliation responses expose `snapshotId`, `snapshotOccurredAt`, `basisSnapshotId`, `basisSnapshotOccurredAt`, `observedBalance`, `derivedBalanceAtSnapshot`, and `discrepancy`
 
 ### Ledger
 - includes all transactions, including transfers
@@ -326,7 +331,7 @@ Draft shape:
 - top-level sections are `formatVersion`, canonical `events`, and convenience `views`
 - `formatVersion` is `1` in the first release
 - `events` use the canonical stored event-envelope representation
-- `views` include current accounts, categories, transactions, transfer state, non-deleted notes, and snapshot list
+- `views` include current accounts, categories, transactions, transfer state, non-deleted notes, and snapshot list with reconciliation status
 - `views.transactions` reuse the `GET /transactions` row shape
 - `views` exclude reconciliation outputs, aggregate report outputs, and deleted notes
 

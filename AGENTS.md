@@ -65,6 +65,8 @@ Notes:
   - Move the implemented story from `ready/` to `done/`.
   - Update the feature backlog.
   - Commit only after required checks pass.
+- For all code implementation requests (story or non-story):
+  - Create a commit after finishing implementation and validation.
 - Story commit messages should use:
   - `[xxxx-yyy] Functional description of the story`
 

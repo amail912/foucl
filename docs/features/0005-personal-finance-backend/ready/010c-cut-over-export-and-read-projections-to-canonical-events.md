@@ -18,6 +18,10 @@ As a backend maintainer, I want export and projection rebuild flows to consume c
 ## Technical Details
 - Switch export canonical-event reads to `finance_events` as source of truth.
 - Align projection replay/rebuild paths to canonical event consumption in `event_number` order.
+- Preserve stream semantics decided in `010b` when replaying aggregate-specific flows:
+  - account streams: `account:{accountId}`
+  - transaction streams: `transaction:{transactionId}`
+  - transfer link ownership: source transaction stream with both ids in payload.
 - Preserve existing query semantics for ledger, report, categories, notes, and snapshots.
 - Keep user scoping and deterministic ordering explicit in read paths.
 

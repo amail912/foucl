@@ -200,6 +200,13 @@ instance FromJSON FinanceTransactionSplitWriteRow where
       <$> value .: "amount"
       <*> value .: "category"
 
+instance ToJSON FinanceTransactionSplitWriteRow where
+  toJSON FinanceTransactionSplitWriteRow { financeTransactionSplitWriteAmount, financeTransactionSplitWriteCategory } =
+    object
+      [ "amount" .= financeTransactionSplitWriteAmount
+      , "category" .= financeTransactionSplitWriteCategory
+      ]
+
 instance ToJSON FinanceTransactionSplitRow where
   toJSON FinanceTransactionSplitRow { financeTransactionSplitAmount, financeTransactionSplitCategory } =
     object
@@ -294,9 +301,9 @@ financeTransactionPostgresHealthChecks :: Connection -> ExceptT String IO ()
 financeTransactionPostgresHealthChecks conn = do
   tryExcept
     (query_ conn
-      "SELECT event_id, user_id, transaction_id, account_id, direction, amount, occurred_at, recorded_at FROM finance_transaction_events LIMIT 0"
-      :: IO [(String, String, String, String, String, Int64, UTCTime, UTCTime)])
-    (\err -> "Finance schema check failed for finance_transaction_events: " ++ show err)
+      "SELECT event_number, event_id, user_id, stream_id, stream_version, event_type, event_version, occurred_at, recorded_at, idempotency_key, payload FROM finance_events LIMIT 0"
+      :: IO [(Int64, String, String, String, Int64, String, Int, UTCTime, UTCTime, Maybe String, Value)])
+    (\err -> "Finance schema check failed for finance_events: " ++ show err)
   tryExcept
     (query_ conn
       "SELECT user_id, transaction_id, account_id, direction, amount, occurred_at, recorded_at FROM finance_transactions LIMIT 0"
@@ -309,11 +316,6 @@ financeTransactionPostgresHealthChecks conn = do
     (\err -> "Finance schema check failed for finance_transaction_idempotency: " ++ show err)
   tryExcept
     (query_ conn
-      "SELECT event_id, user_id, transaction_id, event_type, category, splits_payload, recorded_at FROM finance_transaction_classification_events LIMIT 0"
-      :: IO [(String, String, String, String, Maybe String, Maybe Value, UTCTime)])
-    (\err -> "Finance schema check failed for finance_transaction_classification_events: " ++ show err)
-  tryExcept
-    (query_ conn
       "SELECT user_id, transaction_id, category, updated_at FROM finance_transaction_categories LIMIT 0"
       :: IO [(String, String, String, UTCTime)])
     (\err -> "Finance schema check failed for finance_transaction_categories: " ++ show err)
@@ -324,19 +326,9 @@ financeTransactionPostgresHealthChecks conn = do
     (\err -> "Finance schema check failed for finance_transaction_splits: " ++ show err)
   tryExcept
     (query_ conn
-      "SELECT event_id, user_id, source_transaction_id, target_transaction_id, link_type, recorded_at FROM finance_transaction_link_events LIMIT 0"
-      :: IO [(String, String, String, String, String, UTCTime)])
-    (\err -> "Finance schema check failed for finance_transaction_link_events: " ++ show err)
-  tryExcept
-    (query_ conn
       "SELECT user_id, transaction_id, peer_transaction_id, link_type, linked_at FROM finance_transaction_links LIMIT 0"
       :: IO [(String, String, String, String, UTCTime)])
     (\err -> "Finance schema check failed for finance_transaction_links: " ++ show err)
-  tryExcept
-    (query_ conn
-      "SELECT event_id, user_id, transaction_id, note_id, event_type, note_text, recorded_at FROM finance_transaction_note_events LIMIT 0"
-      :: IO [(String, String, String, String, String, Maybe String, UTCTime)])
-    (\err -> "Finance schema check failed for finance_transaction_note_events: " ++ show err)
   tryExcept
     (query_ conn
       "SELECT user_id, transaction_id, note_id, note_text, created_at, updated_at FROM finance_transaction_notes LIMIT 0"
@@ -369,13 +361,25 @@ pgCreateFinanceTransaction pool userId request@FinanceTransactionWriteRequest
           eventId <- liftIO (toString <$> nextRandom)
           _ <- tryExcept
             (withTransaction conn $ do
-              recordedRows <- query conn
-                "INSERT INTO finance_transaction_events (event_id, user_id, transaction_id, account_id, direction, amount, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING recorded_at"
-                (eventId, userId, transactionId, financeTransactionWriteAccountId, financeTransactionDirectionText financeTransactionWriteDirection, financeTransactionWriteAmount, financeTransactionWriteOccurredAt)
-                :: IO [Only UTCTime]
-              recordedAt <- case recordedRows of
-                [Only rowRecordedAt] -> pure rowRecordedAt
-                _ -> fail "Unexpected recorded_at row count for finance transaction event insert"
+              recordedAt <- appendFinanceEvent conn FinanceCanonicalEvent
+                { canonicalEventId = eventId
+                , canonicalEventUserId = userId
+                , canonicalEventStreamId = "transaction:" ++ transactionId
+                , canonicalEventType =
+                    case financeTransactionWriteDirection of
+                      FinanceTransactionSent -> "MoneySent"
+                      FinanceTransactionReceived -> "MoneyReceived"
+                , canonicalEventOccurredAt = Just financeTransactionWriteOccurredAt
+                , canonicalEventIdempotencyKey = Just financeTransactionWriteIdempotencyKey
+                , canonicalEventPayload =
+                    object
+                      [ "transactionId" .= transactionId
+                      , "accountId" .= financeTransactionWriteAccountId
+                      , "direction" .= financeTransactionDirectionText financeTransactionWriteDirection
+                      , "amount" .= financeTransactionWriteAmount
+                      , "occurredAtSupplied" .= financeTransactionWriteOccurredAtSupplied
+                      ]
+                }
               _ <- execute conn
                 "INSERT INTO finance_transactions (user_id, transaction_id, account_id, direction, amount, occurred_at, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
                 (userId, transactionId, financeTransactionWriteAccountId, financeTransactionDirectionText financeTransactionWriteDirection, financeTransactionWriteAmount, financeTransactionWriteOccurredAt, recordedAt)
@@ -605,13 +609,20 @@ pgAddFinanceTransactionNote pool userId transactionId noteText =
         noteId <- liftIO (toString <$> nextRandom)
         _ <- tryExcept
           (withTransaction conn $ do
-            recordedRows <- query conn
-              "INSERT INTO finance_transaction_note_events (event_id, user_id, transaction_id, note_id, event_type, note_text) VALUES (?, ?, ?, ?, ?, ?) RETURNING recorded_at"
-              (eventId, userId, transactionId, noteId, ("TransactionNoteAdded" :: String), Just normalizedText)
-              :: IO [Only UTCTime]
-            recordedAt <- case recordedRows of
-              [Only rowRecordedAt] -> pure rowRecordedAt
-              _ -> fail "Unexpected recorded_at row count for finance transaction note event insert"
+            recordedAt <- appendFinanceEvent conn FinanceCanonicalEvent
+              { canonicalEventId = eventId
+              , canonicalEventUserId = userId
+              , canonicalEventStreamId = "transaction:" ++ transactionId
+              , canonicalEventType = "TransactionNoteAdded"
+              , canonicalEventOccurredAt = Nothing
+              , canonicalEventIdempotencyKey = Nothing
+              , canonicalEventPayload =
+                  object
+                    [ "transactionId" .= transactionId
+                    , "noteId" .= noteId
+                    , "noteText" .= normalizedText
+                    ]
+              }
             _ <- execute conn
               "INSERT INTO finance_transaction_notes (user_id, transaction_id, note_id, note_text, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
               (userId, transactionId, noteId, normalizedText, recordedAt, recordedAt)
@@ -630,13 +641,20 @@ pgUpdateFinanceTransactionNote pool userId transactionId noteId noteText =
         eventId <- liftIO (toString <$> nextRandom)
         _ <- tryExcept
           (withTransaction conn $ do
-            recordedRows <- query conn
-              "INSERT INTO finance_transaction_note_events (event_id, user_id, transaction_id, note_id, event_type, note_text) VALUES (?, ?, ?, ?, ?, ?) RETURNING recorded_at"
-              (eventId, userId, transactionId, noteId, ("TransactionNoteUpdated" :: String), Just normalizedText)
-              :: IO [Only UTCTime]
-            recordedAt <- case recordedRows of
-              [Only rowRecordedAt] -> pure rowRecordedAt
-              _ -> fail "Unexpected recorded_at row count for finance transaction note update event insert"
+            recordedAt <- appendFinanceEvent conn FinanceCanonicalEvent
+              { canonicalEventId = eventId
+              , canonicalEventUserId = userId
+              , canonicalEventStreamId = "transaction:" ++ transactionId
+              , canonicalEventType = "TransactionNoteUpdated"
+              , canonicalEventOccurredAt = Nothing
+              , canonicalEventIdempotencyKey = Nothing
+              , canonicalEventPayload =
+                  object
+                    [ "transactionId" .= transactionId
+                    , "noteId" .= noteId
+                    , "noteText" .= normalizedText
+                    ]
+              }
             updatedRows <- execute conn
               "UPDATE finance_transaction_notes SET note_text = ?, updated_at = ? WHERE user_id = ? AND transaction_id = ? AND note_id = ?"
               (normalizedText, recordedAt, userId, transactionId, noteId)
@@ -655,9 +673,19 @@ pgDeleteFinanceTransactionNote pool userId transactionId noteId =
     eventId <- liftIO (toString <$> nextRandom)
     _ <- tryExcept
       (withTransaction conn $ do
-        _ <- execute conn
-          "INSERT INTO finance_transaction_note_events (event_id, user_id, transaction_id, note_id, event_type, note_text) VALUES (?, ?, ?, ?, ?, ?)"
-          (eventId, userId, transactionId, noteId, ("TransactionNoteDeleted" :: String), Nothing :: Maybe String)
+        _ <- appendFinanceEvent conn FinanceCanonicalEvent
+          { canonicalEventId = eventId
+          , canonicalEventUserId = userId
+          , canonicalEventStreamId = "transaction:" ++ transactionId
+          , canonicalEventType = "TransactionNoteDeleted"
+          , canonicalEventOccurredAt = Nothing
+          , canonicalEventIdempotencyKey = Nothing
+          , canonicalEventPayload =
+              object
+                [ "transactionId" .= transactionId
+                , "noteId" .= noteId
+                ]
+          }
         deletedRows <- execute conn
           "DELETE FROM finance_transaction_notes WHERE user_id = ? AND transaction_id = ? AND note_id = ?"
           (userId, transactionId, noteId)
@@ -708,9 +736,19 @@ pgCategorizeFinanceTransaction pool userId transactionId categorySlug =
         eventId <- liftIO (toString <$> nextRandom)
         _ <- tryExcept
           (withTransaction conn $ do
-            _ <- execute conn
-              "INSERT INTO finance_transaction_classification_events (event_id, user_id, transaction_id, event_type, category, splits_payload) VALUES (?, ?, ?, ?, ?, ?)"
-              (eventId, userId, transactionId, ("TransactionCategorized" :: String), Just categorySlug, Nothing :: Maybe Value)
+            _ <- appendFinanceEvent conn FinanceCanonicalEvent
+              { canonicalEventId = eventId
+              , canonicalEventUserId = userId
+              , canonicalEventStreamId = "transaction:" ++ transactionId
+              , canonicalEventType = "TransactionCategorized"
+              , canonicalEventOccurredAt = Nothing
+              , canonicalEventIdempotencyKey = Nothing
+              , canonicalEventPayload =
+                  object
+                    [ "transactionId" .= transactionId
+                    , "category" .= categorySlug
+                    ]
+              }
             _ <- execute conn
               "DELETE FROM finance_transaction_categories WHERE user_id = ? AND transaction_id = ?"
               (userId, transactionId)
@@ -729,9 +767,19 @@ pgSplitFinanceTransaction pool userId transactionId splitRows =
     eventId <- liftIO (toString <$> nextRandom)
     _ <- tryExcept
       (withTransaction conn $ do
-        _ <- execute conn
-          "INSERT INTO finance_transaction_classification_events (event_id, user_id, transaction_id, event_type, category, splits_payload) VALUES (?, ?, ?, ?, ?, ?)"
-          (eventId, userId, transactionId, ("TransactionSplit" :: String), Nothing :: Maybe String, Nothing :: Maybe Value)
+        _ <- appendFinanceEvent conn FinanceCanonicalEvent
+          { canonicalEventId = eventId
+          , canonicalEventUserId = userId
+          , canonicalEventStreamId = "transaction:" ++ transactionId
+          , canonicalEventType = "TransactionSplit"
+          , canonicalEventOccurredAt = Nothing
+          , canonicalEventIdempotencyKey = Nothing
+          , canonicalEventPayload =
+              object
+                [ "transactionId" .= transactionId
+                , "splits" .= splitRows
+                ]
+          }
         _ <- execute conn
           "DELETE FROM finance_transaction_categories WHERE user_id = ? AND transaction_id = ?"
           (userId, transactionId)
@@ -760,9 +808,20 @@ pgLinkFinanceTransactions pool userId sourceTransactionId targetTransactionId li
             eventId <- liftIO (toString <$> nextRandom)
             _ <- tryExcept
               (withTransaction conn $ do
-                _ <- execute conn
-                  "INSERT INTO finance_transaction_link_events (event_id, user_id, source_transaction_id, target_transaction_id, link_type) VALUES (?, ?, ?, ?, ?)"
-                  (eventId, userId, sourceTransactionId, targetTransactionId, linkType)
+                _ <- appendFinanceEvent conn FinanceCanonicalEvent
+                  { canonicalEventId = eventId
+                  , canonicalEventUserId = userId
+                  , canonicalEventStreamId = "transaction:" ++ sourceTransactionId
+                  , canonicalEventType = "TransactionLinked"
+                  , canonicalEventOccurredAt = Nothing
+                  , canonicalEventIdempotencyKey = Nothing
+                  , canonicalEventPayload =
+                      object
+                        [ "sourceTransactionId" .= sourceTransactionId
+                        , "targetTransactionId" .= targetTransactionId
+                        , "linkType" .= linkType
+                        ]
+                  }
                 _ <- execute conn
                   "INSERT INTO finance_transaction_links (user_id, transaction_id, peer_transaction_id, link_type) VALUES (?, ?, ?, ?)"
                   (userId, sourceTransactionId, targetTransactionId, linkType)
@@ -1003,6 +1062,68 @@ idempotencyMatches FinanceTransactionWriteRequest
       && fromIntegral financeTransactionWriteAmount == storedAmount
       && financeTransactionWriteOccurredAtSupplied == storedOccurredAtSupplied
       && (not financeTransactionWriteOccurredAtSupplied || financeTransactionWriteOccurredAt == storedOccurredAt)
+
+data FinanceCanonicalEvent = FinanceCanonicalEvent
+  { canonicalEventId :: !String
+  , canonicalEventUserId :: !String
+  , canonicalEventStreamId :: !String
+  , canonicalEventType :: !String
+  , canonicalEventOccurredAt :: !(Maybe UTCTime)
+  , canonicalEventIdempotencyKey :: !(Maybe String)
+  , canonicalEventPayload :: !Value
+  }
+
+appendFinanceEvent :: Connection -> FinanceCanonicalEvent -> IO UTCTime
+appendFinanceEvent conn FinanceCanonicalEvent
+  { canonicalEventId
+  , canonicalEventUserId
+  , canonicalEventStreamId
+  , canonicalEventType
+  , canonicalEventOccurredAt
+  , canonicalEventIdempotencyKey
+  , canonicalEventPayload
+  } = do
+    lockRows <- query conn
+      "SELECT pg_try_advisory_xact_lock(hashtext(?), 0)"
+      (Only canonicalEventStreamId)
+      :: IO [Only Bool]
+    case lockRows of
+      [Only True] -> pure ()
+      [Only False] -> fail "Unable to acquire stream advisory lock for finance event append"
+      _ -> fail "Unexpected advisory lock query result for finance event append"
+    streamVersionRows <- query conn
+      "SELECT COALESCE(MAX(stream_version), 0)::bigint + 1 FROM finance_events WHERE stream_id = ?"
+      (Only canonicalEventStreamId)
+      :: IO [Only Int64]
+    streamVersion <- case streamVersionRows of
+      [Only value] -> pure value
+      _ -> fail "Unable to compute next stream version for finance event append"
+    occurredAt <- case canonicalEventOccurredAt of
+      Just value -> pure value
+      Nothing -> queryNow conn
+    recordedRows <- query conn
+      "INSERT INTO finance_events (event_id, user_id, stream_id, stream_version, event_type, event_version, occurred_at, idempotency_key, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING recorded_at"
+      ( canonicalEventId
+      , canonicalEventUserId
+      , canonicalEventStreamId
+      , streamVersion
+      , canonicalEventType
+      , (1 :: Int)
+      , occurredAt
+      , canonicalEventIdempotencyKey
+      , canonicalEventPayload
+      )
+      :: IO [Only UTCTime]
+    case recordedRows of
+      [Only recordedAt] -> pure recordedAt
+      _ -> fail "Unexpected recorded_at row count for finance event insert"
+
+queryNow :: Connection -> IO UTCTime
+queryNow conn = do
+  rows <- query_ conn "SELECT NOW()" :: IO [Only UTCTime]
+  case rows of
+    [Only value] -> pure value
+    _ -> fail "Unable to resolve current timestamp"
 
 directionFromText :: Text -> Maybe FinanceTransactionDirection
 directionFromText "sent" = Just FinanceTransactionSent

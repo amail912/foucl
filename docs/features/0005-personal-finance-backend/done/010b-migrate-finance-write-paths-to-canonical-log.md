@@ -18,9 +18,18 @@ As a backend maintainer, I want finance writes to append to the canonical event 
 ## Technical Details
 - Route finance command handlers through canonical event append logic.
 - Maintain transactional consistency between canonical append and projection-table updates.
-- Use deterministic stream identity strategy per aggregate.
+- Lock stream model decisions:
+  - account aggregate stream id: `account:{accountId}`
+  - transaction aggregate stream id: `transaction:{transactionId}`
+  - `TransactionLinked` is owned by the source transaction stream and its payload includes both transaction ids.
+- Use `(stream_id, stream_version)` for per-aggregate ordering and optimistic concurrency; keep `event_number` as global deterministic order.
+- Keep canonical append helper minimal:
+  - acquire transaction-scoped advisory lock per stream id
+  - compute next stream version
+  - append to `finance_events` with explicit `event_version = 1`.
 - Keep domain error mapping stable (`AlreadyExists`, `NotFound`, `WriteFailure`, `StorageFailure`).
 - Keep authorization and user-scoping guarantees unchanged.
+- Legacy finance event tables remain present but are no longer write targets in runtime command paths.
 
 ## Testing
 - Integration tests cover canonical append behavior across all finance write families.

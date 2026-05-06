@@ -15,8 +15,10 @@ As a backend maintainer, I want to finalize canonical finance event sourcing and
 
 ## Technical Details
 - Remove stale legacy plumbing no longer needed after `010a-010c` cutovers.
+- Remove legacy finance event-table dependencies now that `010b` routes runtime writes only through `finance_events`.
 - Keep projection contracts and domain error semantics intact.
 - Align integration reset/verification flows and supporting docs to final canonical model.
+- Preserve canonical stream decisions introduced in `010b` (`account:{accountId}`, `transaction:{transactionId}`, source-owned transfer-link events).
 - Update backlog lifecycle and architecture notes to reflect finalized rollout.
 
 ## Testing

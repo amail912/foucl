@@ -33,3 +33,5 @@ As a backend maintainer, I want to finalize canonical finance event sourcing and
 - API-compatible cleanup step.
 - Internal simplification after canonical cutover confidence is established.
 - No fallback to deprecated legacy storage paths after this story.
+- Story dependency note:
+  - starts only after `010c` cutover and parity verification are complete.

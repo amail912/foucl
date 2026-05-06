@@ -1,27 +1,26 @@
 # Remove Legacy Finance Event Storage And Finalize Rollout
 
 ## Goal
-As a backend maintainer, I want to retire legacy finance event storage paths, so finance event sourcing has one maintained canonical implementation.
+As a backend maintainer, I want to finalize canonical finance event sourcing and remove obsolete internals, so the backend has one maintained event-storage architecture.
 
 ## Behavior And Business Rules
-- Canonical finance event log is the only maintained event-storage path.
-- Legacy finance event storage paths are removed after cutover verification.
+- Canonical finance event log remains the only maintained event-storage path.
 - Existing finance API behavior remains unchanged for consumers.
-- Startup and migration flows remain deterministic and consistent with the new event model.
+- Startup and migration flows remain deterministic and aligned with canonical-event architecture.
 
 ## Data And Contracts
-- Removes obsolete internal storage artifacts no longer needed after canonical cutover.
+- Removes obsolete internal code/test artifacts tied to old finance event storage paths.
 - Keeps public API contracts stable.
-- Updates finance migration/test expectations to canonical-only event storage.
+- Updates migration/test expectations to canonical-only finance event storage.
 
 ## Technical Details
-- Remove legacy event write/read plumbing and related startup assumptions.
+- Remove stale legacy plumbing no longer needed after `010a-010c` cutovers.
 - Keep projection contracts and domain error semantics intact.
-- Align migration registration and integration reset/verification flows.
-- Update supporting docs and backlog lifecycle status to reflect finalized architecture.
+- Align integration reset/verification flows and supporting docs to final canonical model.
+- Update backlog lifecycle and architecture notes to reflect finalized rollout.
 
 ## Testing
-- Full required test sequence passes after legacy removal:
+- Full required sequence passes after cleanup:
   - `make test`
   - `make integration-test`
   - `make storage-migration-tests`
@@ -30,5 +29,5 @@ As a backend maintainer, I want to retire legacy finance event storage paths, so
 
 ## Rollout And Compatibility
 - API-compatible cleanup step.
-- Internal storage simplification after cutover confidence is established.
-- No fallback to legacy event storage after this story is complete.
+- Internal simplification after canonical cutover confidence is established.
+- No fallback to deprecated legacy storage paths after this story.

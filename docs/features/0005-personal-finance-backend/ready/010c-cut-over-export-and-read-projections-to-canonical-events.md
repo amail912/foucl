@@ -4,19 +4,20 @@
 As a backend maintainer, I want export and projection rebuild flows to consume canonical events, so all derived finance views are deterministically reproducible.
 
 ## Behavior And Business Rules
-- Export canonical section is sourced from the canonical finance event log.
-- Convenience views remain projection-backed and keep existing behavior contracts.
+- Export canonical section is sourced from `finance_events`.
+- Convenience `views` remain projection-backed and keep existing behavior contracts.
 - Rebuild-from-events and incremental projection updates must remain equivalent.
-- Deterministic ordering rules apply to canonical events and derived projection outputs.
+- Canonical replay ordering uses `event_number`.
 
 ## Data And Contracts
 - Refines `GET /api/v1/finance/export` canonical `events` sourcing.
 - Keeps `views` contract shape and exclusion rules stable (`reconciliation` and `report` excluded from views).
 - Keeps transaction-row view shape parity with `GET /api/v1/finance/transactions`.
+- No legacy canonical-event source is maintained after cutover.
 
 ## Technical Details
-- Switch export event reads to canonical event log as source of truth.
-- Align projection replay/rebuild paths to canonical event consumption.
+- Switch export canonical-event reads to `finance_events` as source of truth.
+- Align projection replay/rebuild paths to canonical event consumption in `event_number` order.
 - Preserve existing query semantics for ledger, report, categories, notes, and snapshots.
 - Keep user scoping and deterministic ordering explicit in read paths.
 
@@ -27,5 +28,5 @@ As a backend maintainer, I want export and projection rebuild flows to consume c
 
 ## Rollout And Compatibility
 - Backward-compatible API behavior.
-- Internal source-of-truth cutover from legacy event storage to canonical log.
-- Rollout should include parity verification before final cleanup.
+- Internal source-of-truth cutover from old event storage to canonical log.
+- Rollout includes parity verification before cleanup story `010d`.

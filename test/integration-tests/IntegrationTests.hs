@@ -43,6 +43,7 @@ financeCategoriesEndpoint = "/api/v1/finance/categories"
 financeTransactionsEndpoint = "/api/v1/finance/transactions"
 financeTransactionsSentEndpoint = "/api/v1/finance/transactions/sent"
 financeTransactionsReceivedEndpoint = "/api/v1/finance/transactions/received"
+financeReportEndpoint = "/api/v1/finance/report"
 
 runIntegrationTests :: IO ()
 runIntegrationTests = do
@@ -430,6 +431,11 @@ runIntegrationTests = do
         listTransactionsResp <- httpJSON $ setRequestMethod "GET" listTransactionsReq
         assertStatusCode "Finance transaction list should require auth" 401 listTransactionsResp
         assertMessageResponse "Not authenticated" listTransactionsResp
+
+        reportReq <- parseRequest "GET http://localhost:8081/api/v1/finance/report?from=2026-04-01T00:00:00Z&to=2026-04-30T00:00:00Z"
+        reportResp <- httpJSON $ setRequestMethod "GET" reportReq
+        assertStatusCode "Finance report should require auth" 401 reportResp
+        assertMessageResponse "Not authenticated" reportResp
 
         categorizeReq <- parseRequest "POST http://localhost:8081/api/v1/finance/transactions/missing/categorize"
         categorizeResp <- httpJSON $ setRequestMethod "POST"
@@ -899,6 +905,92 @@ runIntegrationTests = do
         unknownTransactionResp <- linkFinanceTransactionsExpectValue cookie sentTxId "missing-tx" "transfer"
         assertStatusCode "Unknown transfer link transaction should return 404" 404 unknownTransactionResp
         assertMessageResponse "Transaction not found" unknownTransactionResp
+
+      it "should build split-aware finance reports with deterministic filters and transfer exclusion" $ do
+        uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
+        let reportUsername = "fin-report-" ++ show uniquenessSuffix
+        ensureApprovedSandboxUser baseUsername reportUsername basePassword
+        cookie <- signinOnly reportUsername basePassword
+
+        accountA <- createFinanceAccount cookie "Report A"
+        accountB <- createFinanceAccount cookie "Report B"
+        accountC <- createFinanceAccount cookie "Report C"
+        accountAId <- requireObjectStringField "id" accountA
+        accountBId <- requireObjectStringField "id" accountB
+        accountCId <- requireObjectStringField "id" accountC
+
+        tx1Resp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "report-key-1" (object ["accountId" .= accountAId, "amount" .= (1000 :: Int), "occurredAt" .= ("2026-04-01T10:00:00Z" :: String)])
+        tx1Id <- requireObjectStringField "id" (getResponseBody tx1Resp)
+        _ <- categorizeFinanceTransactionExpectValue cookie tx1Id "pets.food"
+
+        tx2Resp <- createFinanceTransactionExpectValue cookie financeTransactionsReceivedEndpoint "report-key-2" (object ["accountId" .= accountBId, "amount" .= (2000 :: Int), "occurredAt" .= ("2026-04-02T10:00:00Z" :: String)])
+        tx2Id <- requireObjectStringField "id" (getResponseBody tx2Resp)
+        _ <- categorizeFinanceTransactionExpectValue cookie tx2Id "income.salary"
+
+        tx3Resp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "report-key-3" (object ["accountId" .= accountAId, "amount" .= (3000 :: Int), "occurredAt" .= ("2026-04-03T10:00:00Z" :: String)])
+        tx3Id <- requireObjectStringField "id" (getResponseBody tx3Resp)
+        _ <- splitFinanceTransactionExpectValue cookie tx3Id [("pets.food", 500), ("uncategorized.expense", 2500)]
+
+        tx4Resp <- createFinanceTransactionExpectValue cookie financeTransactionsReceivedEndpoint "report-key-4" (object ["accountId" .= accountCId, "amount" .= (3000 :: Int), "occurredAt" .= ("2026-04-04T10:00:00Z" :: String)])
+        tx4Id <- requireObjectStringField "id" (getResponseBody tx4Resp)
+        _ <- splitFinanceTransactionExpectValue cookie tx4Id [("income.salary", 1000), ("uncategorized.income", 2000)]
+
+        tx5Resp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "report-key-5" (object ["accountId" .= accountAId, "amount" .= (700 :: Int), "occurredAt" .= ("2026-04-05T10:00:00Z" :: String)])
+        tx5Id <- requireObjectStringField "id" (getResponseBody tx5Resp)
+
+        tx6SourceResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "report-key-6" (object ["accountId" .= accountAId, "amount" .= (900 :: Int), "occurredAt" .= ("2026-04-06T10:00:00Z" :: String)])
+        tx6TargetResp <- createFinanceTransactionExpectValue cookie financeTransactionsReceivedEndpoint "report-key-7" (object ["accountId" .= accountBId, "amount" .= (900 :: Int), "occurredAt" .= ("2026-04-06T10:01:00Z" :: String)])
+        tx6SourceId <- requireObjectStringField "id" (getResponseBody tx6SourceResp)
+        tx6TargetId <- requireObjectStringField "id" (getResponseBody tx6TargetResp)
+        transferLinkResp <- linkFinanceTransactionsExpectValue cookie tx6SourceId tx6TargetId "transfer"
+        assertStatusCode "Transfer link for report scenario should succeed" 200 transferLinkResp
+
+        tx7Resp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "report-key-8" (object ["accountId" .= accountAId, "amount" .= (1000 :: Int), "occurredAt" .= ("2026-04-07T10:00:00Z" :: String)])
+        tx7Id <- requireObjectStringField "id" (getResponseBody tx7Resp)
+        _ <- splitFinanceTransactionExpectValue cookie tx7Id [("pets.food", 400), ("pets.food", 600)]
+
+        sentReport <- getFinanceReport cookie [("from", "2026-04-01T00:00:00Z"), ("to", "2026-04-08T00:00:00Z"), ("direction", "sent")]
+        assertFinanceReportValues 5700 4 [tx7Id, tx5Id, tx3Id, tx1Id] sentReport
+
+        receivedReport <- getFinanceReport cookie [("from", "2026-04-01T00:00:00Z"), ("to", "2026-04-08T00:00:00Z"), ("direction", "received")]
+        assertFinanceReportValues 5000 2 [tx4Id, tx2Id] receivedReport
+
+        allReport <- getFinanceReport cookie [("from", "2026-04-01T00:00:00Z"), ("to", "2026-04-08T00:00:00Z"), ("direction", "all")]
+        assertFinanceReportValues (-700) 6 [tx7Id, tx5Id, tx4Id, tx3Id, tx2Id, tx1Id] allReport
+
+        petsReport <- getFinanceReport cookie
+          [ ("from", "2026-04-01T00:00:00Z")
+          , ("to", "2026-04-08T00:00:00Z")
+          , ("direction", "sent")
+          , ("categoryIn", "pets.food")
+          ]
+        assertFinanceReportValues 2500 3 [tx7Id, tx3Id, tx1Id] petsReport
+
+        uncategorizedAll <- getFinanceReport cookie
+          [ ("from", "2026-04-01T00:00:00Z")
+          , ("to", "2026-04-08T00:00:00Z")
+          , ("direction", "all")
+          , ("categoryIn", "uncategorized")
+          ]
+        assertFinanceReportValues (-1200) 3 [tx5Id, tx4Id, tx3Id] uncategorizedAll
+
+        overlapAccountResp <- getFinanceReportExpectValue cookie
+          [ ("from", "2026-04-01T00:00:00Z")
+          , ("to", "2026-04-08T00:00:00Z")
+          , ("accountIn", accountAId)
+          , ("accountNotIn", accountAId)
+          ]
+        assertStatusCode "Overlapping account include/exclude should return 400" 400 overlapAccountResp
+        assertMessageResponse "accountIn and accountNotIn must not overlap" overlapAccountResp
+
+        overlapCategoryResp <- getFinanceReportExpectValue cookie
+          [ ("from", "2026-04-01T00:00:00Z")
+          , ("to", "2026-04-08T00:00:00Z")
+          , ("categoryIn", "pets.food")
+          , ("categoryNotIn", "pets.food")
+          ]
+        assertStatusCode "Overlapping category include/exclude should return 400" 400 overlapCategoryResp
+        assertMessageResponse "categoryIn and categoryNotIn must not overlap" overlapCategoryResp
 
       it "should append, update, and delete transaction notes with shared trim and validation rules" $ do
         uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
@@ -2365,9 +2457,26 @@ getFinanceTransactionsExpectValue cookie queryParams = do
   req <- financeTransactionsRequest cookie queryParams
   httpJSON req
 
+getFinanceReport :: String -> [(String, String)] -> IO Value
+getFinanceReport cookie queryParams = do
+  resp <- getFinanceReportExpectValue cookie queryParams
+  assertStatusCode "Finance report should succeed" 200 resp
+  pure (getResponseBody resp)
+
+getFinanceReportExpectValue :: String -> [(String, String)] -> IO (Response Value)
+getFinanceReportExpectValue cookie queryParams = do
+  req <- financeReportRequest cookie queryParams
+  httpJSON req
+
 financeTransactionsRequest :: String -> [(String, String)] -> IO Request
 financeTransactionsRequest cookie queryParams = do
   req <- parseRequest ("GET http://localhost:8081" ++ financeTransactionsEndpoint)
+  let encodedQuery = map (\(k, v) -> (BS.pack k, Just (BS.pack v))) queryParams
+  pure $ setRequestHeader "Cookie" [BS.pack cookie] $ setRequestMethod "GET" $ setRequestQueryString encodedQuery req
+
+financeReportRequest :: String -> [(String, String)] -> IO Request
+financeReportRequest cookie queryParams = do
+  req <- parseRequest ("GET http://localhost:8081" ++ financeReportEndpoint)
   let encodedQuery = map (\(k, v) -> (BS.pack k, Just (BS.pack v))) queryParams
   pure $ setRequestHeader "Cookie" [BS.pack cookie] $ setRequestMethod "GET" $ setRequestQueryString encodedQuery req
 
@@ -2458,6 +2567,21 @@ assertFinanceTransactionDirectionAndAmount expectedDirection expectedAmount resp
         Just actualId -> assertBool "Expected finance transaction id to be non-empty" (not (null (actualId :: String)))
         Nothing -> assertFailure "Expected finance transaction id"
     _ -> assertFailure "Expected finance transaction response object"
+
+assertFinanceReportValues :: Int -> Int -> [String] -> Value -> Assertion
+assertFinanceReportValues expectedTotal expectedCount expectedIds responseBody =
+  case responseBody of
+    Object value -> do
+      case parseMaybe (.: "total") value of
+        Just actualTotal -> assertEqual "Expected report total" expectedTotal (actualTotal :: Int)
+        Nothing -> assertFailure "Expected report total"
+      case parseMaybe (.: "count") value of
+        Just actualCount -> assertEqual "Expected report count" expectedCount (actualCount :: Int)
+        Nothing -> assertFailure "Expected report count"
+      case parseMaybe (.: "transactionIds") value of
+        Just actualIds -> assertEqual "Expected report transaction ids" expectedIds (actualIds :: [String])
+        Nothing -> assertFailure "Expected report transaction ids"
+    _ -> assertFailure "Expected finance report response object"
 
 requireObjectStringField :: String -> Value -> IO String
 requireObjectStringField fieldName responseBody =

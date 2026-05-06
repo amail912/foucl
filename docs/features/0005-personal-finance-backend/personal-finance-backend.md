@@ -22,7 +22,6 @@ Provide an authenticated personal finance backend for manual transaction entry, 
 - [009 Snapshot Reconciliation Status And Basis Selection](to-refine/009-snapshot-reconciliation-status-and-basis-selection.md) - Define persisted snapshot reconciliation status and trusted-basis selection rules for future discrepancy computation.
 
 ### Ready
-- [007 Build Reporting And Ledger Projections](ready/007-build-reporting-and-ledger-projections.md) - Define split-aware aggregate report behavior, repeated-param filters, and deterministic projection reads.
 - [008 Export Finance Data](ready/008-export-finance-data.md) - Define the versioned export wire contract with canonical events and convenience `views`.
 
 ### Done
@@ -36,6 +35,7 @@ Provide an authenticated personal finance backend for manual transaction entry, 
 - [005a Append Transaction Notes](done/005a-append-transaction-notes.md) - Define note creation, blank-text rejection, and current note exposure in transaction rows.
 - [005b Edit And Delete Transaction Notes](done/005b-edit-and-delete-transaction-notes.md) - Define mutable note lifecycle, trim-on-write note rules, and soft-delete behavior on stable note ids.
 - [006 Record And Apply Balance Snapshots](done/006-record-and-apply-balance-snapshots.md) - Define snapshot-centered reconciliation writes, latest reconciliation reads, and additive balance-basis behavior.
+- [007 Build Reporting And Ledger Projections](done/007-build-reporting-and-ledger-projections.md) - Define split-aware aggregate report behavior, repeated-param filters, and deterministic projection reads.
 
 ### Canceled
 

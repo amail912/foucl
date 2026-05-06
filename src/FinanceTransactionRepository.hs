@@ -4,6 +4,9 @@
 module FinanceTransactionRepository
   ( FinanceTransactionRepository(..)
   , FinanceTransaction(..)
+  , FinanceReportDirection(..)
+  , FinanceReportRequest(..)
+  , FinanceReportResult(..)
   , FinanceTransactionNote(..)
   , FinanceTransactionNoteCreateRequest(..)
   , FinanceTransactionNoteUpdateRequest(..)
@@ -26,14 +29,17 @@ import Control.Monad.IO.Class (liftIO)
 import Data.Char (isSpace)
 import Data.Aeson (FromJSON(parseJSON), ToJSON(toJSON), Value, object, withObject, (.:), (.:?), (.=))
 import Data.Int (Int64)
-import Data.List (dropWhileEnd)
+import Data.List (dropWhileEnd, sortOn)
+import qualified Data.Map.Strict as Map
 import Data.Pool (Pool)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
 import Data.UUID (toString)
 import Data.UUID.V4 (nextRandom)
 import Database.PostgreSQL.Simple
   ( Connection
+  , In(..)
   , Only(..)
   , execute
   , query
@@ -47,6 +53,7 @@ data FinanceTransactionRepository = FinanceTransactionRepository
   { repoCreateFinanceTransaction :: !(String -> FinanceTransactionWriteRequest -> ExceptT RepositoryError IO FinanceTransaction)
   , repoLoadFinanceTransactionById :: !(String -> String -> ExceptT RepositoryError IO FinanceTransaction)
   , repoListFinanceTransactions :: !(String -> Maybe String -> Maybe UTCTime -> Maybe UTCTime -> ExceptT RepositoryError IO [FinanceTransaction])
+  , repoGetFinanceReport :: !(String -> FinanceReportRequest -> ExceptT RepositoryError IO FinanceReportResult)
   , repoAddFinanceTransactionNote :: !(String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction)
   , repoUpdateFinanceTransactionNote :: !(String -> String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction)
   , repoDeleteFinanceTransactionNote :: !(String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction)
@@ -101,6 +108,28 @@ data FinanceTransactionDirection
   = FinanceTransactionSent
   | FinanceTransactionReceived
   deriving (Eq, Show)
+
+data FinanceReportDirection
+  = FinanceReportSent
+  | FinanceReportReceived
+  | FinanceReportAll
+  deriving (Eq, Show)
+
+data FinanceReportRequest = FinanceReportRequest
+  { financeReportFrom :: !UTCTime
+  , financeReportTo :: !UTCTime
+  , financeReportDirection :: !FinanceReportDirection
+  , financeReportAccountIn :: ![String]
+  , financeReportAccountNotIn :: ![String]
+  , financeReportCategoryIn :: ![String]
+  , financeReportCategoryNotIn :: ![String]
+  } deriving (Eq, Show)
+
+data FinanceReportResult = FinanceReportResult
+  { financeReportTotal :: !Int
+  , financeReportCount :: !Int
+  , financeReportTransactionIds :: ![String]
+  } deriving (Eq, Show)
 
 data FinanceTransactionSplitRow = FinanceTransactionSplitRow
   { financeTransactionSplitAmount :: !Int
@@ -234,6 +263,14 @@ instance ToJSON FinanceTransaction where
         , "notes" .= financeTransactionNotes
         ]
 
+instance ToJSON FinanceReportResult where
+  toJSON FinanceReportResult { financeReportTotal, financeReportCount, financeReportTransactionIds } =
+    object
+      [ "total" .= financeReportTotal
+      , "count" .= financeReportCount
+      , "transactionIds" .= financeReportTransactionIds
+      ]
+
 financeTransactionDirectionText :: FinanceTransactionDirection -> Text
 financeTransactionDirectionText FinanceTransactionSent = "sent"
 financeTransactionDirectionText FinanceTransactionReceived = "received"
@@ -244,6 +281,7 @@ postgresFinanceTransactionRepository pool =
     { repoCreateFinanceTransaction = pgCreateFinanceTransaction pool
     , repoLoadFinanceTransactionById = pgLoadFinanceTransactionById pool
     , repoListFinanceTransactions = pgListFinanceTransactions pool
+    , repoGetFinanceReport = pgGetFinanceReport pool
     , repoAddFinanceTransactionNote = pgAddFinanceTransactionNote pool
     , repoUpdateFinanceTransactionNote = pgUpdateFinanceTransactionNote pool
     , repoDeleteFinanceTransactionNote = pgDeleteFinanceTransactionNote pool
@@ -418,6 +456,143 @@ pgListFinanceTransactions pool userId mAccountId mFrom mTo =
           query conn
             "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at FROM finance_transactions WHERE user_id = ? AND account_id = ? AND occurred_at >= ? AND occurred_at < ? ORDER BY occurred_at DESC, transaction_id ASC"
             (userId, accountId, fromTs, toTs)
+
+pgGetFinanceReport :: Pool Connection -> String -> FinanceReportRequest -> ExceptT RepositoryError IO FinanceReportResult
+pgGetFinanceReport pool userId request =
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    rawBaseRows <- tryExcept (loadBaseRows conn) mapSqlReadException
+    baseRows <- mapM decodeReportBaseRow rawBaseRows
+    if null baseRows
+      then pure FinanceReportResult { financeReportTotal = 0, financeReportCount = 0, financeReportTransactionIds = [] }
+      else do
+        let transactionIds = map baseRowId baseRows
+        categoryRows <- tryExcept
+          (query conn
+            "SELECT transaction_id, category FROM finance_transaction_categories WHERE user_id = ? AND transaction_id IN ?"
+            (userId, In transactionIds)
+            :: IO [(String, String)])
+          mapSqlReadException
+        splitRows <- tryExcept
+          (query conn
+            "SELECT transaction_id, split_index, amount, category FROM finance_transaction_splits WHERE user_id = ? AND transaction_id IN ? ORDER BY transaction_id ASC, split_index ASC"
+            (userId, In transactionIds)
+            :: IO [(String, Int, Int64, String)])
+          mapSqlReadException
+        let categoryMap = Map.fromList categoryRows
+            splitMap = Map.fromListWith (++) [ (txId, [(splitIndex, splitAmount, splitCategory)]) | (txId, splitIndex, splitAmount, splitCategory) <- splitRows ]
+            evaluated = map (evaluateReportRow request categoryMap splitMap) baseRows
+            matched = [ row | Just row <- evaluated ]
+            total = sum (map matchedContribution matched)
+            ids = map matchedId matched
+        pure FinanceReportResult
+          { financeReportTotal = total
+          , financeReportCount = length matched
+          , financeReportTransactionIds = ids
+          }
+  where
+    loadBaseRows conn =
+      query conn
+        "SELECT t.transaction_id, t.direction, t.account_id, t.amount, t.occurred_at \
+        \FROM finance_transactions t \
+        \LEFT JOIN finance_transaction_links l ON l.user_id = t.user_id AND l.transaction_id = t.transaction_id \
+        \WHERE t.user_id = ? \
+        \AND t.occurred_at >= ? AND t.occurred_at < ? \
+        \AND l.transaction_id IS NULL \
+        \AND (? = '' OR t.direction = ?) \
+        \ORDER BY t.occurred_at DESC, t.transaction_id ASC"
+        ( userId
+        , financeReportFrom request
+        , financeReportTo request
+        , reportDirectionSqlFilter (financeReportDirection request)
+        , reportDirectionSqlFilter (financeReportDirection request)
+        )
+        :: IO [(String, Text, String, Int64, UTCTime)]
+
+data ReportBaseRow = ReportBaseRow
+  { baseRowId :: !String
+  , baseRowDirection :: !FinanceTransactionDirection
+  , baseRowAccountId :: !String
+  , baseRowAmount :: !Int
+  }
+
+data ReportMatchedRow = ReportMatchedRow
+  { matchedId :: !String
+  , matchedContribution :: !Int
+  }
+
+decodeReportBaseRow :: (String, Text, String, Int64, UTCTime) -> ExceptT RepositoryError IO ReportBaseRow
+decodeReportBaseRow (transactionId, directionText, accountId, amount, _occurredAt) =
+  case directionFromText directionText of
+    Nothing -> throwError ReadFailure
+    Just parsedDirection ->
+      pure ReportBaseRow
+        { baseRowId = transactionId
+        , baseRowDirection = parsedDirection
+        , baseRowAccountId = accountId
+        , baseRowAmount = fromIntegral amount
+        }
+
+evaluateReportRow
+  :: FinanceReportRequest
+  -> Map.Map String String
+  -> Map.Map String [(Int, Int64, String)]
+  -> ReportBaseRow
+  -> Maybe ReportMatchedRow
+evaluateReportRow request categoryMap splitMap baseRow =
+  let categoryInSet = Set.fromList (financeReportCategoryIn request)
+      categoryNotInSet = Set.fromList (financeReportCategoryNotIn request)
+      accountInSet = Set.fromList (financeReportAccountIn request)
+      accountNotInSet = Set.fromList (financeReportAccountNotIn request)
+      accountIncluded =
+        (Set.null accountInSet || Set.member (baseRowAccountId baseRow) accountInSet)
+          && not (Set.member (baseRowAccountId baseRow) accountNotInSet)
+      hasCategoryFilters = not (Set.null categoryInSet) || not (Set.null categoryNotInSet)
+      orderedSplits = map (\(_, amount, categorySlug) -> (fromIntegral amount, categorySlug)) $
+        maybe [] (sortOn (\(splitIndex, _, _) -> splitIndex)) (Map.lookup (baseRowId baseRow) splitMap)
+      signed value =
+        case financeReportDirection request of
+          FinanceReportAll ->
+            case baseRowDirection baseRow of
+              FinanceTransactionReceived -> value
+              FinanceTransactionSent -> negate value
+          _ -> value
+      matchesCategory categorySlug =
+        let normalizedCategory = if categorySlug `elem` ["uncategorized.expense", "uncategorized.income"] then "uncategorized" else categorySlug
+            includeOk = Set.null categoryInSet || Set.member normalizedCategory categoryInSet
+            excludeOk = not (Set.member normalizedCategory categoryNotInSet)
+         in includeOk && excludeOk
+      uncategorizedWholeMatch =
+        case Map.lookup (baseRowId baseRow) categoryMap of
+          Nothing -> True
+          Just categorySlug -> categorySlug `elem` ["uncategorized.expense", "uncategorized.income"]
+      wholeCategorySlug =
+        case Map.lookup (baseRowId baseRow) categoryMap of
+          Nothing -> "uncategorized"
+          Just categorySlug
+            | categorySlug `elem` ["uncategorized.expense", "uncategorized.income"] -> "uncategorized"
+            | otherwise -> categorySlug
+   in if not accountIncluded
+        then Nothing
+        else if hasCategoryFilters
+        then
+          if not (null orderedSplits)
+            then
+              let matchingSplitAmounts = [ amount | (amount, categorySlug) <- orderedSplits, matchesCategory categorySlug ]
+               in if null matchingSplitAmounts
+                    then Nothing
+                    else Just ReportMatchedRow { matchedId = baseRowId baseRow, matchedContribution = signed (sum matchingSplitAmounts) }
+            else
+              let normalizedWhole = if uncategorizedWholeMatch then "uncategorized" else wholeCategorySlug
+               in if matchesCategory normalizedWhole
+                    then Just ReportMatchedRow { matchedId = baseRowId baseRow, matchedContribution = signed (baseRowAmount baseRow) }
+                    else Nothing
+        else
+          Just ReportMatchedRow { matchedId = baseRowId baseRow, matchedContribution = signed (baseRowAmount baseRow) }
+
+reportDirectionSqlFilter :: FinanceReportDirection -> Text
+reportDirectionSqlFilter FinanceReportAll = ""
+reportDirectionSqlFilter FinanceReportSent = "sent"
+reportDirectionSqlFilter FinanceReportReceived = "received"
 
 pgAddFinanceTransactionNote :: Pool Connection -> String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction
 pgAddFinanceTransactionNote pool userId transactionId noteText =

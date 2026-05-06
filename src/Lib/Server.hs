@@ -17,16 +17,18 @@ import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except (ExceptT, runExceptT)
 import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import Data.Aeson (FromJSON(parseJSON), ToJSON(toJSON), decode, decode', encode, object, withObject, (.:), (.=))
+import qualified Data.ByteString.Lazy.Char8 as LBS8
 import Data.ByteString.Char8 (unpack)
 import Data.Char (toLower)
 import Data.Int (Int64)
 import Data.List (isPrefixOf, sortOn)
 import Data.Maybe (Maybe(..), catMaybes, mapMaybe)
+import qualified Data.Set as Set
 import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, parseTimeM)
 import Data.Time.Format.ISO8601 (iso8601ParseM)
 import Data.Time.LocalTime (LocalTime)
-import Happstack.Server (CookieLife(Expired, Session), FilterMonad, Method(DELETE, GET, POST, PUT), Response, RqBody, ServerPartT, addCookie, askRq, defaultBodyPolicy, dir, getHeaderM, guessContentTypeM, internalServerError, look, method, mimeTypes, mkCookie, notFound, nullDir, ok, path, requestEntityTooLarge, serveFileFrom, takeRequestBody, toResponse, unauthorized, unBody, uriRest, setResponseCode)
+import Happstack.Server (CookieLife(Expired, Session), FilterMonad, Method(DELETE, GET, POST, PUT), Response, RqBody, ServerPartT, addCookie, askRq, defaultBodyPolicy, dir, getHeaderM, guessContentTypeM, inputValue, internalServerError, look, method, mimeTypes, mkCookie, notFound, nullDir, ok, path, requestEntityTooLarge, rqInputsQuery, serveFileFrom, takeRequestBody, toResponse, unauthorized, unBody, uriRest, setResponseCode)
 import qualified Happstack.Server as HServer
 import Happstack.Server.Internal.Cookie (Cookie(..), SameSite(..))
 import Happstack.Server.Internal.MessageWrap (BodyPolicy, bodyInput)
@@ -45,6 +47,8 @@ import FinanceCategoryRepository
 import FinanceTransactionRepository
   ( FinanceTransactionCreateRequest(..)
   , FinanceTransactionCategorizeRequest(..)
+  , FinanceReportDirection(..)
+  , FinanceReportRequest(..)
   , FinanceTransactionDirection(..)
   , FinanceTransactionLinkRequest(..)
   , FinanceTransactionNoteCreateRequest(..)
@@ -642,6 +646,7 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
           , financeTransactionsSplit
           , financeTransactionsNotes
           ]
+    , dir "report" financeReport
     ]
   where
     financeAccountsList = do
@@ -836,6 +841,45 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
       dir "notes" $ do
         msum [financeTransactionNoteCreate transactionId, financeTransactionNoteUpdate transactionId, financeTransactionNoteDelete transactionId]
 
+    financeReport = do
+      nullDir
+      method GET
+      request <- askRq
+      mFromRaw <- (Just <$> look "from") `mplus` pure Nothing
+      mToRaw <- (Just <$> look "to") `mplus` pure Nothing
+      let mDirectionRaw = queryParamValues "direction" request
+          accountInValues = queryParamValues "accountIn" request
+          accountNotInValues = queryParamValues "accountNotIn" request
+          categoryInValues = queryParamValues "categoryIn" request
+          categoryNotInValues = queryParamValues "categoryNotIn" request
+      case (mFromRaw, mToRaw) of
+        (Nothing, _) -> badRequest "from is required"
+        (_, Nothing) -> badRequest "to is required"
+        (Just _, Just _) ->
+          case (parseQueryTime "from" mFromRaw, parseQueryTime "to" mToRaw, parseReportDirection mDirectionRaw) of
+            (Left message, _, _) -> badRequest message
+            (_, Left message, _) -> badRequest message
+            (_, _, Left message) -> badRequest message
+            (Right (Just fromTs), Right (Just toTs), Right direction)
+              | fromTs >= toTs -> badRequest "from must be less than to"
+              | hasOverlap accountInValues accountNotInValues -> badRequest "accountIn and accountNotIn must not overlap"
+              | hasOverlap categoryInValues categoryNotInValues -> badRequest "categoryIn and categoryNotIn must not overlap"
+              | otherwise -> do
+                  let reportRequest = FinanceReportRequest
+                        { financeReportFrom = fromTs
+                        , financeReportTo = toTs
+                        , financeReportDirection = direction
+                        , financeReportAccountIn = accountInValues
+                        , financeReportAccountNotIn = accountNotInValues
+                        , financeReportCategoryIn = categoryInValues
+                        , financeReportCategoryNotIn = categoryNotInValues
+                        }
+                  result <- liftIO $ runExceptT (repoGetFinanceReport financeTransactionRepo principalUserId reportRequest)
+                  case result of
+                    Left _ -> internalServerError emptyResponse
+                    Right reportResult -> ok (jsonResponse reportResult)
+            _ -> internalServerError emptyResponse
+
     financeTransactionNoteCreate :: String -> ServerPartT IO Response
     financeTransactionNoteCreate transactionId = do
       nullDir
@@ -998,6 +1042,31 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
       case iso8601ParseM rawValue of
         Nothing -> Left (fieldName ++ " must be a valid ISO date-time string")
         Just parsed -> Right (Just parsed)
+
+    queryParamValues key request =
+      [ decodeInputValue input
+      | (name, input) <- rqInputsQuery request
+      , name == key
+      ]
+
+    decodeInputValue input =
+      case inputValue input of
+        Left pathValue -> pathValue
+        Right bytes -> LBS8.unpack bytes
+
+    parseReportDirection [] = Right FinanceReportAll
+    parseReportDirection [raw] =
+      case map toLower raw of
+        "all" -> Right FinanceReportAll
+        "sent" -> Right FinanceReportSent
+        "received" -> Right FinanceReportReceived
+        _ -> Left "direction must be one of: sent, received, all"
+    parseReportDirection _ = Left "direction must be provided at most once"
+
+    hasOverlap leftValues rightValues =
+      let leftSet = Set.fromList leftValues
+          rightSet = Set.fromList rightValues
+       in not (Set.null (Set.intersection leftSet rightSet))
 
 adminController :: AuthRepository -> String -> AppContext -> ServerPartT IO Response
 adminController authRepo bootstrapAdminUsername appContext@AppContext { sessionPrincipal = SessionPrincipal { principalUserId } } =

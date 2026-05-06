@@ -23,6 +23,10 @@ Provide an authenticated personal finance backend for manual transaction entry, 
 
 ### Ready
 - [008 Export Finance Data](ready/008-export-finance-data.md) - Define the versioned export wire contract with canonical events and convenience `views`.
+- [010a Unify Finance Event Log Foundation](ready/010a-unify-finance-event-log-foundation.md) - Establish one canonical append-only finance event-log foundation and deterministic ordering guarantees.
+- [010b Migrate Finance Write Paths To Canonical Log](ready/010b-migrate-finance-write-paths-to-canonical-log.md) - Route finance write behavior through canonical event append flows while keeping API semantics stable.
+- [010c Cut Over Export And Read Projections To Canonical Events](ready/010c-cut-over-export-and-read-projections-to-canonical-events.md) - Switch export canonical sourcing and projection rebuild inputs to canonical events with parity guarantees.
+- [010d Remove Legacy Finance Event Storage And Finalize Rollout](ready/010d-remove-legacy-finance-event-storage-and-finalize-rollout.md) - Retire legacy finance event storage paths after cutover verification and align migrations/tests/docs.
 
 ### Done
 - [001a Open And List Accounts](done/001a-open-and-list-accounts.md) - Define account creation, normalized per-user naming rules, and authenticated account listing behavior.

@@ -44,6 +44,7 @@ financeTransactionsEndpoint = "/api/v1/finance/transactions"
 financeTransactionsSentEndpoint = "/api/v1/finance/transactions/sent"
 financeTransactionsReceivedEndpoint = "/api/v1/finance/transactions/received"
 financeReportEndpoint = "/api/v1/finance/report"
+financeExportEndpoint = "/api/v1/finance/export"
 
 runIntegrationTests :: IO ()
 runIntegrationTests = do
@@ -436,6 +437,11 @@ runIntegrationTests = do
         reportResp <- httpJSON $ setRequestMethod "GET" reportReq
         assertStatusCode "Finance report should require auth" 401 reportResp
         assertMessageResponse "Not authenticated" reportResp
+
+        exportReq <- parseRequest "GET http://localhost:8081/api/v1/finance/export"
+        exportResp <- httpJSON $ setRequestMethod "GET" exportReq
+        assertStatusCode "Finance export should require auth" 401 exportResp
+        assertMessageResponse "Not authenticated" exportResp
 
         categorizeReq <- parseRequest "POST http://localhost:8081/api/v1/finance/transactions/missing/categorize"
         categorizeResp <- httpJSON $ setRequestMethod "POST"
@@ -1079,6 +1085,71 @@ runIntegrationTests = do
         case filter (\row -> financeTransactionIdValue row == txId) listed of
           [row] -> assertFinanceTransactionNotesTexts [replicate 2000 'a'] row
           _ -> assertFailure "Expected one matching transaction row for appended notes"
+
+      it "should export canonical events and projection-backed finance views" $ do
+        uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
+        let exportUsername = "fin-export-" ++ show uniquenessSuffix
+        ensureApprovedSandboxUser baseUsername exportUsername basePassword
+        cookie <- signinOnly exportUsername basePassword
+
+        account <- createFinanceAccount cookie "Export Account"
+        accountId <- requireObjectStringField "id" account
+
+        txResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "export-key-1" (object ["accountId" .= accountId, "amount" .= (1500 :: Int), "occurredAt" .= ("2026-05-01T10:00:00Z" :: String)])
+        assertStatusCode "Export transaction create should succeed" 200 txResp
+        txId <- requireObjectStringField "id" (getResponseBody txResp)
+
+        _ <- appendFinanceTransactionNoteExpectValue cookie txId "Export note"
+        _ <- createFinanceAccountSnapshotExpectValue cookie accountId 800 "2026-05-01T10:00:00Z"
+
+        exportResp <- getFinanceExportExpectValue cookie
+        assertStatusCode "Finance export should succeed" 200 exportResp
+        let exportBody = getResponseBody exportResp
+        case exportBody of
+          Object root -> do
+            case parseMaybe (.: "formatVersion") root of
+              Just formatVersion -> assertEqual "Expected finance export formatVersion=1" (1 :: Int) formatVersion
+              Nothing -> assertFailure "Expected finance export formatVersion"
+
+            events <- case parseMaybe (.: "events") root of
+              Just value -> pure (value :: [Value])
+              Nothing -> assertFailure "Expected finance export events" >> pure []
+            assertBool "Expected finance export events to be non-empty" (not (null events))
+            let txEventMatches eventValue =
+                  case eventValue of
+                    Object eventObj ->
+                      case parseMaybe (.: "payload") eventObj of
+                        Just (Object payloadObj) ->
+                          parseMaybe (.: "transactionId") payloadObj == Just txId
+                        _ -> False
+                    _ -> False
+            assertBool "Expected canonical events to include created transaction payload" (any txEventMatches events)
+
+            case parseMaybe (.: "views") root of
+              Just (Object viewsObj) -> do
+                case parseMaybe (.: "accounts") viewsObj of
+                  Just accounts -> assertBool "Expected finance export accounts view to be non-empty" (not (null (accounts :: [Value])))
+                  Nothing -> assertFailure "Expected finance export views.accounts"
+                case parseMaybe (.: "categories") viewsObj of
+                  Just categories -> assertBool "Expected finance export categories view to be non-empty" (not (null (categories :: [Value])))
+                  Nothing -> assertFailure "Expected finance export views.categories"
+                case parseMaybe (.: "transactions") viewsObj of
+                  Just transactions -> do
+                    let txRows = transactions :: [Value]
+                    assertBool "Expected finance export transactions view to be non-empty" (not (null txRows))
+                    case filter (\row -> financeTransactionIdValue row == txId) txRows of
+                      [txRow] -> do
+                        assertFinanceTransactionDirectionAndAmount "sent" 1500 txRow
+                        assertFinanceTransactionNotesTexts ["Export note"] txRow
+                      _ -> assertFailure "Expected exported transaction row to include created transaction"
+                  Nothing -> assertFailure "Expected finance export views.transactions"
+                case parseMaybe (.: "snapshots") viewsObj of
+                  Just snapshots -> assertBool "Expected finance export snapshots view to be non-empty" (not (null (snapshots :: [Value])))
+                  Nothing -> assertFailure "Expected finance export views.snapshots"
+                assertBool "Expected finance export views to exclude reconciliation" (parseMaybe (.: "reconciliation") viewsObj == (Nothing :: Maybe Value))
+                assertBool "Expected finance export views to exclude report" (parseMaybe (.: "report") viewsObj == (Nothing :: Maybe Value))
+              _ -> assertFailure "Expected finance export views object"
+          _ -> assertFailure "Expected finance export response object"
 
       it "should keep finance account lists isolated per authenticated user" $ do
         uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
@@ -2467,6 +2538,13 @@ getFinanceReportExpectValue :: String -> [(String, String)] -> IO (Response Valu
 getFinanceReportExpectValue cookie queryParams = do
   req <- financeReportRequest cookie queryParams
   httpJSON req
+
+getFinanceExportExpectValue :: String -> IO (Response Value)
+getFinanceExportExpectValue cookie = do
+  req <- parseRequest ("GET http://localhost:8081" ++ financeExportEndpoint)
+  httpJSON $ setRequestMethod "GET"
+         $ setRequestHeader "Cookie" [BS.pack cookie]
+         req
 
 financeTransactionsRequest :: String -> [(String, String)] -> IO Request
 financeTransactionsRequest cookie queryParams = do

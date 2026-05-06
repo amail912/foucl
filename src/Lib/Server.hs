@@ -647,6 +647,7 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
           , financeTransactionsNotes
           ]
     , dir "report" financeReport
+    , dir "export" financeExport
     ]
   where
     financeAccountsList = do
@@ -879,6 +880,40 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
                     Left _ -> internalServerError emptyResponse
                     Right reportResult -> ok (jsonResponse reportResult)
             _ -> internalServerError emptyResponse
+
+    financeExport = do
+      nullDir
+      method GET
+      eventsResult <- liftIO $ runExceptT (repoListFinanceCanonicalEvents financeTransactionRepo principalUserId)
+      case eventsResult of
+        Left _ -> internalServerError emptyResponse
+        Right events -> do
+          accountsResult <- liftIO $ runExceptT (repoListFinanceAccounts financeAccountRepo principalUserId FinanceAccountsAll)
+          case accountsResult of
+            Left _ -> internalServerError emptyResponse
+            Right accounts -> do
+              categoriesResult <- liftIO $ runExceptT (repoListFinanceCategories financeCategoryRepo principalUserId)
+              case categoriesResult of
+                Left _ -> internalServerError emptyResponse
+                Right categories -> do
+                  transactionsResult <- liftIO $ runExceptT (repoListFinanceTransactions financeTransactionRepo principalUserId Nothing Nothing Nothing)
+                  case transactionsResult of
+                    Left _ -> internalServerError emptyResponse
+                    Right transactions -> do
+                      snapshotsResult <- liftIO $ runExceptT (repoListFinanceAccountSnapshotsView financeAccountRepo principalUserId)
+                      case snapshotsResult of
+                        Left _ -> internalServerError emptyResponse
+                        Right snapshots ->
+                          ok (jsonResponse (object
+                            [ "formatVersion" .= (1 :: Int)
+                            , "events" .= events
+                            , "views" .= object
+                                [ "accounts" .= accounts
+                                , "categories" .= categories
+                                , "transactions" .= transactions
+                                , "snapshots" .= snapshots
+                                ]
+                            ]))
 
     financeTransactionNoteCreate :: String -> ServerPartT IO Response
     financeTransactionNoteCreate transactionId = do

@@ -19,6 +19,7 @@ module FinanceTransactionRepository
   , FinanceTransactionSplitWriteRow(..)
   , FinanceTransactionWriteRequest(..)
   , FinanceTransactionDirection(..)
+  , FinanceCanonicalEventEnvelope(..)
   , financeTransactionDirectionText
   , postgresFinanceTransactionRepository
   , financeTransactionPostgresHealthChecks
@@ -60,6 +61,7 @@ data FinanceTransactionRepository = FinanceTransactionRepository
   , repoCategorizeFinanceTransaction :: !(String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction)
   , repoSplitFinanceTransaction :: !(String -> String -> [FinanceTransactionSplitWriteRow] -> ExceptT RepositoryError IO FinanceTransaction)
   , repoLinkFinanceTransactions :: !(String -> String -> String -> String -> ExceptT RepositoryError IO (FinanceTransaction, FinanceTransaction))
+  , repoListFinanceCanonicalEvents :: !(String -> ExceptT RepositoryError IO [FinanceCanonicalEventEnvelope])
   }
 
 data FinanceTransactionCreateRequest = FinanceTransactionCreateRequest
@@ -162,6 +164,20 @@ data FinanceTransactionTransfer = FinanceTransactionTransfer
   , financeTransactionTransferPeerAccountId :: !String
   , financeTransactionTransferPeerAmount :: !Int
   , financeTransactionTransferLinkedAt :: !UTCTime
+  } deriving (Eq, Show)
+
+data FinanceCanonicalEventEnvelope = FinanceCanonicalEventEnvelope
+  { financeCanonicalEventNumber :: !Int64
+  , financeCanonicalEventId :: !String
+  , financeCanonicalEventUserId :: !String
+  , financeCanonicalEventStreamId :: !String
+  , financeCanonicalEventStreamVersion :: !Int64
+  , financeCanonicalEventType :: !String
+  , financeCanonicalEventVersion :: !Int
+  , financeCanonicalEventOccurredAt :: !UTCTime
+  , financeCanonicalEventRecordedAt :: !UTCTime
+  , financeCanonicalEventIdempotencyKey :: !(Maybe String)
+  , financeCanonicalEventPayload :: !Value
   } deriving (Eq, Show)
 
 instance FromJSON FinanceTransactionCreateRequest where
@@ -278,6 +294,34 @@ instance ToJSON FinanceReportResult where
       , "transactionIds" .= financeReportTransactionIds
       ]
 
+instance ToJSON FinanceCanonicalEventEnvelope where
+  toJSON FinanceCanonicalEventEnvelope
+    { financeCanonicalEventNumber
+    , financeCanonicalEventId
+    , financeCanonicalEventUserId
+    , financeCanonicalEventStreamId
+    , financeCanonicalEventStreamVersion
+    , financeCanonicalEventType
+    , financeCanonicalEventVersion
+    , financeCanonicalEventOccurredAt
+    , financeCanonicalEventRecordedAt
+    , financeCanonicalEventIdempotencyKey
+    , financeCanonicalEventPayload
+    } =
+      object
+        [ "eventNumber" .= financeCanonicalEventNumber
+        , "eventId" .= financeCanonicalEventId
+        , "userId" .= financeCanonicalEventUserId
+        , "streamId" .= financeCanonicalEventStreamId
+        , "streamVersion" .= financeCanonicalEventStreamVersion
+        , "eventType" .= financeCanonicalEventType
+        , "eventVersion" .= financeCanonicalEventVersion
+        , "occurredAt" .= financeCanonicalEventOccurredAt
+        , "recordedAt" .= financeCanonicalEventRecordedAt
+        , "idempotencyKey" .= financeCanonicalEventIdempotencyKey
+        , "payload" .= financeCanonicalEventPayload
+        ]
+
 financeTransactionDirectionText :: FinanceTransactionDirection -> Text
 financeTransactionDirectionText FinanceTransactionSent = "sent"
 financeTransactionDirectionText FinanceTransactionReceived = "received"
@@ -295,6 +339,7 @@ postgresFinanceTransactionRepository pool =
     , repoCategorizeFinanceTransaction = pgCategorizeFinanceTransaction pool
     , repoSplitFinanceTransaction = pgSplitFinanceTransaction pool
     , repoLinkFinanceTransactions = pgLinkFinanceTransactions pool
+    , repoListFinanceCanonicalEvents = pgListFinanceCanonicalEvents pool
     }
 
 financeTransactionPostgresHealthChecks :: Connection -> ExceptT String IO ()
@@ -403,6 +448,43 @@ pgLoadFinanceTransactionById :: Pool Connection -> String -> String -> ExceptT R
 pgLoadFinanceTransactionById pool userId transactionId =
   withPoolExceptHandled (const StorageFailure) pool $ \conn ->
     pgLoadFinanceTransactionByIdInConn conn userId transactionId
+
+pgListFinanceCanonicalEvents :: Pool Connection -> String -> ExceptT RepositoryError IO [FinanceCanonicalEventEnvelope]
+pgListFinanceCanonicalEvents pool userId =
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    rows <- tryExcept
+      (query conn
+        "SELECT event_number, event_id, user_id, stream_id, stream_version, event_type, event_version, occurred_at, recorded_at, idempotency_key, payload FROM finance_events WHERE user_id = ? ORDER BY event_number ASC"
+        (Only userId)
+        :: IO [(Int64, String, String, String, Int64, String, Int, UTCTime, UTCTime, Maybe String, Value)])
+      mapSqlReadException
+    pure
+      [ FinanceCanonicalEventEnvelope
+          { financeCanonicalEventNumber = eventNumber
+          , financeCanonicalEventId = eventId
+          , financeCanonicalEventUserId = rowUserId
+          , financeCanonicalEventStreamId = streamId
+          , financeCanonicalEventStreamVersion = streamVersion
+          , financeCanonicalEventType = eventType
+          , financeCanonicalEventVersion = eventVersion
+          , financeCanonicalEventOccurredAt = occurredAt
+          , financeCanonicalEventRecordedAt = recordedAt
+          , financeCanonicalEventIdempotencyKey = idempotencyKey
+          , financeCanonicalEventPayload = payload
+          }
+      | ( eventNumber
+        , eventId
+        , rowUserId
+        , streamId
+        , streamVersion
+        , eventType
+        , eventVersion
+        , occurredAt
+        , recordedAt
+        , idempotencyKey
+        , payload
+        ) <- rows
+      ]
 
 pgLoadFinanceTransactionByIdInConn :: Connection -> String -> String -> ExceptT RepositoryError IO FinanceTransaction
 pgLoadFinanceTransactionByIdInConn conn userId transactionId = do

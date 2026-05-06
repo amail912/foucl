@@ -7,6 +7,7 @@ module FinanceAccountRepository
   , FinanceAccountCreateRequest(..)
   , FinanceAccountSnapshotCreateRequest(..)
   , FinanceAccountSnapshot(..)
+  , FinanceAccountSnapshotView(..)
   , FinanceAccountReconciliation(..)
   , FinanceAccountStatus(..)
   , FinanceAccountStatusFilter(..)
@@ -47,6 +48,7 @@ data FinanceAccountRepository = FinanceAccountRepository
   , repoCloseFinanceAccount :: !(String -> String -> ExceptT RepositoryError IO FinanceAccount)
   , repoCreateFinanceAccountSnapshot :: !(String -> String -> Int -> UTCTime -> ExceptT RepositoryError IO FinanceAccountReconciliation)
   , repoListFinanceAccountSnapshots :: !(String -> String -> ExceptT RepositoryError IO [FinanceAccountSnapshot])
+  , repoListFinanceAccountSnapshotsView :: !(String -> ExceptT RepositoryError IO [FinanceAccountSnapshotView])
   , repoGetFinanceAccountReconciliationLatest :: !(String -> String -> ExceptT RepositoryError IO FinanceAccountReconciliation)
   , repoGetFinanceAccountReconciliationBySnapshotId :: !(String -> String -> String -> ExceptT RepositoryError IO FinanceAccountReconciliation)
   }
@@ -81,6 +83,13 @@ data FinanceAccountSnapshot = FinanceAccountSnapshot
   { financeAccountSnapshotId :: !String
   , financeAccountSnapshotOccurredAt :: !UTCTime
   , financeAccountSnapshotBalance :: !Int
+  } deriving (Eq, Show)
+
+data FinanceAccountSnapshotView = FinanceAccountSnapshotView
+  { financeAccountSnapshotViewAccountId :: !String
+  , financeAccountSnapshotViewId :: !String
+  , financeAccountSnapshotViewOccurredAt :: !UTCTime
+  , financeAccountSnapshotViewBalance :: !Int
   } deriving (Eq, Show)
 
 data FinanceAccountReconciliation = FinanceAccountReconciliation
@@ -119,6 +128,20 @@ instance ToJSON FinanceAccountSnapshot where
         [ "id" .= financeAccountSnapshotId
         , "occurredAt" .= financeAccountSnapshotOccurredAt
         , "balance" .= financeAccountSnapshotBalance
+        ]
+
+instance ToJSON FinanceAccountSnapshotView where
+  toJSON FinanceAccountSnapshotView
+    { financeAccountSnapshotViewAccountId
+    , financeAccountSnapshotViewId
+    , financeAccountSnapshotViewOccurredAt
+    , financeAccountSnapshotViewBalance
+    } =
+      object
+        [ "accountId" .= financeAccountSnapshotViewAccountId
+        , "id" .= financeAccountSnapshotViewId
+        , "occurredAt" .= financeAccountSnapshotViewOccurredAt
+        , "balance" .= financeAccountSnapshotViewBalance
         ]
 
 instance ToJSON FinanceAccountReconciliation where
@@ -162,6 +185,7 @@ postgresFinanceAccountRepository pool =
     , repoCloseFinanceAccount = pgCloseFinanceAccount pool
     , repoCreateFinanceAccountSnapshot = pgCreateFinanceAccountSnapshot pool
     , repoListFinanceAccountSnapshots = pgListFinanceAccountSnapshots pool
+    , repoListFinanceAccountSnapshotsView = pgListFinanceAccountSnapshotsView pool
     , repoGetFinanceAccountReconciliationLatest = pgGetFinanceAccountReconciliationLatest pool
     , repoGetFinanceAccountReconciliationBySnapshotId = pgGetFinanceAccountReconciliationBySnapshotId pool
     }
@@ -349,6 +373,25 @@ pgListFinanceAccountSnapshots pool userId accountId =
           , financeAccountSnapshotBalance = fromIntegral snapshotBalance
           }
       | (snapshotId, snapshotOccurredAt, snapshotBalance) <- rows
+      ]
+
+pgListFinanceAccountSnapshotsView :: Pool Connection -> String -> ExceptT RepositoryError IO [FinanceAccountSnapshotView]
+pgListFinanceAccountSnapshotsView pool userId =
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    rows <- tryExcept
+      (query conn
+        "SELECT account_id, snapshot_id, occurred_at, balance FROM finance_balance_snapshots WHERE user_id = ? ORDER BY occurred_at DESC, snapshot_id ASC"
+        (Only userId)
+        :: IO [(String, String, UTCTime, Int64)])
+      mapSqlReadException
+    pure
+      [ FinanceAccountSnapshotView
+          { financeAccountSnapshotViewAccountId = accountId
+          , financeAccountSnapshotViewId = snapshotId
+          , financeAccountSnapshotViewOccurredAt = snapshotOccurredAt
+          , financeAccountSnapshotViewBalance = fromIntegral snapshotBalance
+          }
+      | (accountId, snapshotId, snapshotOccurredAt, snapshotBalance) <- rows
       ]
 
 pgGetFinanceAccountReconciliationLatest :: Pool Connection -> String -> String -> ExceptT RepositoryError IO FinanceAccountReconciliation

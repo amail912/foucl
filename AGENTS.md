@@ -67,6 +67,9 @@ Notes:
   - Commit only after required checks pass.
 - For all code implementation requests (story or non-story):
   - Create a commit after finishing implementation and validation.
+- For all feature/story doc maintenance:
+  - Keep each feature backlog aligned with the story folder state (`ready/`, `done/`, `to-refine/`, `canceled/`).
+  - Keep canceled stories as auditable docs rather than deleting them.
 - Story commit messages should use:
   - `[xxxx-yyy] Functional description of the story`
 
@@ -109,3 +112,4 @@ Also verify no leftover anti-patterns where applicable:
 - Moved toward consistent `ExceptT` patterns in repository modules.
 - Standardized on `Helpers` (`tryExcept`, `withResourceM*`) for IO/resource exception flow.
 - Kept startup migration domain selection function available via `Lib` for tests/wiring.
+- Leave `app-config.json` and `config/app-config-fs.json` untouched unless the user explicitly asks to change them.

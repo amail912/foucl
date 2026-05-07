@@ -8,6 +8,7 @@ module FinanceTransactionRepository
   , FinanceReportRequest(..)
   , FinanceReportResult(..)
   , FinanceTransactionNote(..)
+  , FinanceTransactionAdjustment(..)
   , FinanceTransactionNoteCreateRequest(..)
   , FinanceTransactionNoteUpdateRequest(..)
   , FinanceTransactionLinkRequest(..)
@@ -33,6 +34,7 @@ import Data.Int (Int64)
 import Data.List (dropWhileEnd, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Pool (Pool)
+import Data.Ord (Down(..))
 import qualified Data.Set as Set
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
@@ -149,6 +151,15 @@ data FinanceTransaction = FinanceTransaction
   , financeTransactionCategory :: !(Maybe String)
   , financeTransactionSplits :: ![FinanceTransactionSplitRow]
   , financeTransactionNotes :: ![FinanceTransactionNote]
+  , financeTransactionAdjustment :: !(Maybe FinanceTransactionAdjustment)
+  } deriving (Eq, Show)
+
+data FinanceTransactionAdjustment = FinanceTransactionAdjustment
+  { financeTransactionAdjustmentSnapshotId :: !String
+  , financeTransactionAdjustmentSnapshotOccurredAt :: !UTCTime
+  , financeTransactionAdjustmentReason :: !(Maybe String)
+  , financeTransactionAdjustmentAmount :: !Int
+  , financeTransactionAdjustmentDirection :: !FinanceTransactionDirection
   } deriving (Eq, Show)
 
 data FinanceTransactionNote = FinanceTransactionNote
@@ -272,6 +283,7 @@ instance ToJSON FinanceTransaction where
     , financeTransactionCategory
     , financeTransactionSplits
     , financeTransactionNotes
+    , financeTransactionAdjustment
     } =
       object
         [ "id" .= financeTransactionId
@@ -284,6 +296,23 @@ instance ToJSON FinanceTransaction where
         , "category" .= financeTransactionCategory
         , "splits" .= financeTransactionSplits
         , "notes" .= financeTransactionNotes
+        , "adjustment" .= financeTransactionAdjustment
+        ]
+
+instance ToJSON FinanceTransactionAdjustment where
+  toJSON FinanceTransactionAdjustment
+    { financeTransactionAdjustmentSnapshotId
+    , financeTransactionAdjustmentSnapshotOccurredAt
+    , financeTransactionAdjustmentReason
+    , financeTransactionAdjustmentAmount
+    , financeTransactionAdjustmentDirection
+    } =
+      object
+        [ "snapshotId" .= financeTransactionAdjustmentSnapshotId
+        , "snapshotOccurredAt" .= financeTransactionAdjustmentSnapshotOccurredAt
+        , "reason" .= financeTransactionAdjustmentReason
+        , "amount" .= financeTransactionAdjustmentAmount
+        , "direction" .= financeTransactionDirectionText financeTransactionAdjustmentDirection
         ]
 
 instance ToJSON FinanceReportResult where
@@ -379,6 +408,11 @@ financeTransactionPostgresHealthChecks conn = do
       "SELECT user_id, transaction_id, note_id, note_text, created_at, updated_at FROM finance_transaction_notes LIMIT 0"
       :: IO [(String, String, String, String, UTCTime, UTCTime)])
     (\err -> "Finance schema check failed for finance_transaction_notes: " ++ show err)
+  tryExcept
+    (query_ conn
+      "SELECT user_id, account_id, snapshot_id, snapshot_occurred_at, amount, direction, reason, recorded_at FROM finance_balance_snapshot_adjustments LIMIT 0"
+      :: IO [(String, String, String, UTCTime, Int64, Text, Maybe String, UTCTime)])
+    (\err -> "Finance schema check failed for finance_balance_snapshot_adjustments: " ++ show err)
   pure ()
 
 pgCreateFinanceTransaction :: Pool Connection -> String -> FinanceTransactionWriteRequest -> ExceptT RepositoryError IO FinanceTransaction
@@ -506,7 +540,11 @@ pgListFinanceTransactions pool userId mAccountId mFrom mTo =
   withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
     rows <- tryExcept (runListQuery conn) mapSqlReadException
     baseRows <- mapM decodeBaseTransaction rows
-    mapM (hydrateTransactionDetails conn userId) baseRows
+    hydratedBaseRows <- mapM (hydrateTransactionDetails conn userId) baseRows
+    rawAdjustmentRows <- tryExcept (runAdjustmentListQuery conn) mapSqlReadException
+    adjustmentRows <- mapM decodeAdjustmentListRow rawAdjustmentRows
+    let adjustmentTransactions = map financeAdjustmentRowToTransaction adjustmentRows
+    pure (sortOn financeTransactionSortKey (hydratedBaseRows ++ adjustmentTransactions))
   where
     runListQuery conn =
       case (mAccountId, mFrom, mTo) of
@@ -542,16 +580,53 @@ pgListFinanceTransactions pool userId mAccountId mFrom mTo =
           query conn
             "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at FROM finance_transactions WHERE user_id = ? AND account_id = ? AND occurred_at >= ? AND occurred_at < ? ORDER BY occurred_at DESC, transaction_id ASC"
             (userId, accountId, fromTs, toTs)
+    runAdjustmentListQuery conn =
+      case (mAccountId, mFrom, mTo) of
+        (Nothing, Nothing, Nothing) ->
+          query conn
+            "SELECT snapshot_id, snapshot_occurred_at, recorded_at, account_id, amount, direction, reason FROM finance_balance_snapshot_adjustments WHERE user_id = ? ORDER BY snapshot_occurred_at DESC, snapshot_id ASC"
+            (Only userId)
+        (Just accountId, Nothing, Nothing) ->
+          query conn
+            "SELECT snapshot_id, snapshot_occurred_at, recorded_at, account_id, amount, direction, reason FROM finance_balance_snapshot_adjustments WHERE user_id = ? AND account_id = ? ORDER BY snapshot_occurred_at DESC, snapshot_id ASC"
+            (userId, accountId)
+        (Nothing, Just fromTs, Nothing) ->
+          query conn
+            "SELECT snapshot_id, snapshot_occurred_at, recorded_at, account_id, amount, direction, reason FROM finance_balance_snapshot_adjustments WHERE user_id = ? AND snapshot_occurred_at >= ? ORDER BY snapshot_occurred_at DESC, snapshot_id ASC"
+            (userId, fromTs)
+        (Nothing, Nothing, Just toTs) ->
+          query conn
+            "SELECT snapshot_id, snapshot_occurred_at, recorded_at, account_id, amount, direction, reason FROM finance_balance_snapshot_adjustments WHERE user_id = ? AND snapshot_occurred_at < ? ORDER BY snapshot_occurred_at DESC, snapshot_id ASC"
+            (userId, toTs)
+        (Just accountId, Just fromTs, Nothing) ->
+          query conn
+            "SELECT snapshot_id, snapshot_occurred_at, recorded_at, account_id, amount, direction, reason FROM finance_balance_snapshot_adjustments WHERE user_id = ? AND account_id = ? AND snapshot_occurred_at >= ? ORDER BY snapshot_occurred_at DESC, snapshot_id ASC"
+            (userId, accountId, fromTs)
+        (Just accountId, Nothing, Just toTs) ->
+          query conn
+            "SELECT snapshot_id, snapshot_occurred_at, recorded_at, account_id, amount, direction, reason FROM finance_balance_snapshot_adjustments WHERE user_id = ? AND account_id = ? AND snapshot_occurred_at < ? ORDER BY snapshot_occurred_at DESC, snapshot_id ASC"
+            (userId, accountId, toTs)
+        (Nothing, Just fromTs, Just toTs) ->
+          query conn
+            "SELECT snapshot_id, snapshot_occurred_at, recorded_at, account_id, amount, direction, reason FROM finance_balance_snapshot_adjustments WHERE user_id = ? AND snapshot_occurred_at >= ? AND snapshot_occurred_at < ? ORDER BY snapshot_occurred_at DESC, snapshot_id ASC"
+            (userId, fromTs, toTs)
+        (Just accountId, Just fromTs, Just toTs) ->
+          query conn
+            "SELECT snapshot_id, snapshot_occurred_at, recorded_at, account_id, amount, direction, reason FROM finance_balance_snapshot_adjustments WHERE user_id = ? AND account_id = ? AND snapshot_occurred_at >= ? AND snapshot_occurred_at < ? ORDER BY snapshot_occurred_at DESC, snapshot_id ASC"
+            (userId, accountId, fromTs, toTs)
 
 pgGetFinanceReport :: Pool Connection -> String -> FinanceReportRequest -> ExceptT RepositoryError IO FinanceReportResult
 pgGetFinanceReport pool userId request =
   withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
     rawBaseRows <- tryExcept (loadBaseRows conn) mapSqlReadException
+    rawAdjustmentRows <- tryExcept (loadAdjustmentRows conn) mapSqlReadException
     baseRows <- mapM decodeReportBaseRow rawBaseRows
-    if null baseRows
+    adjustmentRows <- mapM decodeAdjustmentReportBaseRow rawAdjustmentRows
+    let combinedRows = baseRows ++ adjustmentRows
+    if null combinedRows
       then pure FinanceReportResult { financeReportTotal = 0, financeReportCount = 0, financeReportTransactionIds = [] }
       else do
-        let transactionIds = map baseRowId baseRows
+        let transactionIds = map baseRowId combinedRows
         categoryRows <- tryExcept
           (query conn
             "SELECT transaction_id, category FROM finance_transaction_categories WHERE user_id = ? AND transaction_id IN ?"
@@ -566,7 +641,7 @@ pgGetFinanceReport pool userId request =
           mapSqlReadException
         let categoryMap = Map.fromList categoryRows
             splitMap = Map.fromListWith (++) [ (txId, [(splitIndex, splitAmount, splitCategory)]) | (txId, splitIndex, splitAmount, splitCategory) <- splitRows ]
-            evaluated = map (evaluateReportRow request categoryMap splitMap) baseRows
+            evaluated = map (evaluateReportRow request categoryMap splitMap) combinedRows
             matched = [ row | Just row <- evaluated ]
             total = sum (map matchedContribution matched)
             ids = map matchedId matched
@@ -593,13 +668,32 @@ pgGetFinanceReport pool userId request =
         , reportDirectionSqlFilter (financeReportDirection request)
         )
         :: IO [(String, Text, String, Int64, UTCTime)]
+    loadAdjustmentRows conn =
+      query conn
+        "SELECT snapshot_id, snapshot_occurred_at, account_id, amount, direction, reason \
+        \FROM finance_balance_snapshot_adjustments \
+        \WHERE user_id = ? \
+        \AND snapshot_occurred_at >= ? AND snapshot_occurred_at < ? \
+        \AND (? = '' OR direction = ?) \
+        \ORDER BY snapshot_occurred_at DESC, snapshot_id ASC"
+        ( userId
+        , financeReportFrom request
+        , financeReportTo request
+        , reportDirectionSqlFilter (financeReportDirection request)
+        , reportDirectionSqlFilter (financeReportDirection request)
+        )
+        :: IO [(String, UTCTime, String, Int64, Text, Maybe String)]
 
 data ReportBaseRow = ReportBaseRow
   { baseRowId :: !String
   , baseRowDirection :: !FinanceTransactionDirection
   , baseRowAccountId :: !String
   , baseRowAmount :: !Int
-  }
+  , baseRowIsAdjustment :: !Bool
+  , baseRowAdjustmentReason :: !(Maybe String)
+  , baseRowAdjustmentSnapshotOccurredAt :: !(Maybe UTCTime)
+  , baseRowAdjustmentRecordedAt :: !(Maybe UTCTime)
+}
 
 data ReportMatchedRow = ReportMatchedRow
   { matchedId :: !String
@@ -616,6 +710,26 @@ decodeReportBaseRow (transactionId, directionText, accountId, amount, _occurredA
         , baseRowDirection = parsedDirection
         , baseRowAccountId = accountId
         , baseRowAmount = fromIntegral amount
+        , baseRowIsAdjustment = False
+        , baseRowAdjustmentReason = Nothing
+        , baseRowAdjustmentSnapshotOccurredAt = Nothing
+        , baseRowAdjustmentRecordedAt = Nothing
+        }
+
+decodeAdjustmentReportBaseRow :: (String, UTCTime, String, Int64, Text, Maybe String) -> ExceptT RepositoryError IO ReportBaseRow
+decodeAdjustmentReportBaseRow (snapshotId, snapshotOccurredAt, accountId, amount, directionText, reason) =
+  case directionFromText directionText of
+    Nothing -> throwError ReadFailure
+    Just parsedDirection ->
+      pure ReportBaseRow
+        { baseRowId = "adjustment:" ++ snapshotId
+        , baseRowDirection = parsedDirection
+        , baseRowAccountId = accountId
+        , baseRowAmount = fromIntegral amount
+        , baseRowIsAdjustment = True
+        , baseRowAdjustmentReason = reason
+        , baseRowAdjustmentSnapshotOccurredAt = Just snapshotOccurredAt
+        , baseRowAdjustmentRecordedAt = Nothing
         }
 
 evaluateReportRow
@@ -633,8 +747,11 @@ evaluateReportRow request categoryMap splitMap baseRow =
         (Set.null accountInSet || Set.member (baseRowAccountId baseRow) accountInSet)
           && not (Set.member (baseRowAccountId baseRow) accountNotInSet)
       hasCategoryFilters = not (Set.null categoryInSet) || not (Set.null categoryNotInSet)
-      orderedSplits = map (\(_, amount, categorySlug) -> (fromIntegral amount, categorySlug)) $
-        maybe [] (sortOn (\(splitIndex, _, _) -> splitIndex)) (Map.lookup (baseRowId baseRow) splitMap)
+      orderedSplits =
+        if baseRowIsAdjustment baseRow
+          then []
+          else map (\(_, amount, categorySlug) -> (fromIntegral amount, categorySlug)) $
+            maybe [] (sortOn (\(splitIndex, _, _) -> splitIndex)) (Map.lookup (baseRowId baseRow) splitMap)
       signed value =
         case financeReportDirection request of
           FinanceReportAll ->
@@ -648,15 +765,19 @@ evaluateReportRow request categoryMap splitMap baseRow =
             excludeOk = not (Set.member normalizedCategory categoryNotInSet)
          in includeOk && excludeOk
       uncategorizedWholeMatch =
-        case Map.lookup (baseRowId baseRow) categoryMap of
-          Nothing -> True
-          Just categorySlug -> categorySlug `elem` ["uncategorized.expense", "uncategorized.income"]
+        if baseRowIsAdjustment baseRow
+          then True
+          else case Map.lookup (baseRowId baseRow) categoryMap of
+            Nothing -> True
+            Just categorySlug -> categorySlug `elem` ["uncategorized.expense", "uncategorized.income"]
       wholeCategorySlug =
-        case Map.lookup (baseRowId baseRow) categoryMap of
-          Nothing -> "uncategorized"
-          Just categorySlug
-            | categorySlug `elem` ["uncategorized.expense", "uncategorized.income"] -> "uncategorized"
-            | otherwise -> categorySlug
+        if baseRowIsAdjustment baseRow
+          then "uncategorized"
+          else case Map.lookup (baseRowId baseRow) categoryMap of
+            Nothing -> "uncategorized"
+            Just categorySlug
+              | categorySlug `elem` ["uncategorized.expense", "uncategorized.income"] -> "uncategorized"
+              | otherwise -> categorySlug
    in if not accountIncluded
         then Nothing
         else if hasCategoryFilters
@@ -1124,7 +1245,68 @@ decodeBaseTransaction (transactionId, directionText, accountId, amount, occurred
         , financeTransactionCategory = Nothing
         , financeTransactionSplits = []
         , financeTransactionNotes = []
+        , financeTransactionAdjustment = Nothing
         }
+
+data FinanceAdjustmentRow = FinanceAdjustmentRow
+  { financeAdjustmentRowSnapshotId :: !String
+  , financeAdjustmentRowSnapshotOccurredAt :: !UTCTime
+  , financeAdjustmentRowRecordedAt :: !UTCTime
+  , financeAdjustmentRowAccountId :: !String
+  , financeAdjustmentRowAmount :: !Int
+  , financeAdjustmentRowDirection :: !FinanceTransactionDirection
+  , financeAdjustmentRowReason :: !(Maybe String)
+  }
+
+decodeAdjustmentListRow :: (String, UTCTime, UTCTime, String, Int64, Text, Maybe String) -> ExceptT RepositoryError IO FinanceAdjustmentRow
+decodeAdjustmentListRow (snapshotId, snapshotOccurredAt, recordedAt, accountId, amount, directionText, reason) =
+  case directionFromText directionText of
+    Nothing -> throwError ReadFailure
+    Just parsedDirection ->
+      pure FinanceAdjustmentRow
+        { financeAdjustmentRowSnapshotId = snapshotId
+        , financeAdjustmentRowSnapshotOccurredAt = snapshotOccurredAt
+        , financeAdjustmentRowRecordedAt = recordedAt
+        , financeAdjustmentRowAccountId = accountId
+        , financeAdjustmentRowAmount = fromIntegral amount
+        , financeAdjustmentRowDirection = parsedDirection
+        , financeAdjustmentRowReason = reason
+        }
+
+financeAdjustmentRowToTransaction :: FinanceAdjustmentRow -> FinanceTransaction
+financeAdjustmentRowToTransaction FinanceAdjustmentRow
+  { financeAdjustmentRowSnapshotId
+  , financeAdjustmentRowSnapshotOccurredAt
+  , financeAdjustmentRowRecordedAt
+  , financeAdjustmentRowAccountId
+  , financeAdjustmentRowAmount
+  , financeAdjustmentRowDirection
+  , financeAdjustmentRowReason
+  } =
+    FinanceTransaction
+      { financeTransactionId = "adjustment:" ++ financeAdjustmentRowSnapshotId
+      , financeTransactionDirection = financeAdjustmentRowDirection
+      , financeTransactionAccountId = financeAdjustmentRowAccountId
+      , financeTransactionAmount = financeAdjustmentRowAmount
+      , financeTransactionOccurredAt = financeAdjustmentRowSnapshotOccurredAt
+      , financeTransactionRecordedAt = financeAdjustmentRowRecordedAt
+      , financeTransactionTransfer = Nothing
+      , financeTransactionCategory = Nothing
+      , financeTransactionSplits = []
+      , financeTransactionNotes = []
+      , financeTransactionAdjustment =
+          Just FinanceTransactionAdjustment
+            { financeTransactionAdjustmentSnapshotId = financeAdjustmentRowSnapshotId
+            , financeTransactionAdjustmentSnapshotOccurredAt = financeAdjustmentRowSnapshotOccurredAt
+            , financeTransactionAdjustmentReason = financeAdjustmentRowReason
+            , financeTransactionAdjustmentAmount = financeAdjustmentRowAmount
+            , financeTransactionAdjustmentDirection = financeAdjustmentRowDirection
+            }
+      }
+
+financeTransactionSortKey :: FinanceTransaction -> (Down UTCTime, String)
+financeTransactionSortKey transaction =
+  (Down (financeTransactionOccurredAt transaction), financeTransactionId transaction)
 
 idempotencyMatches :: FinanceTransactionWriteRequest -> Text -> String -> Int64 -> Bool -> UTCTime -> Bool
 idempotencyMatches FinanceTransactionWriteRequest

@@ -216,3 +216,19 @@ CREATE INDEX finance_balance_snapshots_user_account_occurred_idx
 
 CREATE INDEX finance_balance_snapshots_user_account_status_occurred_idx
   ON finance_balance_snapshots (user_id, account_id, reconciliation_status, occurred_at DESC, snapshot_id ASC);
+
+CREATE TABLE finance_balance_snapshot_adjustments (
+  user_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  snapshot_id TEXT NOT NULL,
+  snapshot_occurred_at TIMESTAMPTZ NOT NULL,
+  amount BIGINT NOT NULL CHECK (amount > 0),
+  direction TEXT NOT NULL CHECK (direction IN ('sent', 'received')),
+  reason TEXT NULL,
+  recorded_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (user_id, account_id, snapshot_id),
+  UNIQUE (user_id, account_id, snapshot_occurred_at, snapshot_id)
+);
+
+CREATE INDEX finance_balance_snapshot_adjustments_user_account_occurred_idx
+  ON finance_balance_snapshot_adjustments (user_id, account_id, snapshot_occurred_at DESC, snapshot_id ASC);

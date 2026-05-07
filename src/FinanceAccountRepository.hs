@@ -9,6 +9,7 @@ module FinanceAccountRepository
   , FinanceAccountSnapshot(..)
   , FinanceAccountSnapshotView(..)
   , FinanceAccountReconciliation(..)
+  , FinanceAccountSnapshotAdjustmentResult(..)
   , FinanceAccountSnapshotReconciliationStatus(..)
   , FinanceAccountStatus(..)
   , FinanceAccountStatusFilter(..)
@@ -24,6 +25,7 @@ module FinanceAccountRepository
 
 import Control.Monad.Except (ExceptT, throwError)
 import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Trans.Except (runExceptT)
 import Data.Aeson (FromJSON(parseJSON), ToJSON(toJSON), Value, object, withObject, (.:), (.=))
 import Data.Char (isSpace, toLower)
 import Data.Int (Int64)
@@ -33,6 +35,7 @@ import qualified Data.Text as Text
 import Data.Time.Clock (UTCTime)
 import Data.UUID (toString)
 import Data.UUID.V4 (nextRandom)
+import FinanceTransactionRepository (FinanceTransactionAdjustment(..), FinanceTransactionDirection(..), financeTransactionDirectionText)
 import Database.PostgreSQL.Simple
   ( Connection
   , Only(..)
@@ -51,6 +54,7 @@ data FinanceAccountRepository = FinanceAccountRepository
   , repoCloseFinanceAccount :: !(String -> String -> ExceptT RepositoryError IO FinanceAccount)
   , repoCreateFinanceAccountSnapshot :: !(String -> String -> Int -> UTCTime -> ExceptT RepositoryError IO FinanceAccountReconciliation)
   , repoSetFinanceAccountSnapshotReconciliationStatus :: !(String -> String -> String -> FinanceAccountSnapshotReconciliationStatus -> ExceptT RepositoryError IO FinanceAccountReconciliation)
+  , repoCreateFinanceAccountSnapshotAdjustment :: !(String -> String -> String -> Maybe String -> ExceptT RepositoryError IO FinanceAccountSnapshotAdjustmentResult)
   , repoListFinanceAccountSnapshots :: !(String -> String -> ExceptT RepositoryError IO [FinanceAccountSnapshot])
   , repoListFinanceAccountSnapshotsView :: !(String -> ExceptT RepositoryError IO [FinanceAccountSnapshotView])
   , repoGetFinanceAccountReconciliationLatest :: !(String -> String -> ExceptT RepositoryError IO FinanceAccountReconciliation)
@@ -184,6 +188,28 @@ instance ToJSON FinanceAccountReconciliation where
         , "basisSnapshotOccurredAt" .= financeAccountReconciliationBasisSnapshotOccurredAt
         ]
 
+data FinanceAccountSnapshotAdjustmentResult = FinanceAccountSnapshotAdjustmentResult
+  { financeAccountSnapshotAdjustmentResultReconciliation :: !FinanceAccountReconciliation
+  , financeAccountSnapshotAdjustmentResultAdjustment :: !FinanceTransactionAdjustment
+  } deriving (Eq, Show)
+
+instance ToJSON FinanceAccountSnapshotAdjustmentResult where
+  toJSON FinanceAccountSnapshotAdjustmentResult
+    { financeAccountSnapshotAdjustmentResultReconciliation
+    , financeAccountSnapshotAdjustmentResultAdjustment
+    } =
+      object
+        [ "snapshotId" .= financeAccountReconciliationSnapshotId financeAccountSnapshotAdjustmentResultReconciliation
+        , "snapshotOccurredAt" .= financeAccountReconciliationSnapshotOccurredAt financeAccountSnapshotAdjustmentResultReconciliation
+        , "reconciliationStatus" .= financeAccountSnapshotReconciliationStatusText (financeAccountReconciliationReconciliationStatus financeAccountSnapshotAdjustmentResultReconciliation)
+        , "observedBalance" .= financeAccountReconciliationObservedBalance financeAccountSnapshotAdjustmentResultReconciliation
+        , "derivedBalanceAtSnapshot" .= financeAccountReconciliationDerivedBalanceAtSnapshot financeAccountSnapshotAdjustmentResultReconciliation
+        , "discrepancy" .= financeAccountReconciliationDiscrepancy financeAccountSnapshotAdjustmentResultReconciliation
+        , "basisSnapshotId" .= financeAccountReconciliationBasisSnapshotId financeAccountSnapshotAdjustmentResultReconciliation
+        , "basisSnapshotOccurredAt" .= financeAccountReconciliationBasisSnapshotOccurredAt financeAccountSnapshotAdjustmentResultReconciliation
+        , "adjustment" .= financeAccountSnapshotAdjustmentResultAdjustment
+        ]
+
 financeAccountStatusText :: FinanceAccountStatus -> Text
 financeAccountStatusText FinanceAccountActive = "active"
 financeAccountStatusText FinanceAccountClosed = "closed"
@@ -209,6 +235,7 @@ postgresFinanceAccountRepository pool =
     , repoCloseFinanceAccount = pgCloseFinanceAccount pool
     , repoCreateFinanceAccountSnapshot = pgCreateFinanceAccountSnapshot pool
     , repoSetFinanceAccountSnapshotReconciliationStatus = pgSetFinanceAccountSnapshotReconciliationStatus pool
+    , repoCreateFinanceAccountSnapshotAdjustment = pgCreateFinanceAccountSnapshotAdjustment pool
     , repoListFinanceAccountSnapshots = pgListFinanceAccountSnapshots pool
     , repoListFinanceAccountSnapshotsView = pgListFinanceAccountSnapshotsView pool
     , repoGetFinanceAccountReconciliationLatest = pgGetFinanceAccountReconciliationLatest pool
@@ -232,6 +259,11 @@ financeAccountPostgresHealthChecks conn = do
       "SELECT user_id, account_id, snapshot_id, balance, occurred_at, recorded_at, reconciliation_status FROM finance_balance_snapshots LIMIT 0"
       :: IO [(String, String, String, Int64, UTCTime, UTCTime, Text)])
     (\err -> "Finance schema check failed for finance_balance_snapshots: " ++ show err)
+  tryExcept
+    (query_ conn
+      "SELECT user_id, account_id, snapshot_id, snapshot_occurred_at, amount, direction, reason, recorded_at FROM finance_balance_snapshot_adjustments LIMIT 0"
+      :: IO [(String, String, String, UTCTime, Int64, Text, Maybe String, UTCTime)])
+    (\err -> "Finance schema check failed for finance_balance_snapshot_adjustments: " ++ show err)
   pure ()
 
 pgCreateFinanceAccount :: Pool Connection -> String -> String -> ExceptT RepositoryError IO FinanceAccount
@@ -385,45 +417,143 @@ pgSetFinanceAccountSnapshotReconciliationStatus :: Pool Connection -> String -> 
 pgSetFinanceAccountSnapshotReconciliationStatus pool userId accountId snapshotId status =
   withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
     result <- tryExcept
-      (withTransaction conn $ do
-        rows <- query conn
-          "SELECT occurred_at, balance, reconciliation_status FROM finance_balance_snapshots WHERE user_id = ? AND account_id = ? AND snapshot_id = ? FOR UPDATE"
-          (userId, accountId, snapshotId)
-          :: IO [(UTCTime, Int64, Text)]
-        case rows of
-          [] -> pure False
-          [(_, _, currentStatusText)] ->
-            case parseFinanceAccountSnapshotReconciliationStatus currentStatusText of
-              Nothing -> fail "Unexpected finance snapshot reconciliation status in storage"
-              Just currentStatus ->
-                if currentStatus == status
-                  then pure True
-                  else do
-                    eventId <- toString <$> nextRandom
-                    _ <- appendFinanceEvent conn FinanceCanonicalEvent
-                      { canonicalEventId = eventId
-                      , canonicalEventUserId = userId
-                      , canonicalEventStreamId = "snapshot:" ++ snapshotId
-                      , canonicalEventType = "BalanceSnapshotReconciliationStatusSet"
-                      , canonicalEventOccurredAt = Nothing
-                      , canonicalEventIdempotencyKey = Nothing
-                      , canonicalEventPayload =
-                          object
-                            [ "accountId" .= accountId
-                            , "snapshotId" .= snapshotId
-                            , "status" .= financeAccountSnapshotReconciliationStatusText status
-                            ]
-                      }
-                    updatedRows <- execute conn
-                      "UPDATE finance_balance_snapshots SET reconciliation_status = ? WHERE user_id = ? AND account_id = ? AND snapshot_id = ?"
-                      (financeAccountSnapshotReconciliationStatusText status, userId, accountId, snapshotId)
-                    if updatedRows == 1
-                      then pure True
-                      else fail "Unexpected updated row count for finance snapshot reconciliation status change")
+      (withTransaction conn $ setFinanceAccountSnapshotReconciliationStatusInConn conn userId accountId snapshotId status)
       mapSqlReadException
     case result of
       False -> throwError NotFound
       True -> computeReconciliation conn userId accountId snapshotId
+
+pgCreateFinanceAccountSnapshotAdjustment :: Pool Connection -> String -> String -> String -> Maybe String -> ExceptT RepositoryError IO FinanceAccountSnapshotAdjustmentResult
+pgCreateFinanceAccountSnapshotAdjustment pool userId accountId snapshotId mReason =
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    outcome <- tryExcept
+      (withTransaction conn $ do
+        snapshotRows <- query conn
+          "SELECT occurred_at, balance, reconciliation_status FROM finance_balance_snapshots WHERE user_id = ? AND account_id = ? AND snapshot_id = ? FOR UPDATE"
+          (userId, accountId, snapshotId)
+          :: IO [(UTCTime, Int64, Text)]
+        case snapshotRows of
+          [] -> pure AdjustmentCreateNotFound
+          [(_, _, snapshotStatusText)] ->
+            case parseFinanceAccountSnapshotReconciliationStatus snapshotStatusText of
+              Nothing -> fail "Unexpected finance snapshot reconciliation status in storage"
+              Just FinanceAccountSnapshotReconciled -> pure AdjustmentCreateRejected
+              Just FinanceAccountSnapshotUnreconciled -> do
+                reconciliationEither <- runExceptT (computeReconciliation conn userId accountId snapshotId)
+                case reconciliationEither of
+                  Left _ -> fail "Unable to compute finance snapshot reconciliation for adjustment"
+                  Right reconciliation -> do
+                    let discrepancy = financeAccountReconciliationDiscrepancy reconciliation
+                    if discrepancy == 0
+                      then pure AdjustmentCreateRejected
+                      else do
+                        eventId <- toString <$> nextRandom
+                        let adjustmentAmount = abs discrepancy
+                            adjustmentDirection =
+                              if discrepancy < 0
+                                then FinanceTransactionSent
+                                else FinanceTransactionReceived
+                            normalizedReason = normalizeOptionalReason mReason
+                        recordedAt <- appendFinanceEvent conn FinanceCanonicalEvent
+                          { canonicalEventId = eventId
+                          , canonicalEventUserId = userId
+                          , canonicalEventStreamId = "snapshot:" ++ snapshotId
+                          , canonicalEventType = "BalanceSnapshotAdjustmentRecorded"
+                          , canonicalEventOccurredAt = Nothing
+                          , canonicalEventIdempotencyKey = Nothing
+                          , canonicalEventPayload =
+                              object
+                                [ "accountId" .= accountId
+                                , "snapshotId" .= snapshotId
+                                , "snapshotOccurredAt" .= financeAccountReconciliationSnapshotOccurredAt reconciliation
+                                , "reason" .= normalizedReason
+                                , "amount" .= adjustmentAmount
+                                , "direction" .= financeTransactionDirectionText adjustmentDirection
+                                ]
+                          }
+                        _ <- execute conn
+                          "INSERT INTO finance_balance_snapshot_adjustments (user_id, account_id, snapshot_id, snapshot_occurred_at, amount, direction, reason, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                          \ON CONFLICT (user_id, account_id, snapshot_id) DO UPDATE SET snapshot_occurred_at = EXCLUDED.snapshot_occurred_at, amount = EXCLUDED.amount, direction = EXCLUDED.direction, reason = EXCLUDED.reason, recorded_at = EXCLUDED.recorded_at"
+                          ( userId
+                          , accountId
+                          , snapshotId
+                          , financeAccountReconciliationSnapshotOccurredAt reconciliation
+                          , adjustmentAmount
+                          , financeTransactionDirectionText adjustmentDirection
+                          , normalizedReason
+                          , recordedAt
+                          )
+                        _ <- setFinanceAccountSnapshotReconciliationStatusInConn conn userId accountId snapshotId FinanceAccountSnapshotReconciled
+                        reconciliationAfterEither <- runExceptT (computeReconciliation conn userId accountId snapshotId)
+                        case reconciliationAfterEither of
+                          Left _ -> fail "Unable to compute finance snapshot reconciliation after adjustment"
+                          Right reconciliationAfter ->
+                            pure (AdjustmentCreateSuccess FinanceAccountSnapshotAdjustmentResult
+                              { financeAccountSnapshotAdjustmentResultReconciliation = reconciliationAfter
+                              , financeAccountSnapshotAdjustmentResultAdjustment =
+                                  FinanceTransactionAdjustment
+                                    { financeTransactionAdjustmentSnapshotId = snapshotId
+                                    , financeTransactionAdjustmentSnapshotOccurredAt = financeAccountReconciliationSnapshotOccurredAt reconciliation
+                                    , financeTransactionAdjustmentReason = normalizedReason
+                                    , financeTransactionAdjustmentAmount = adjustmentAmount
+                                    , financeTransactionAdjustmentDirection = adjustmentDirection
+                                    }
+                              })
+          _ -> fail "Unexpected finance snapshot row count for adjustment create")
+      mapSqlReadException
+    case outcome of
+      AdjustmentCreateNotFound -> throwError NotFound
+      AdjustmentCreateRejected -> throwError AlreadyExists
+      AdjustmentCreateSuccess adjustmentResult -> pure adjustmentResult
+
+setFinanceAccountSnapshotReconciliationStatusInConn :: Connection -> String -> String -> String -> FinanceAccountSnapshotReconciliationStatus -> IO Bool
+setFinanceAccountSnapshotReconciliationStatusInConn conn userId accountId snapshotId status = do
+  rows <- query conn
+    "SELECT occurred_at, balance, reconciliation_status FROM finance_balance_snapshots WHERE user_id = ? AND account_id = ? AND snapshot_id = ? FOR UPDATE"
+    (userId, accountId, snapshotId)
+    :: IO [(UTCTime, Int64, Text)]
+  case rows of
+    [] -> pure False
+    [(_, _, currentStatusText)] ->
+      case parseFinanceAccountSnapshotReconciliationStatus currentStatusText of
+        Nothing -> fail "Unexpected finance snapshot reconciliation status in storage"
+        Just currentStatus ->
+          if currentStatus == status
+            then pure True
+            else do
+              eventId <- toString <$> nextRandom
+              _ <- appendFinanceEvent conn FinanceCanonicalEvent
+                { canonicalEventId = eventId
+                , canonicalEventUserId = userId
+                , canonicalEventStreamId = "snapshot:" ++ snapshotId
+                , canonicalEventType = "BalanceSnapshotReconciliationStatusSet"
+                , canonicalEventOccurredAt = Nothing
+                , canonicalEventIdempotencyKey = Nothing
+                , canonicalEventPayload =
+                    object
+                      [ "accountId" .= accountId
+                      , "snapshotId" .= snapshotId
+                      , "status" .= financeAccountSnapshotReconciliationStatusText status
+                      ]
+                }
+              updatedRows <- execute conn
+                "UPDATE finance_balance_snapshots SET reconciliation_status = ? WHERE user_id = ? AND account_id = ? AND snapshot_id = ?"
+                (financeAccountSnapshotReconciliationStatusText status, userId, accountId, snapshotId)
+              if updatedRows == 1
+                then pure True
+                else fail "Unexpected updated row count for finance snapshot reconciliation status change"
+    _ -> fail "Unexpected finance snapshot row count for reconciliation status change"
+
+normalizeOptionalReason :: Maybe String -> Maybe String
+normalizeOptionalReason Nothing = Nothing
+normalizeOptionalReason (Just reason) =
+  let trimmed = trim reason
+   in if null trimmed then Nothing else Just trimmed
+
+data AdjustmentCreateOutcome
+  = AdjustmentCreateNotFound
+  | AdjustmentCreateRejected
+  | AdjustmentCreateSuccess !FinanceAccountSnapshotAdjustmentResult
 
 pgListFinanceAccountSnapshots :: Pool Connection -> String -> String -> ExceptT RepositoryError IO [FinanceAccountSnapshot]
 pgListFinanceAccountSnapshots pool userId accountId =

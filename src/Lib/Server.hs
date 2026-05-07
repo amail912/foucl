@@ -16,7 +16,7 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except (ExceptT, runExceptT)
 import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
-import Data.Aeson (FromJSON(parseJSON), ToJSON(toJSON), decode, decode', encode, object, withObject, (.:), (.=))
+import Data.Aeson (FromJSON(parseJSON), ToJSON(toJSON), decode, decode', encode, object, withObject, (.:), (.:?), (.=))
 import qualified Data.ByteString.Lazy.Char8 as LBS8
 import Data.ByteString.Char8 (unpack)
 import Data.Char (toLower)
@@ -92,6 +92,10 @@ data FinanceAccountSnapshotReconciliationStatusUpdateRequest = FinanceAccountSna
   { financeAccountSnapshotReconciliationStatusUpdateStatus :: !String
   }
 
+data FinanceAccountSnapshotAdjustmentCreateRequest = FinanceAccountSnapshotAdjustmentCreateRequest
+  { financeAccountSnapshotAdjustmentCreateReason :: !(Maybe String)
+  }
+
 data StoredTripItem = StoredTripItem
   { storedTripStart :: !LocalTime
   , storedTripCalendarItem :: !Agenda.CalendarItem
@@ -124,6 +128,10 @@ instance FromJSON PendingSignupApproval where
 instance FromJSON FinanceAccountSnapshotReconciliationStatusUpdateRequest where
   parseJSON = withObject "FinanceAccountSnapshotReconciliationStatusUpdateRequest" $ \value ->
     FinanceAccountSnapshotReconciliationStatusUpdateRequest <$> value .: "status"
+
+instance FromJSON FinanceAccountSnapshotAdjustmentCreateRequest where
+  parseJSON = withObject "FinanceAccountSnapshotAdjustmentCreateRequest" $ \value ->
+    FinanceAccountSnapshotAdjustmentCreateRequest <$> value .:? "reason"
 
 tripPlacesCatalog :: [TripPlace]
 tripPlacesCatalog =
@@ -701,7 +709,7 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
 
     financeAccountsSnapshots = path $ \accountId -> do
       dir "snapshots" $ do
-        msum [financeAccountsSnapshotsCreate accountId, financeAccountsSnapshotSetReconciliationStatus accountId, financeAccountsSnapshotsList accountId]
+        msum [financeAccountsSnapshotsCreate accountId, financeAccountsSnapshotSetReconciliationStatus accountId, financeAccountsSnapshotAdjustment accountId, financeAccountsSnapshotsList accountId]
 
     financeAccountsSnapshotsCreate :: String -> ServerPartT IO Response
     financeAccountsSnapshotsCreate accountId = do
@@ -727,6 +735,14 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
         method PUT
         body <- askRq >>= takeRequestBody
         maybe (badRequest "Empty body") (handleSnapshotSetReconciliationStatusBody accountId snapshotId) body
+
+    financeAccountsSnapshotAdjustment :: String -> ServerPartT IO Response
+    financeAccountsSnapshotAdjustment accountId = path $ \snapshotId -> do
+      dir "adjustment" $ do
+        nullDir
+        method POST
+        body <- askRq >>= takeRequestBody
+        maybe (badRequest "Empty body") (handleSnapshotAdjustmentBody accountId snapshotId) body
 
     financeAccountsReconciliation = path $ \accountId -> do
       dir "reconciliation" $ do
@@ -781,6 +797,20 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
                   Left _ -> internalServerError emptyResponse
                   Right reconciliation -> ok (jsonResponse reconciliation)
               _ -> badRequest "status must be either unreconciled or reconciled"
+
+    handleSnapshotAdjustmentBody :: String -> String -> RqBody -> ServerPartT IO Response
+    handleSnapshotAdjustmentBody accountId snapshotId rqBody =
+      case decode' (unBody rqBody) :: Maybe FinanceAccountSnapshotAdjustmentCreateRequest of
+        Nothing -> badRequest "Unable to decode the body as a FinanceAccountSnapshotAdjustmentCreateRequest"
+        Just FinanceAccountSnapshotAdjustmentCreateRequest
+          { financeAccountSnapshotAdjustmentCreateReason
+          } -> do
+            result <- liftIO $ runExceptT (repoCreateFinanceAccountSnapshotAdjustment financeAccountRepo principalUserId accountId snapshotId financeAccountSnapshotAdjustmentCreateReason)
+            case result of
+              Left NotFound -> notFound (jsonMessage "Account or snapshot not found")
+              Left AlreadyExists -> setResponseCode 409 >> pure (jsonMessage "Snapshot already reconciled")
+              Left _ -> internalServerError emptyResponse
+              Right adjustmentResult -> ok (jsonResponse adjustmentResult)
 
     financeTransactionsCreate direction = do
       nullDir

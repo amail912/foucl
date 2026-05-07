@@ -19,7 +19,6 @@ Provide an authenticated personal finance backend for manual transaction entry, 
 ## Stories
 
 ### Ready
-- [011 Reconciliation Adjustment Workflow](ready/011-reconciliation-adjustment-workflow.md) - Define first-class snapshot-scoped reconciliation adjustments with signed report impact and a marker in ledger/export views.
 
 ### Done
 - [001a Open And List Accounts](done/001a-open-and-list-accounts.md) - Define account creation, normalized per-user naming rules, and authenticated account listing behavior.
@@ -38,6 +37,7 @@ Provide an authenticated personal finance backend for manual transaction entry, 
 - [010a Unify Finance Event Log Foundation](done/010a-unify-finance-event-log-foundation.md) - Establish one canonical append-only finance event-log foundation and deterministic ordering guarantees.
 - [010b Migrate Finance Write Paths To Canonical Log](done/010b-migrate-finance-write-paths-to-canonical-log.md) - Route finance write behavior through canonical event append flows while keeping API semantics stable.
 - [010d Remove Legacy Finance Event Storage And Finalize Rollout](done/010d-remove-legacy-finance-event-storage-and-finalize-rollout.md) - Finalize canonical-only finance storage by collapsing migration history to the canonical baseline and removing legacy event-table dependencies from tests/wiring.
+- [011 Reconciliation Adjustment Workflow](done/011-reconciliation-adjustment-workflow.md) - Define first-class snapshot-scoped reconciliation adjustments with signed report impact and a marker in ledger/export views.
 
 ### Canceled
 - [010c Cut Over Export And Read Projections To Canonical Events](canceled/010c-cut-over-export-and-read-projections-to-canonical-events.md) - Canceled because export canonical sourcing was already delivered in `008`, and replay/rebuild parity was dropped from current scope.

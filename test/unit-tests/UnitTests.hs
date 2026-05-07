@@ -1929,6 +1929,7 @@ financeMigrationUpCreatesSchema =
           linksTableExists <- fetchTableExists ctx "finance_transaction_links"
           notesTableExists <- fetchTableExists ctx "finance_transaction_notes"
           snapshotsTableExists <- fetchTableExists ctx "finance_balance_snapshots"
+          adjustmentsTableExists <- fetchTableExists ctx "finance_balance_snapshot_adjustments"
           assertBool "Expected finance_events table to exist" canonicalEventsTableExists
           assertBool "Expected finance_accounts table to exist" projectionTableExists
           assertBool "Expected finance_transactions table to exist" transactionsTableExists
@@ -1939,6 +1940,7 @@ financeMigrationUpCreatesSchema =
           assertBool "Expected finance_transaction_links table to exist" linksTableExists
           assertBool "Expected finance_transaction_notes table to exist" notesTableExists
           assertBool "Expected finance_balance_snapshots table to exist" snapshotsTableExists
+          assertBool "Expected finance_balance_snapshot_adjustments table to exist" adjustmentsTableExists
 
           eventNumberType <- fetchColumnType ctx "finance_events" "event_number"
           streamVersionType <- fetchColumnType ctx "finance_events" "stream_version"
@@ -1954,6 +1956,9 @@ financeMigrationUpCreatesSchema =
           noteTextType <- fetchColumnType ctx "finance_transaction_notes" "note_text"
           snapshotBalanceType <- fetchColumnType ctx "finance_balance_snapshots" "balance"
           snapshotStatusType <- fetchColumnType ctx "finance_balance_snapshots" "reconciliation_status"
+          adjustmentAmountType <- fetchColumnType ctx "finance_balance_snapshot_adjustments" "amount"
+          adjustmentDirectionType <- fetchColumnType ctx "finance_balance_snapshot_adjustments" "direction"
+          adjustmentReasonType <- fetchColumnType ctx "finance_balance_snapshot_adjustments" "reason"
           assertEqual "Expected finance_events.event_number to be bigint" (Just "bigint") eventNumberType
           assertEqual "Expected finance_events.stream_version to be bigint" (Just "bigint") streamVersionType
           assertEqual "Expected finance_events.payload to be jsonb" (Just "jsonb") payloadType
@@ -1968,6 +1973,9 @@ financeMigrationUpCreatesSchema =
           assertEqual "Expected finance_transaction_notes.note_text to be text" (Just "text") noteTextType
           assertEqual "Expected finance_balance_snapshots.balance to be bigint" (Just "bigint") snapshotBalanceType
           assertEqual "Expected finance_balance_snapshots.reconciliation_status to be text" (Just "text") snapshotStatusType
+          assertEqual "Expected finance_balance_snapshot_adjustments.amount to be bigint" (Just "bigint") adjustmentAmountType
+          assertEqual "Expected finance_balance_snapshot_adjustments.direction to be text" (Just "text") adjustmentDirectionType
+          assertEqual "Expected finance_balance_snapshot_adjustments.reason to be text" (Just "text") adjustmentReasonType
 
           canonicalOrderingIndexExists <- fetchIndexExists ctx "finance_events_user_event_number_idx"
           nameIndexExists <- fetchIndexExists ctx "finance_accounts_user_status_name_idx"
@@ -1978,6 +1986,7 @@ financeMigrationUpCreatesSchema =
           notesCreatedIndexExists <- fetchIndexExists ctx "finance_transaction_notes_user_transaction_created_idx"
           snapshotsOccurredIndexExists <- fetchIndexExists ctx "finance_balance_snapshots_user_account_occurred_idx"
           snapshotsStatusOccurredIndexExists <- fetchIndexExists ctx "finance_balance_snapshots_user_account_status_occurred_idx"
+          adjustmentsOccurredIndexExists <- fetchIndexExists ctx "finance_balance_snapshot_adjustments_user_account_occurred_idx"
           assertBool "Expected finance_events_user_event_number_idx to exist" canonicalOrderingIndexExists
           assertBool "Expected finance_accounts_user_status_name_idx to exist" nameIndexExists
           assertBool "Expected finance_transactions_user_occurred_idx to exist" transactionIndexExists
@@ -1987,6 +1996,7 @@ financeMigrationUpCreatesSchema =
           assertBool "Expected finance_transaction_notes_user_transaction_created_idx to exist" notesCreatedIndexExists
           assertBool "Expected finance_balance_snapshots_user_account_occurred_idx to exist" snapshotsOccurredIndexExists
           assertBool "Expected finance_balance_snapshots_user_account_status_occurred_idx to exist" snapshotsStatusOccurredIndexExists
+          assertBool "Expected finance_balance_snapshot_adjustments_user_account_occurred_idx to exist" adjustmentsOccurredIndexExists
 
           insertCanonicalEvent1 <- runSqlCommandCtx ctx "INSERT INTO finance_events (event_id, user_id, stream_id, stream_version, event_type, event_version, occurred_at, idempotency_key, payload) VALUES ('evt-1', 'user-evt', 'stream-1', 1, 'AccountOpened', 1, NOW(), 'idem-1', '{}'::jsonb)"
           case insertCanonicalEvent1 of
@@ -2075,6 +2085,7 @@ financeMigrationDownRemovesSchema =
               linksTableExists <- fetchTableExists ctx "finance_transaction_links"
               notesTableExists <- fetchTableExists ctx "finance_transaction_notes"
               snapshotsTableExists <- fetchTableExists ctx "finance_balance_snapshots"
+              adjustmentsTableExists <- fetchTableExists ctx "finance_balance_snapshot_adjustments"
               assertBool "Expected finance_events table to be removed" (not canonicalEventsTableExists)
               assertBool "Expected finance_accounts table to be removed" (not projectionTableExists)
               assertBool "Expected finance_transactions table to be removed" (not transactionsTableExists)
@@ -2085,6 +2096,7 @@ financeMigrationDownRemovesSchema =
               assertBool "Expected finance_transaction_links table to be removed" (not linksTableExists)
               assertBool "Expected finance_transaction_notes table to be removed" (not notesTableExists)
               assertBool "Expected finance_balance_snapshots table to be removed" (not snapshotsTableExists)
+              assertBool "Expected finance_balance_snapshot_adjustments table to be removed" (not adjustmentsTableExists)
 
 financeMigrationReapplyAfterDown :: IO ()
 financeMigrationReapplyAfterDown =
@@ -2112,6 +2124,7 @@ financeMigrationReapplyAfterDown =
                   linksTableExists <- fetchTableExists ctx "finance_transaction_links"
                   notesTableExists <- fetchTableExists ctx "finance_transaction_notes"
                   snapshotsTableExists <- fetchTableExists ctx "finance_balance_snapshots"
+                  adjustmentsTableExists <- fetchTableExists ctx "finance_balance_snapshot_adjustments"
                   assertBool "Expected finance_events table to exist after reapply" canonicalEventsTableExists
                   assertBool "Expected finance_accounts table to exist after reapply" projectionTableExists
                   assertBool "Expected finance_transactions table to exist after reapply" transactionsTableExists
@@ -2122,6 +2135,7 @@ financeMigrationReapplyAfterDown =
                   assertBool "Expected finance_transaction_links table to exist after reapply" linksTableExists
                   assertBool "Expected finance_transaction_notes table to exist after reapply" notesTableExists
                   assertBool "Expected finance_balance_snapshots table to exist after reapply" snapshotsTableExists
+                  assertBool "Expected finance_balance_snapshot_adjustments table to exist after reapply" adjustmentsTableExists
 
 noteMigrationUpCreatesSchema :: IO ()
 noteMigrationUpCreatesSchema =
@@ -3223,6 +3237,36 @@ pgFinanceAccountRepoSnapshotsAndReconciliation =
                           assertEqual "Expected latest reconciliation after unmarking to clear its basis" Nothing (financeAccountReconciliationBasisSnapshotId latestFallback)
                           assertEqual "Expected latest reconciliation after unmarking to show the fallback discrepancy" (-800) (financeAccountReconciliationDiscrepancy latestFallback)
                           assertEqual "Expected first snapshot lookup after unmarking to fall back to transaction-derived balance" 3800 (financeAccountReconciliationDerivedBalanceAtSnapshot firstFallback)
+
+                          adjustmentResult <- runExceptT $ repoCreateFinanceAccountSnapshotAdjustment accountRepo userId (financeAccountId createdAccount) (financeAccountReconciliationSnapshotId createdSecondRecon) (Just "  Adjustment reason  ")
+                          case adjustmentResult of
+                            Left err -> assertFailure ("Expected snapshot adjustment create to succeed, got " ++ show err)
+                            Right adjustment -> do
+                              let adjustmentReconciliation = financeAccountSnapshotAdjustmentResultReconciliation adjustment
+                                  adjustmentSummary = financeAccountSnapshotAdjustmentResultAdjustment adjustment
+                              assertEqual "Expected adjustment to reconcile the target snapshot" FinanceAccountSnapshotReconciled (financeAccountReconciliationReconciliationStatus adjustmentReconciliation)
+                              assertEqual "Expected adjustment to use the adjusted snapshot as its basis" (Just (financeAccountReconciliationSnapshotId createdSecondRecon)) (financeAccountReconciliationBasisSnapshotId adjustmentReconciliation)
+                              assertEqual "Expected adjustment summary snapshot id to match the adjusted snapshot" (financeAccountReconciliationSnapshotId createdSecondRecon) (financeTransactionAdjustmentSnapshotId adjustmentSummary)
+                              assertEqual "Expected adjustment summary amount to match the discrepancy magnitude" 800 (financeTransactionAdjustmentAmount adjustmentSummary)
+                              assertEqual "Expected adjustment summary direction to be sent" FinanceTransactionSent (financeTransactionAdjustmentDirection adjustmentSummary)
+                              assertEqual "Expected adjustment reason to be trimmed" (Just "Adjustment reason") (financeTransactionAdjustmentReason adjustmentSummary)
+
+                              adjustedRows <- runExceptT $ repoListFinanceTransactions transactionRepo userId (Just (financeAccountId createdAccount)) Nothing Nothing
+                              case adjustedRows of
+                                Left err -> assertFailure ("Expected finance transaction list to include adjustment row, got " ++ show err)
+                                Right rows -> do
+                                  assertEqual "Expected adjustment row to appear in the transaction list" 4 (length rows)
+                                  case filter (\row -> financeTransactionAdjustment row /= Nothing) rows of
+                                    [adjustmentRow] -> do
+                                      assertEqual "Expected adjustment row id to be synthetic and stable" ("adjustment:" ++ financeAccountReconciliationSnapshotId createdSecondRecon) (financeTransactionId adjustmentRow)
+                                      assertEqual "Expected adjustment row direction to be sent" FinanceTransactionSent (financeTransactionDirection adjustmentRow)
+                                      assertEqual "Expected adjustment row amount to match the adjustment" 800 (financeTransactionAmount adjustmentRow)
+                                      case financeTransactionAdjustment adjustmentRow of
+                                        Just nestedAdjustment -> do
+                                          assertEqual "Expected nested adjustment snapshot id" (financeAccountReconciliationSnapshotId createdSecondRecon) (financeTransactionAdjustmentSnapshotId nestedAdjustment)
+                                          assertEqual "Expected nested adjustment reason to be trimmed" (Just "Adjustment reason") (financeTransactionAdjustmentReason nestedAdjustment)
+                                        Nothing -> assertFailure "Expected adjustment row to include nested adjustment marker"
+                                    _ -> assertFailure "Expected exactly one adjustment row in transaction list"
                         outcomes -> assertFailure ("Unexpected snapshot listing/reconciliation outcomes: " ++ show outcomes)
                 outcomes -> assertFailure ("Unexpected snapshot creation outcomes: " ++ show outcomes)
 

@@ -586,7 +586,8 @@ runIntegrationTests = do
         assertEqual "Expected second snapshot basis timestamp to come from the first snapshot" (Just "2026-04-02T10:00:00Z") (financeReconciliationBasisSnapshotOccurredAtValue (getResponseBody secondSnapshotResp))
         assertFinanceReconciliationValues 3500 (-500) (getResponseBody secondSnapshotResp)
 
-        _ <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "snapshot-key-3" (object ["accountId" .= accountId, "amount" .= (500 :: Int), "occurredAt" .= ("2026-04-04T10:00:00Z" :: String)])
+        tx3Resp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "snapshot-key-3" (object ["accountId" .= accountId, "amount" .= (500 :: Int), "occurredAt" .= ("2026-04-04T10:00:00Z" :: String)])
+        tx3Id <- requireObjectStringField "id" (getResponseBody tx3Resp)
 
         snapshots <- getFinanceAccountSnapshots cookie accountId
         assertEqual "Expected two snapshots listed" 2 (Prelude.length snapshots)
@@ -615,6 +616,49 @@ runIntegrationTests = do
         assertStatusCode "Reconciliation by snapshot id should still succeed after basis removal" 200 fallbackSecondResp
         assertEqual "Expected second snapshot to fall back to transaction-derived baseline after unmarking the basis" Nothing (financeReconciliationBasisSnapshotIdValue (getResponseBody fallbackSecondResp))
         assertFinanceReconciliationValues 3800 (-800) (getResponseBody fallbackSecondResp)
+
+        adjustmentResp <- createFinanceAccountSnapshotAdjustmentExpectValue cookie accountId secondSnapshotId (Just "  Adjustment reason  ")
+        assertStatusCode "Adjustment create should succeed" 200 adjustmentResp
+        assertEqual "Expected adjustment create to reconcile the snapshot" "reconciled" (financeReconciliationStatusValue (getResponseBody adjustmentResp))
+        assertEqual "Expected adjustment create to use the target snapshot as its basis" (Just secondSnapshotId) (financeReconciliationBasisSnapshotIdValue (getResponseBody adjustmentResp))
+        assertEqual "Expected adjustment basis timestamp to match the target snapshot" (Just "2026-04-03T10:00:00Z") (financeReconciliationBasisSnapshotOccurredAtValue (getResponseBody adjustmentResp))
+        assertFinanceReconciliationValues 3000 0 (getResponseBody adjustmentResp)
+
+        listedTransactions <- getFinanceTransactions cookie [("accountId", accountId)]
+        let adjustmentRows = filter (\row -> financeTransactionAdjustmentValue row /= Nothing) listedTransactions
+        assertEqual "Expected exactly one adjustment row in the transaction list" 1 (Prelude.length adjustmentRows)
+        case adjustmentRows of
+          [adjustmentRow] -> do
+            assertEqual "Expected adjustment row id to be synthetic and stable" ("adjustment:" ++ secondSnapshotId) (financeTransactionIdValue adjustmentRow)
+            assertFinanceTransactionDirectionAndAmount "sent" 800 adjustmentRow
+            assertEqual "Expected adjustment row nested snapshot id" (Just secondSnapshotId) (financeTransactionAdjustmentSnapshotIdValue adjustmentRow)
+            assertEqual "Expected adjustment row nested reason to be trimmed" (Just "Adjustment reason") (financeTransactionAdjustmentReasonValue adjustmentRow)
+          _ -> assertFailure "Expected exactly one adjustment row after creating an adjustment"
+
+        reportAfterAdjustment <- getFinanceReport cookie [("from", "2026-04-03T00:00:00Z"), ("to", "2026-04-05T00:00:00Z"), ("direction", "all"), ("accountIn", accountId)]
+        assertFinanceReportValues (-1300) 2 [tx3Id, "adjustment:" ++ secondSnapshotId] reportAfterAdjustment
+
+        exportAfterAdjustmentResp <- getFinanceExportExpectValue cookie
+        assertStatusCode "Finance export after adjustment should succeed" 200 exportAfterAdjustmentResp
+        let exportAfterAdjustmentBody = getResponseBody exportAfterAdjustmentResp
+        case exportAfterAdjustmentBody of
+          Object root -> do
+            case parseMaybe (.: "events") root of
+              Just events ->
+                assertBool "Expected finance export events to include the adjustment canonical event" $
+                  any (\eventValue -> case eventValue of
+                        Object eventObj -> parseMaybe (.: "eventType") eventObj == Just ("BalanceSnapshotAdjustmentRecorded" :: String)
+                        _ -> False) (events :: [Value])
+              Nothing -> assertFailure "Expected finance export events after adjustment"
+            case parseMaybe (.: "views") root of
+              Just (Object viewsObj) ->
+                case parseMaybe (.: "transactions") viewsObj of
+                  Just transactions ->
+                    assertBool "Expected finance export transaction views to include the adjustment row" $
+                      any (\row -> financeTransactionIdValue row == "adjustment:" ++ secondSnapshotId && financeTransactionAdjustmentValue row /= Nothing) (transactions :: [Value])
+                  Nothing -> assertFailure "Expected finance export transactions after adjustment"
+              _ -> assertFailure "Expected finance export views after adjustment"
+          _ -> assertFailure "Expected finance export response object after adjustment"
 
         missingSnapshotResp <- getFinanceAccountReconciliationExpectValue cookie accountId (Just "missing-snapshot")
         assertStatusCode "Unknown snapshot reconciliation should return 404" 404 missingSnapshotResp
@@ -2476,6 +2520,18 @@ setFinanceAccountSnapshotReconciliationStatusExpectValue cookie accountId snapsh
          $ setRequestHeader "Content-Type" ["application/json"]
          $ setRequestBodyJSON (object ["status" .= status]) req
 
+createFinanceAccountSnapshotAdjustmentExpectValue :: String -> String -> String -> Maybe String -> IO (Response Value)
+createFinanceAccountSnapshotAdjustmentExpectValue cookie accountId snapshotId reason = do
+  req <- parseRequest ("POST http://localhost:8081" ++ financeAccountsEndpoint ++ "/" ++ accountId ++ "/snapshots/" ++ snapshotId ++ "/adjustment")
+  let body =
+        case reason of
+          Nothing -> object []
+          Just adjustmentReason -> object ["reason" .= adjustmentReason]
+  httpJSON $ setRequestMethod "POST"
+         $ setRequestHeader "Cookie" [BS.pack cookie]
+         $ setRequestHeader "Content-Type" ["application/json"]
+         $ setRequestBodyJSON body req
+
 createFinanceCategory :: String -> String -> Maybe String -> IO Value
 createFinanceCategory cookie name parentId = do
   resp <- createFinanceCategoryExpectValue cookie name parentId
@@ -2847,6 +2903,30 @@ financeTransactionTransferValue :: Value -> Maybe Value
 financeTransactionTransferValue responseBody =
   case responseBody of
     Object value -> parseMaybe (.: "transfer") value
+    _ -> Nothing
+
+financeTransactionAdjustmentValue :: Value -> Maybe Value
+financeTransactionAdjustmentValue responseBody =
+  case responseBody of
+    Object value ->
+      case parseMaybe (.: "adjustment") value of
+        Just Null -> Nothing
+        other -> other
+    _ -> Nothing
+
+financeTransactionAdjustmentSnapshotIdValue :: Value -> Maybe String
+financeTransactionAdjustmentSnapshotIdValue responseBody =
+  case financeTransactionAdjustmentValue responseBody of
+    Just (Object adjustmentObj) -> parseMaybe (.: "snapshotId") adjustmentObj
+    _ -> Nothing
+
+financeTransactionAdjustmentReasonValue :: Value -> Maybe String
+financeTransactionAdjustmentReasonValue responseBody =
+  case financeTransactionAdjustmentValue responseBody of
+    Just (Object adjustmentObj) ->
+      case parseMaybe (.:? "reason") adjustmentObj of
+        Just (Just reason) -> Just reason
+        _ -> Nothing
     _ -> Nothing
 
 financeTransactionNotesValue :: Value -> [Value]

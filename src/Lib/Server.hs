@@ -37,7 +37,7 @@ import Auth (AuthError(..), AuthRepository, AuthRequest(..), AuthRequestError(..
 import CalendarRepository (CalendarRepository(..))
 import Crud
 import CrudStorage (createItem, deleteItem, modifyItem)
-import FinanceAccountRepository (FinanceAccount(..), FinanceAccountCreateRequest(..), FinanceAccountRepository(..), FinanceAccountStatus(..), FinanceAccountStatusFilter(..), normalizeFinanceAccountName, parseFinanceAccountStatusFilter)
+import FinanceAccountRepository (FinanceAccount(..), FinanceAccountCreateRequest(..), FinanceAccountRepository(..), FinanceAccountSnapshotReconciliationStatus(..), FinanceAccountStatus(..), FinanceAccountStatusFilter(..), normalizeFinanceAccountName, parseFinanceAccountStatusFilter)
 import FinanceAccountRepository (FinanceAccountSnapshotCreateRequest(..))
 import FinanceCategoryRepository
   ( FinanceCategoryRepository(..)
@@ -88,6 +88,10 @@ data PeriodTripsUser = PeriodTripsUser
   , periodTripsItems :: ![Agenda.CalendarItem]
   }
 
+data FinanceAccountSnapshotReconciliationStatusUpdateRequest = FinanceAccountSnapshotReconciliationStatusUpdateRequest
+  { financeAccountSnapshotReconciliationStatusUpdateStatus :: !String
+  }
+
 data StoredTripItem = StoredTripItem
   { storedTripStart :: !LocalTime
   , storedTripCalendarItem :: !Agenda.CalendarItem
@@ -116,6 +120,10 @@ instance FromJSON TripSharingUser where
 instance FromJSON PendingSignupApproval where
   parseJSON = withObject "PendingSignupApproval" $ \value -> PendingSignupApproval
     <$> value .: "username"
+
+instance FromJSON FinanceAccountSnapshotReconciliationStatusUpdateRequest where
+  parseJSON = withObject "FinanceAccountSnapshotReconciliationStatusUpdateRequest" $ \value ->
+    FinanceAccountSnapshotReconciliationStatusUpdateRequest <$> value .: "status"
 
 tripPlacesCatalog :: [TripPlace]
 tripPlacesCatalog =
@@ -693,7 +701,7 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
 
     financeAccountsSnapshots = path $ \accountId -> do
       dir "snapshots" $ do
-        msum [financeAccountsSnapshotsCreate accountId, financeAccountsSnapshotsList accountId]
+        msum [financeAccountsSnapshotsCreate accountId, financeAccountsSnapshotSetReconciliationStatus accountId, financeAccountsSnapshotsList accountId]
 
     financeAccountsSnapshotsCreate :: String -> ServerPartT IO Response
     financeAccountsSnapshotsCreate accountId = do
@@ -711,6 +719,14 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
         Left NotFound -> notFound (jsonMessage "Account not found")
         Left _ -> internalServerError emptyResponse
         Right snapshots -> ok (jsonResponse snapshots)
+
+    financeAccountsSnapshotSetReconciliationStatus :: String -> ServerPartT IO Response
+    financeAccountsSnapshotSetReconciliationStatus accountId = path $ \snapshotId -> do
+      dir "reconciliation-status" $ do
+        nullDir
+        method PUT
+        body <- askRq >>= takeRequestBody
+        maybe (badRequest "Empty body") (handleSnapshotSetReconciliationStatusBody accountId snapshotId) body
 
     financeAccountsReconciliation = path $ \accountId -> do
       dir "reconciliation" $ do
@@ -743,6 +759,28 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
                   Left AlreadyExists -> setResponseCode 409 >> pure (jsonMessage "Snapshot already exists for that account and timestamp")
                   Left _ -> internalServerError emptyResponse
                   Right reconciliation -> ok (jsonResponse reconciliation)
+
+    handleSnapshotSetReconciliationStatusBody :: String -> String -> RqBody -> ServerPartT IO Response
+    handleSnapshotSetReconciliationStatusBody accountId snapshotId rqBody =
+      case decode' (unBody rqBody) :: Maybe FinanceAccountSnapshotReconciliationStatusUpdateRequest of
+        Nothing -> badRequest "Unable to decode the body as a FinanceAccountSnapshotReconciliationStatusUpdateRequest"
+        Just FinanceAccountSnapshotReconciliationStatusUpdateRequest
+          { financeAccountSnapshotReconciliationStatusUpdateStatus
+          } ->
+            case financeAccountSnapshotReconciliationStatusUpdateStatus of
+              "unreconciled" -> do
+                result <- liftIO $ runExceptT (repoSetFinanceAccountSnapshotReconciliationStatus financeAccountRepo principalUserId accountId snapshotId FinanceAccountSnapshotUnreconciled)
+                case result of
+                  Left NotFound -> notFound (jsonMessage "Account or snapshot not found")
+                  Left _ -> internalServerError emptyResponse
+                  Right reconciliation -> ok (jsonResponse reconciliation)
+              "reconciled" -> do
+                result <- liftIO $ runExceptT (repoSetFinanceAccountSnapshotReconciliationStatus financeAccountRepo principalUserId accountId snapshotId FinanceAccountSnapshotReconciled)
+                case result of
+                  Left NotFound -> notFound (jsonMessage "Account or snapshot not found")
+                  Left _ -> internalServerError emptyResponse
+                  Right reconciliation -> ok (jsonResponse reconciliation)
+              _ -> badRequest "status must be either unreconciled or reconciled"
 
     financeTransactionsCreate direction = do
       nullDir

@@ -1953,6 +1953,7 @@ financeMigrationUpCreatesSchema =
           linkTypeType <- fetchColumnType ctx "finance_transaction_links" "link_type"
           noteTextType <- fetchColumnType ctx "finance_transaction_notes" "note_text"
           snapshotBalanceType <- fetchColumnType ctx "finance_balance_snapshots" "balance"
+          snapshotStatusType <- fetchColumnType ctx "finance_balance_snapshots" "reconciliation_status"
           assertEqual "Expected finance_events.event_number to be bigint" (Just "bigint") eventNumberType
           assertEqual "Expected finance_events.stream_version to be bigint" (Just "bigint") streamVersionType
           assertEqual "Expected finance_events.payload to be jsonb" (Just "jsonb") payloadType
@@ -1966,6 +1967,7 @@ financeMigrationUpCreatesSchema =
           assertEqual "Expected finance_transaction_links.link_type to be text" (Just "text") linkTypeType
           assertEqual "Expected finance_transaction_notes.note_text to be text" (Just "text") noteTextType
           assertEqual "Expected finance_balance_snapshots.balance to be bigint" (Just "bigint") snapshotBalanceType
+          assertEqual "Expected finance_balance_snapshots.reconciliation_status to be text" (Just "text") snapshotStatusType
 
           canonicalOrderingIndexExists <- fetchIndexExists ctx "finance_events_user_event_number_idx"
           nameIndexExists <- fetchIndexExists ctx "finance_accounts_user_status_name_idx"
@@ -1975,6 +1977,7 @@ financeMigrationUpCreatesSchema =
           linksPeerIndexExists <- fetchIndexExists ctx "finance_transaction_links_user_peer_idx"
           notesCreatedIndexExists <- fetchIndexExists ctx "finance_transaction_notes_user_transaction_created_idx"
           snapshotsOccurredIndexExists <- fetchIndexExists ctx "finance_balance_snapshots_user_account_occurred_idx"
+          snapshotsStatusOccurredIndexExists <- fetchIndexExists ctx "finance_balance_snapshots_user_account_status_occurred_idx"
           assertBool "Expected finance_events_user_event_number_idx to exist" canonicalOrderingIndexExists
           assertBool "Expected finance_accounts_user_status_name_idx to exist" nameIndexExists
           assertBool "Expected finance_transactions_user_occurred_idx to exist" transactionIndexExists
@@ -1983,6 +1986,7 @@ financeMigrationUpCreatesSchema =
           assertBool "Expected finance_transaction_links_user_peer_idx to exist" linksPeerIndexExists
           assertBool "Expected finance_transaction_notes_user_transaction_created_idx to exist" notesCreatedIndexExists
           assertBool "Expected finance_balance_snapshots_user_account_occurred_idx to exist" snapshotsOccurredIndexExists
+          assertBool "Expected finance_balance_snapshots_user_account_status_occurred_idx to exist" snapshotsStatusOccurredIndexExists
 
           insertCanonicalEvent1 <- runSqlCommandCtx ctx "INSERT INTO finance_events (event_id, user_id, stream_id, stream_version, event_type, event_version, occurred_at, idempotency_key, payload) VALUES ('evt-1', 'user-evt', 'stream-1', 1, 'AccountOpened', 1, NOW(), 'idem-1', '{}'::jsonb)"
           case insertCanonicalEvent1 of
@@ -3169,6 +3173,20 @@ pgFinanceAccountRepoSnapshotsAndReconciliation =
                 (Right firstRecon, Left AlreadyExists, Left NotFound) -> do
                   assertEqual "Expected derived balance at first snapshot to follow signed transaction sum" 3800 (financeAccountReconciliationDerivedBalanceAtSnapshot firstRecon)
                   assertEqual "Expected discrepancy to be observed minus derived" (-300) (financeAccountReconciliationDiscrepancy firstRecon)
+                  assertEqual "Expected snapshot create to default to unreconciled status" FinanceAccountSnapshotUnreconciled (financeAccountReconciliationReconciliationStatus firstRecon)
+                  assertEqual "Expected snapshot create to have no basis snapshot" Nothing (financeAccountReconciliationBasisSnapshotId firstRecon)
+                  assertEqual "Expected snapshot create to have no basis timestamp" Nothing (financeAccountReconciliationBasisSnapshotOccurredAt firstRecon)
+
+                  reconciledFirst <- runExceptT $ repoSetFinanceAccountSnapshotReconciliationStatus accountRepo userId (financeAccountId createdAccount) (financeAccountReconciliationSnapshotId firstRecon) FinanceAccountSnapshotReconciled
+                  case reconciledFirst of
+                    Left err -> assertFailure ("Expected snapshot status update to succeed, got " ++ show err)
+                    Right updatedFirstRecon -> do
+                      assertEqual "Expected reconciled snapshot to report reconciled status" FinanceAccountSnapshotReconciled (financeAccountReconciliationReconciliationStatus updatedFirstRecon)
+                      assertEqual "Expected reconciled snapshot to use itself as the basis" (Just (financeAccountReconciliationSnapshotId firstRecon)) (financeAccountReconciliationBasisSnapshotId updatedFirstRecon)
+                      assertEqual "Expected reconciled snapshot basis timestamp to match the snapshot" (Just (read "2026-04-02 10:00:00 UTC")) (financeAccountReconciliationBasisSnapshotOccurredAt updatedFirstRecon)
+                      assertEqual "Expected reconciled snapshot derived balance to equal observed balance" 3500 (financeAccountReconciliationDerivedBalanceAtSnapshot updatedFirstRecon)
+                      assertEqual "Expected reconciled snapshot discrepancy to be zero" 0 (financeAccountReconciliationDiscrepancy updatedFirstRecon)
+
                   secondRecon <- runExceptT $ repoCreateFinanceAccountSnapshot accountRepo userId (financeAccountId createdAccount) 3000 (read "2026-04-03 10:00:00 UTC")
                   case secondRecon of
                     Left err -> assertFailure ("Expected second snapshot create success, got " ++ show err)
@@ -3185,12 +3203,26 @@ pgFinanceAccountRepoSnapshotsAndReconciliation =
                       latestRecon <- runExceptT $ repoGetFinanceAccountReconciliationLatest accountRepo userId (financeAccountId createdAccount)
                       byFirstSnapshot <- runExceptT $ repoGetFinanceAccountReconciliationBySnapshotId accountRepo userId (financeAccountId createdAccount) (financeAccountReconciliationSnapshotId firstRecon)
                       missingSnapshotRecon <- runExceptT $ repoGetFinanceAccountReconciliationBySnapshotId accountRepo userId (financeAccountId createdAccount) "missing-snapshot"
-                      case (listed, latestRecon, byFirstSnapshot, missingSnapshotRecon) of
-                        (Right snapshots, Right latest, Right firstById, Left NotFound) -> do
+                      unreconciledFirst <- runExceptT $ repoSetFinanceAccountSnapshotReconciliationStatus accountRepo userId (financeAccountId createdAccount) (financeAccountReconciliationSnapshotId firstRecon) FinanceAccountSnapshotUnreconciled
+                      latestAfterUnmark <- runExceptT $ repoGetFinanceAccountReconciliationLatest accountRepo userId (financeAccountId createdAccount)
+                      byFirstAfterUnmark <- runExceptT $ repoGetFinanceAccountReconciliationBySnapshotId accountRepo userId (financeAccountId createdAccount) (financeAccountReconciliationSnapshotId firstRecon)
+                      case (listed, latestRecon, byFirstSnapshot, missingSnapshotRecon, unreconciledFirst, latestAfterUnmark, byFirstAfterUnmark) of
+                        (Right snapshots, Right latest, Right firstById, Left NotFound, Right revertedFirst, Right latestFallback, Right firstFallback) -> do
                           assertEqual "Expected two snapshots listed" 2 (length snapshots)
+                          assertEqual "Expected latest snapshot to remain unreconciled in the snapshot list" FinanceAccountSnapshotUnreconciled (financeAccountSnapshotReconciliationStatus (head snapshots))
+                          assertEqual "Expected older snapshot to be listed as reconciled before unmarking" FinanceAccountSnapshotReconciled (financeAccountSnapshotReconciliationStatus (snapshots !! 1))
                           assertEqual "Expected latest reconciliation to use latest snapshot" (financeAccountReconciliationSnapshotId createdSecondRecon) (financeAccountReconciliationSnapshotId latest)
-                          assertEqual "Expected derived balance at latest snapshot to include transactions up to that timestamp only" 3800 (financeAccountReconciliationDerivedBalanceAtSnapshot latest)
-                          assertEqual "Expected first snapshot reconciliation to stay stable despite later transactions" 3800 (financeAccountReconciliationDerivedBalanceAtSnapshot firstById)
+                          assertEqual "Expected latest reconciliation to use the first snapshot as basis before unmarking" (Just (financeAccountReconciliationSnapshotId firstRecon)) (financeAccountReconciliationBasisSnapshotId latest)
+                          assertEqual "Expected derived balance at latest snapshot to use the reconciled basis before unmarking" 3500 (financeAccountReconciliationDerivedBalanceAtSnapshot latest)
+                          assertEqual "Expected first snapshot reconciliation to resolve to zero discrepancy while reconciled" 0 (financeAccountReconciliationDiscrepancy firstById)
+                          assertEqual "Expected unmarking to return the first snapshot to unreconciled status" FinanceAccountSnapshotUnreconciled (financeAccountReconciliationReconciliationStatus revertedFirst)
+                          assertEqual "Expected unmarking to clear the basis for the first snapshot" Nothing (financeAccountReconciliationBasisSnapshotId revertedFirst)
+                          assertEqual "Expected unmarked first snapshot to fall back to transaction-derived balance" 3800 (financeAccountReconciliationDerivedBalanceAtSnapshot revertedFirst)
+                          assertEqual "Expected unmarked first snapshot discrepancy to return to the original baseline gap" (-300) (financeAccountReconciliationDiscrepancy revertedFirst)
+                          assertEqual "Expected latest reconciliation after unmarking to fall back to transaction-derived balance" 3800 (financeAccountReconciliationDerivedBalanceAtSnapshot latestFallback)
+                          assertEqual "Expected latest reconciliation after unmarking to clear its basis" Nothing (financeAccountReconciliationBasisSnapshotId latestFallback)
+                          assertEqual "Expected latest reconciliation after unmarking to show the fallback discrepancy" (-800) (financeAccountReconciliationDiscrepancy latestFallback)
+                          assertEqual "Expected first snapshot lookup after unmarking to fall back to transaction-derived balance" 3800 (financeAccountReconciliationDerivedBalanceAtSnapshot firstFallback)
                         outcomes -> assertFailure ("Unexpected snapshot listing/reconciliation outcomes: " ++ show outcomes)
                 outcomes -> assertFailure ("Unexpected snapshot creation outcomes: " ++ show outcomes)
 

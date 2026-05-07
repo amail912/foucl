@@ -320,7 +320,7 @@ Draft shape:
 - `POST /api/v1/finance/accounts/{id}/snapshots` returns reconciliation for the created snapshot rather than necessarily the latest snapshot on the account
 - `POST /api/v1/finance/accounts/{id}/snapshots/{snapshotId}/adjustment` returns the updated reconciliation state and the current adjustment summary
 - `GET /api/v1/finance/accounts/{id}/reconciliation?snapshotId=...` returns reconciliation for the selected snapshot
-- reconciliation responses expose `snapshotId`, `snapshotOccurredAt`, `basisSnapshotId`, `basisSnapshotOccurredAt`, `observedBalance`, `derivedBalanceAtSnapshot`, `discrepancy`, and `adjustment`
+- reconciliation responses expose `snapshotId`, `snapshotOccurredAt`, `reconciliationStatus`, `basisSnapshotId`, `basisSnapshotOccurredAt`, `observedBalance`, `derivedBalanceAtSnapshot`, `discrepancy`, and `adjustment`
 
 ### Ledger
 - includes all transactions, including transfers

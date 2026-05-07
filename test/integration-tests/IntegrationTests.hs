@@ -397,6 +397,13 @@ runIntegrationTests = do
         assertStatusCode "Finance account snapshot list should require auth" 401 snapshotsListResp
         assertMessageResponse "Not authenticated" snapshotsListResp
 
+        setSnapshotStatusReq <- parseRequest "PUT http://localhost:8081/api/v1/finance/accounts/missing/snapshots/missing/reconciliation-status"
+        setSnapshotStatusResp <- httpJSON $ setRequestMethod "PUT"
+                                         $ setRequestHeader "Content-Type" ["application/json"]
+                                         $ setRequestBodyJSON (object ["status" .= ("reconciled" :: String)]) setSnapshotStatusReq
+        assertStatusCode "Finance account snapshot status update should require auth" 401 setSnapshotStatusResp
+        assertMessageResponse "Not authenticated" setSnapshotStatusResp
+
         reconciliationReq <- parseRequest "GET http://localhost:8081/api/v1/finance/accounts/missing/reconciliation"
         reconciliationResp <- httpJSON $ setRequestMethod "GET" reconciliationReq
         assertStatusCode "Finance account reconciliation should require auth" 401 reconciliationResp
@@ -556,7 +563,16 @@ runIntegrationTests = do
         snapshotCreateResp <- createFinanceAccountSnapshotExpectValue cookie accountId 3500 "2026-04-02T10:00:00Z"
         assertStatusCode "Snapshot create should succeed" 200 snapshotCreateResp
         assertFinanceReconciliationValues 3800 (-300) (getResponseBody snapshotCreateResp)
+        assertEqual "Expected snapshot create to default to unreconciled status" "unreconciled" (financeReconciliationStatusValue (getResponseBody snapshotCreateResp))
+        assertEqual "Expected snapshot create to have no reconciliation basis" Nothing (financeReconciliationBasisSnapshotIdValue (getResponseBody snapshotCreateResp))
         firstSnapshotId <- requireObjectStringField "snapshotId" (getResponseBody snapshotCreateResp)
+
+        reconciledFirstResp <- setFinanceAccountSnapshotReconciliationStatusExpectValue cookie accountId firstSnapshotId "reconciled"
+        assertStatusCode "Marking a snapshot reconciled should succeed" 200 reconciledFirstResp
+        assertEqual "Expected reconciled snapshot status to update" "reconciled" (financeReconciliationStatusValue (getResponseBody reconciledFirstResp))
+        assertEqual "Expected reconciled snapshot to use itself as basis" (Just firstSnapshotId) (financeReconciliationBasisSnapshotIdValue (getResponseBody reconciledFirstResp))
+        assertEqual "Expected reconciled snapshot basis timestamp to match the snapshot" (Just "2026-04-02T10:00:00Z") (financeReconciliationBasisSnapshotOccurredAtValue (getResponseBody reconciledFirstResp))
+        assertFinanceReconciliationValues 3500 0 (getResponseBody reconciledFirstResp)
 
         duplicateSnapshotResp <- createFinanceAccountSnapshotExpectValue cookie accountId 3550 "2026-04-02T10:00:00Z"
         assertStatusCode "Duplicate account+timestamp snapshot should return 409" 409 duplicateSnapshotResp
@@ -565,21 +581,40 @@ runIntegrationTests = do
         secondSnapshotResp <- createFinanceAccountSnapshotExpectValue cookie accountId 3000 "2026-04-03T10:00:00Z"
         assertStatusCode "Second snapshot create should succeed" 200 secondSnapshotResp
         secondSnapshotId <- requireObjectStringField "snapshotId" (getResponseBody secondSnapshotResp)
+        assertEqual "Expected second snapshot create to default to unreconciled status" "unreconciled" (financeReconciliationStatusValue (getResponseBody secondSnapshotResp))
+        assertEqual "Expected second snapshot create to use the first reconciled snapshot as basis" (Just firstSnapshotId) (financeReconciliationBasisSnapshotIdValue (getResponseBody secondSnapshotResp))
+        assertEqual "Expected second snapshot basis timestamp to come from the first snapshot" (Just "2026-04-02T10:00:00Z") (financeReconciliationBasisSnapshotOccurredAtValue (getResponseBody secondSnapshotResp))
+        assertFinanceReconciliationValues 3500 (-500) (getResponseBody secondSnapshotResp)
 
         _ <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "snapshot-key-3" (object ["accountId" .= accountId, "amount" .= (500 :: Int), "occurredAt" .= ("2026-04-04T10:00:00Z" :: String)])
 
         snapshots <- getFinanceAccountSnapshots cookie accountId
         assertEqual "Expected two snapshots listed" 2 (Prelude.length snapshots)
         assertEqual "Expected latest snapshot first in list order" secondSnapshotId (financeSnapshotIdValue (head snapshots))
+        assertEqual "Expected latest snapshot to be unreconciled in the list view" "unreconciled" (financeSnapshotReconciliationStatusValue (head snapshots))
+        assertEqual "Expected older snapshot to be reconciled in the list view" "reconciled" (financeSnapshotReconciliationStatusValue (snapshots !! 1))
 
         latestReconciliationResp <- getFinanceAccountReconciliationExpectValue cookie accountId Nothing
         assertStatusCode "Latest reconciliation should succeed" 200 latestReconciliationResp
         assertEqual "Expected latest reconciliation to use latest snapshot id" secondSnapshotId (financeReconciliationSnapshotIdValue (getResponseBody latestReconciliationResp))
-        assertFinanceReconciliationValues 3800 (-800) (getResponseBody latestReconciliationResp)
+        assertEqual "Expected latest reconciliation to report the first snapshot as the basis" (Just firstSnapshotId) (financeReconciliationBasisSnapshotIdValue (getResponseBody latestReconciliationResp))
+        assertEqual "Expected latest reconciliation basis timestamp to match the first snapshot" (Just "2026-04-02T10:00:00Z") (financeReconciliationBasisSnapshotOccurredAtValue (getResponseBody latestReconciliationResp))
+        assertFinanceReconciliationValues 3500 (-500) (getResponseBody latestReconciliationResp)
 
         firstReconciliationResp <- getFinanceAccountReconciliationExpectValue cookie accountId (Just firstSnapshotId)
         assertStatusCode "Reconciliation by snapshot id should succeed" 200 firstReconciliationResp
-        assertFinanceReconciliationValues 3800 (-300) (getResponseBody firstReconciliationResp)
+        assertFinanceReconciliationValues 3500 0 (getResponseBody firstReconciliationResp)
+
+        unreconciledFirstResp <- setFinanceAccountSnapshotReconciliationStatusExpectValue cookie accountId firstSnapshotId "unreconciled"
+        assertStatusCode "Unmarking a snapshot reconciled should succeed" 200 unreconciledFirstResp
+        assertEqual "Expected snapshot to return to unreconciled status" "unreconciled" (financeReconciliationStatusValue (getResponseBody unreconciledFirstResp))
+        assertEqual "Expected unreconciled snapshot to lose its basis" Nothing (financeReconciliationBasisSnapshotIdValue (getResponseBody unreconciledFirstResp))
+        assertFinanceReconciliationValues 3800 (-300) (getResponseBody unreconciledFirstResp)
+
+        fallbackSecondResp <- getFinanceAccountReconciliationExpectValue cookie accountId (Just secondSnapshotId)
+        assertStatusCode "Reconciliation by snapshot id should still succeed after basis removal" 200 fallbackSecondResp
+        assertEqual "Expected second snapshot to fall back to transaction-derived baseline after unmarking the basis" Nothing (financeReconciliationBasisSnapshotIdValue (getResponseBody fallbackSecondResp))
+        assertFinanceReconciliationValues 3800 (-800) (getResponseBody fallbackSecondResp)
 
         missingSnapshotResp <- getFinanceAccountReconciliationExpectValue cookie accountId (Just "missing-snapshot")
         assertStatusCode "Unknown snapshot reconciliation should return 404" 404 missingSnapshotResp
@@ -2433,6 +2468,14 @@ getFinanceAccountReconciliationExpectValue cookie accountId mSnapshotId = do
          $ setRequestHeader "Cookie" [BS.pack cookie]
          $ setRequestQueryString query req
 
+setFinanceAccountSnapshotReconciliationStatusExpectValue :: String -> String -> String -> String -> IO (Response Value)
+setFinanceAccountSnapshotReconciliationStatusExpectValue cookie accountId snapshotId status = do
+  req <- parseRequest ("PUT http://localhost:8081" ++ financeAccountsEndpoint ++ "/" ++ accountId ++ "/snapshots/" ++ snapshotId ++ "/reconciliation-status")
+  httpJSON $ setRequestMethod "PUT"
+         $ setRequestHeader "Cookie" [BS.pack cookie]
+         $ setRequestHeader "Content-Type" ["application/json"]
+         $ setRequestBodyJSON (object ["status" .= status]) req
+
 createFinanceCategory :: String -> String -> Maybe String -> IO Value
 createFinanceCategory cookie name parentId = do
   resp <- createFinanceCategoryExpectValue cookie name parentId
@@ -2688,6 +2731,15 @@ financeSnapshotIdValue responseBody =
         Nothing -> error "Expected finance snapshot id field"
     _ -> error "Expected finance snapshot response object"
 
+financeSnapshotReconciliationStatusValue :: Value -> String
+financeSnapshotReconciliationStatusValue responseBody =
+  case responseBody of
+    Object value ->
+      case parseMaybe (.: "reconciliationStatus") value of
+        Just actualStatus -> actualStatus
+        Nothing -> error "Expected finance snapshot reconciliationStatus field"
+    _ -> error "Expected finance snapshot response object"
+
 financeReconciliationSnapshotIdValue :: Value -> String
 financeReconciliationSnapshotIdValue responseBody =
   case responseBody of
@@ -2695,6 +2747,33 @@ financeReconciliationSnapshotIdValue responseBody =
       case parseMaybe (.: "snapshotId") value of
         Just actualId -> actualId
         Nothing -> error "Expected reconciliation snapshotId field"
+    _ -> error "Expected finance reconciliation response object"
+
+financeReconciliationStatusValue :: Value -> String
+financeReconciliationStatusValue responseBody =
+  case responseBody of
+    Object value ->
+      case parseMaybe (.: "reconciliationStatus") value of
+        Just actualStatus -> actualStatus
+        Nothing -> error "Expected reconciliation status field"
+    _ -> error "Expected finance reconciliation response object"
+
+financeReconciliationBasisSnapshotIdValue :: Value -> Maybe String
+financeReconciliationBasisSnapshotIdValue responseBody =
+  case responseBody of
+    Object value ->
+      case parseMaybe (.:? "basisSnapshotId") value of
+        Just actualBasis -> actualBasis
+        Nothing -> error "Expected reconciliation basisSnapshotId field"
+    _ -> error "Expected finance reconciliation response object"
+
+financeReconciliationBasisSnapshotOccurredAtValue :: Value -> Maybe String
+financeReconciliationBasisSnapshotOccurredAtValue responseBody =
+  case responseBody of
+    Object value ->
+      case parseMaybe (.:? "basisSnapshotOccurredAt") value of
+        Just actualBasis -> actualBasis
+        Nothing -> error "Expected reconciliation basisSnapshotOccurredAt field"
     _ -> error "Expected finance reconciliation response object"
 
 assertFinanceReconciliationValues :: Int -> Int -> Value -> Assertion
@@ -2707,6 +2786,15 @@ assertFinanceReconciliationValues expectedDerivedBalance expectedDiscrepancy res
       case parseMaybe (.: "discrepancy") value of
         Just actualDiscrepancy -> assertEqual "Expected reconciliation discrepancy" expectedDiscrepancy (actualDiscrepancy :: Int)
         Nothing -> assertFailure "Expected reconciliation discrepancy"
+      case parseMaybe (.: "reconciliationStatus") value of
+        Just (_ :: String) -> pure ()
+        Nothing -> assertFailure "Expected reconciliation reconciliationStatus"
+      case parseMaybe (.:? "basisSnapshotId") value of
+        Just (_ :: Maybe String) -> pure ()
+        Nothing -> assertFailure "Expected reconciliation basisSnapshotId"
+      case parseMaybe (.:? "basisSnapshotOccurredAt") value of
+        Just (_ :: Maybe String) -> pure ()
+        Nothing -> assertFailure "Expected reconciliation basisSnapshotOccurredAt"
       case ( parseMaybe (.: "snapshotId") value
            , parseMaybe (.: "snapshotOccurredAt") value
            , parseMaybe (.: "observedBalance") value

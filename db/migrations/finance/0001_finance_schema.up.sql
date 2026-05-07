@@ -206,9 +206,13 @@ CREATE TABLE finance_balance_snapshots (
   balance BIGINT NOT NULL,
   occurred_at TIMESTAMPTZ NOT NULL,
   recorded_at TIMESTAMPTZ NOT NULL,
+  reconciliation_status TEXT NOT NULL DEFAULT 'unreconciled' CHECK (reconciliation_status IN ('unreconciled', 'reconciled')),
   PRIMARY KEY (user_id, account_id, snapshot_id),
   UNIQUE (user_id, account_id, occurred_at)
 );
 
 CREATE INDEX finance_balance_snapshots_user_account_occurred_idx
   ON finance_balance_snapshots (user_id, account_id, occurred_at DESC, snapshot_id ASC);
+
+CREATE INDEX finance_balance_snapshots_user_account_status_occurred_idx
+  ON finance_balance_snapshots (user_id, account_id, reconciliation_status, occurred_at DESC, snapshot_id ASC);

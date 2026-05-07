@@ -19,7 +19,6 @@ Provide an authenticated personal finance backend for manual transaction entry, 
 ## Stories
 
 ### Ready
-- [009 Snapshot Reconciliation Status And Basis Selection](ready/009-snapshot-reconciliation-status-and-basis-selection.md) - Define persisted snapshot reconciliation status, trusted-basis selection rules, and reconciliation status mutation behavior.
 - [011 Reconciliation Adjustment Workflow](ready/011-reconciliation-adjustment-workflow.md) - Define first-class snapshot-scoped reconciliation adjustments with signed report impact and a marker in ledger/export views.
 
 ### Done
@@ -35,6 +34,7 @@ Provide an authenticated personal finance backend for manual transaction entry, 
 - [006 Record And Apply Balance Snapshots](done/006-record-and-apply-balance-snapshots.md) - Define snapshot-centered reconciliation writes, latest reconciliation reads, and additive balance-basis behavior.
 - [007 Build Reporting And Ledger Projections](done/007-build-reporting-and-ledger-projections.md) - Define split-aware aggregate report behavior, repeated-param filters, and deterministic projection reads.
 - [008 Export Finance Data](done/008-export-finance-data.md) - Implement `GET /api/v1/finance/export` with canonical `events` and projection-backed convenience `views`; prerequisite for `010d`.
+- [009 Snapshot Reconciliation Status And Basis Selection](done/009-snapshot-reconciliation-status-and-basis-selection.md) - Define persisted snapshot reconciliation status, trusted-basis selection rules, and reconciliation status mutation behavior.
 - [010a Unify Finance Event Log Foundation](done/010a-unify-finance-event-log-foundation.md) - Establish one canonical append-only finance event-log foundation and deterministic ordering guarantees.
 - [010b Migrate Finance Write Paths To Canonical Log](done/010b-migrate-finance-write-paths-to-canonical-log.md) - Route finance write behavior through canonical event append flows while keeping API semantics stable.
 - [010d Remove Legacy Finance Event Storage And Finalize Rollout](done/010d-remove-legacy-finance-event-storage-and-finalize-rollout.md) - Finalize canonical-only finance storage by collapsing migration history to the canonical baseline and removing legacy event-table dependencies from tests/wiring.

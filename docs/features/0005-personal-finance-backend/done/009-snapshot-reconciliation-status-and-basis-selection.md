@@ -18,6 +18,7 @@ As a user, I want to mark snapshots as reconciled, so discrepancy computation ca
 - The request body contains `status`.
 - `GET /api/v1/finance/accounts/{id}/snapshots` includes `reconciliationStatus` on each snapshot row.
 - `GET /api/v1/finance/accounts/{id}/reconciliation` includes basis snapshot metadata:
+  - `reconciliationStatus`
   - `basisSnapshotId`
   - `basisSnapshotOccurredAt`
 - `POST /api/v1/finance/accounts/{id}/snapshots` returns the reconciliation view for the created snapshot, including basis metadata and status.

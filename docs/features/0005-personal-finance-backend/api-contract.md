@@ -261,6 +261,7 @@ Default behavior:
 Response fields:
 - `snapshotId`
 - `snapshotOccurredAt`
+- `reconciliationStatus`
 - `basisSnapshotId`
 - `basisSnapshotOccurredAt`
 - `observedBalance`

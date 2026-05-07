@@ -28,6 +28,17 @@ Rules:
 - `occurredAt` may be client-supplied or default to now
 - `recordedAt` is assigned by the backend when the event is persisted
 
+### ReconciliationAdjustment
+Snapshot-scoped signed correction used to settle a balance discrepancy.
+
+Rules:
+- adjustments are first-class financial events, not ordinary money-entry transactions
+- the backend derives the signed adjustment amount from the current snapshot discrepancy
+- each snapshot has at most one current adjustment in projection state
+- later adjustments supersede earlier adjustments for the same snapshot
+- creating an adjustment auto-marks the target snapshot reconciled
+- adjustment rows are distinguishable from ordinary transactions through an explicit marker in convenience views
+
 ### Category
 Hierarchical classification used by categorization and split operations.
 
@@ -206,6 +217,7 @@ Draft shape:
 - `TransactionNoteDeleted`
 - `BalanceSnapshotRecorded`
 - `BalanceSnapshotReconciliationStatusSet`
+- `BalanceSnapshotAdjustmentRecorded`
 
 ## Core Invariants
 ### Money
@@ -260,6 +272,7 @@ Draft shape:
 - reconciliation is computed from a snapshot plus transaction history, not stored as its own persisted object
 - a selected reconciled snapshot becomes the balance basis at its timestamp
 - later transactions adjust forward from the latest reconciled basis
+- adjustment creation settles the selected snapshot and does not mutate historical transaction rows
 - snapshot-write success responses are centered on the snapshot that was just created, even when it is backdated
 - snapshots do not change report aggregates
 - snapshot list may appear in convenience export views, but reconciliation does not
@@ -305,11 +318,13 @@ Draft shape:
 - snapshots are ordered by `occurredAt` descending with snapshot `id` as deterministic tie-breaker
 - `GET /api/v1/finance/accounts/{id}/reconciliation` returns the latest reconciliation by default
 - `POST /api/v1/finance/accounts/{id}/snapshots` returns reconciliation for the created snapshot rather than necessarily the latest snapshot on the account
+- `POST /api/v1/finance/accounts/{id}/snapshots/{snapshotId}/adjustment` returns the updated reconciliation state and the current adjustment summary
 - `GET /api/v1/finance/accounts/{id}/reconciliation?snapshotId=...` returns reconciliation for the selected snapshot
-- reconciliation responses expose `snapshotId`, `snapshotOccurredAt`, `basisSnapshotId`, `basisSnapshotOccurredAt`, `observedBalance`, `derivedBalanceAtSnapshot`, and `discrepancy`
+- reconciliation responses expose `snapshotId`, `snapshotOccurredAt`, `basisSnapshotId`, `basisSnapshotOccurredAt`, `observedBalance`, `derivedBalanceAtSnapshot`, `discrepancy`, and `adjustment`
 
 ### Ledger
 - includes all transactions, including transfers
+- includes reconciliation adjustment rows with an explicit marker
 - should remain auditable against underlying event history
 
 ### Reports
@@ -320,10 +335,12 @@ Draft shape:
 - `direction=all` returns net balance delta with income positive and spending negative
 - category filtering uses active split state when present and whole-transaction category only when no split is active
 - when split-driven category filtering is active, aggregate totals sum only the matching split-row amounts
+- reconciliation adjustment rows contribute to report totals by their signed amount
+- reconciliation adjustment rows are treated as uncategorized for category matching
 - the special category token `uncategorized` matches transactions with no active category state
 - the special category token `uncategorized` also matches explicit `Uncategorized Expense` or `Uncategorized Income` assignments, including split rows
 - response fields are `total`, `count`, and `transactionIds`
-- `count` and `transactionIds` remain transaction-based even when multiple split rows from one transaction match
+- `count` and `transactionIds` are row-based and include reconciliation adjustment rows
 - `transactionIds` follow the same deterministic order as ledger rows
 
 ### Export
@@ -331,7 +348,7 @@ Draft shape:
 - top-level sections are `formatVersion`, canonical `events`, and convenience `views`
 - `formatVersion` is `1` in the first release
 - `events` use the canonical stored event-envelope representation
-- `views` include current accounts, categories, transactions, transfer state, non-deleted notes, and snapshot list with reconciliation status
+- `views` include current accounts, categories, transactions, transfer state, non-deleted notes, snapshot list with reconciliation status, and adjustment markers
 - `views.transactions` reuse the `GET /transactions` row shape
 - `views` exclude reconciliation outputs, aggregate report outputs, and deleted notes
 

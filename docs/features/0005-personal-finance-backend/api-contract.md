@@ -127,6 +127,7 @@ The v1 transaction row shape used by create-success responses and `GET /api/v1/f
 - `category`
 - `splits`
 - `notes`
+- `adjustment`
 
 ### `POST /api/v1/finance/transactions/sent`
 Records one immutable expense transaction.
@@ -188,6 +189,12 @@ Read rules:
 - `category` returns the active whole-transaction category summary only when no split is active
 - `splits` returns the active split summary when present
 - `notes` returns the current append-ordered non-deleted note list for the transaction
+- `adjustment` is `null` for ordinary transactions
+- `adjustment` is populated for reconciliation adjustment rows and includes:
+  - `snapshotId`
+  - `snapshotOccurredAt`
+  - optional `reason`
+- adjustment rows are signed by the backend so they can flow through the existing sent/received report logic
 - each note object in `notes` contains:
   - `id`
   - `text`
@@ -259,6 +266,7 @@ Response fields:
 - `observedBalance`
 - `derivedBalanceAtSnapshot`
 - `discrepancy`
+- `adjustment`
 
 Rules:
 - reconciliation is computed from the selected snapshot and transaction history, not stored as its own persisted object
@@ -267,6 +275,31 @@ Rules:
 - later transactions adjust forward from the selected reconciled basis
 - when no reconciled basis exists, reconciliation falls back to the current transaction-derived baseline behavior
 - unknown accounts or snapshot ids return `404`
+
+### `POST /api/v1/finance/accounts/{id}/snapshots/{snapshotId}/adjustment`
+Creates or replaces the current reconciliation adjustment for one snapshot.
+
+Request fields:
+- optional `reason`
+
+Response fields:
+- all reconciliation response fields listed above
+- `adjustment`
+
+Adjustment fields:
+- `snapshotId`
+- `snapshotOccurredAt`
+- `reason`
+- `amount`
+- `direction`
+
+Rules:
+- the backend derives the adjustment amount from the current discrepancy for the target snapshot
+- later adjustment requests for the same snapshot supersede the previous current adjustment in current reads
+- creating an adjustment auto-marks the target snapshot as reconciled
+- unknown accounts or snapshot ids return `404`
+- malformed request bodies return `400`
+- success returns the updated snapshot reconciliation state and the current adjustment summary
 
 ## Operations
 ### `POST /api/v1/finance/transactions/{id}/categorize`
@@ -379,6 +412,8 @@ Filter rules:
 - `direction=received` aggregates only income transactions
 - `direction=all` aggregates net balance delta with income positive and spending negative
 - transfer-linked transactions are excluded from all report aggregates
+- adjustment rows are included in report aggregates using their derived sign
+- adjustment rows are treated as uncategorized for category filtering
 - overlapping include and exclude values for the same filter dimension return `400`
 - category filters apply to active split categories when a split is active
 - whole-transaction category is ignored while a split is active
@@ -395,8 +430,8 @@ Response fields:
 Response rules:
 - `total` uses integer cents
 - when a split is active and category filters are applied, `total` sums only the matching split-row amounts
-- `count` is the number of transactions included in the aggregate
-- `transactionIds` contains the ids of the transactions included in the aggregate
+- `count` is the number of finance rows included in the aggregate
+- `transactionIds` contains the ids of the transactions and adjustment rows included in the aggregate
 - transactions matched through multiple split rows still contribute once to `count` and appear once in `transactionIds`
 - `transactionIds` follow the same deterministic order as the ledger: `occurredAt` descending with transaction `id` as tie-breaker
 
@@ -417,6 +452,7 @@ Rules:
 - export is partially future-import-compatible only for the canonical raw-event section
 - unauthenticated requests return `401`
 - export generation failures return `5xx`
+- export convenience views include adjustment rows with the same marker as ledger reads
 
 View contents:
 - current accounts

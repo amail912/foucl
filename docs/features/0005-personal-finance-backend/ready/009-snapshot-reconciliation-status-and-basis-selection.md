@@ -31,7 +31,7 @@ As a user, I want to mark snapshots as reconciled, so discrepancy computation ca
 - Basis selection uses the latest reconciled snapshot on the same account with `occurredAt <= targetOccurredAt`, with deterministic tie-breaking for equal timestamps.
 - Reconciliation reads derive the balance from the selected basis snapshot plus transaction deltas after that basis.
 - Keep report aggregation behavior unchanged in this story.
-- Track synthetic adjustment transactions as a separate follow-up story rather than in this scope.
+- Track synthetic adjustment transactions as story `011` rather than in this scope.
 
 ## Testing
 - Snapshot create defaults to unreconciled status.

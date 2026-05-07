@@ -18,11 +18,9 @@ Provide an authenticated personal finance backend for manual transaction entry, 
 
 ## Stories
 
-### To Refine
-- [011 Reconciliation Adjustment Workflow](to-refine/011-reconciliation-adjustment-workflow.md) - Define a first-class adjustment workflow for reconciliation corrections separate from ordinary transactions.
-
 ### Ready
 - [009 Snapshot Reconciliation Status And Basis Selection](ready/009-snapshot-reconciliation-status-and-basis-selection.md) - Define persisted snapshot reconciliation status, trusted-basis selection rules, and reconciliation status mutation behavior.
+- [011 Reconciliation Adjustment Workflow](ready/011-reconciliation-adjustment-workflow.md) - Define first-class snapshot-scoped reconciliation adjustments with signed report impact and a marker in ledger/export views.
 
 ### Done
 - [001a Open And List Accounts](done/001a-open-and-list-accounts.md) - Define account creation, normalized per-user naming rules, and authenticated account listing behavior.

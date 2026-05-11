@@ -337,8 +337,8 @@ Draft shape:
 - when split-driven category filtering is active, aggregate totals sum only the matching split-row amounts
 - reconciliation adjustment rows contribute to report totals by their signed amount
 - reconciliation adjustment rows are treated as uncategorized for category matching
-- the special category token `uncategorized` matches transactions with no active category state
-- the special category token `uncategorized` also matches explicit `Uncategorized Expense` or `Uncategorized Income` assignments, including split rows
+- the special category value `uncategorized` matches transactions with no active category state
+- the special category value `uncategorized` also matches explicit `Uncategorized Expense` or `Uncategorized Income` assignments, including split rows
 - response fields are `total`, `count`, and `transactionIds`
 - `count` and `transactionIds` are row-based and include reconciliation adjustment rows
 - `transactionIds` follow the same deterministic order as ledger rows

@@ -123,6 +123,8 @@ The v1 transaction row shape used by create-success responses and `GET /api/v1/f
 - `amount`
 - `occurredAt`
 - `recordedAt`
+- `counterparty`
+- `description`
 - `transfer`
 - `category`
 - `splits`
@@ -136,6 +138,8 @@ Request fields:
 - `accountId`
 - `amount` (in cents)
 - optional `occurredAt`
+- optional `counterparty`
+- optional `description`
 
 Notes:
 - transaction create payloads do not embed note text in v1; note writes use dedicated note endpoints
@@ -147,6 +151,8 @@ Request fields:
 - `accountId`
 - `amount` (in cents)
 - optional `occurredAt`
+- optional `counterparty`
+- optional `description`
 
 Shared transaction write rules:
 - `amount` must be a positive integer
@@ -157,6 +163,11 @@ Shared transaction write rules:
 - repeated create requests with the same idempotency key and the same effective request must return the original success result without appending a duplicate event
 - repeated create requests with the same idempotency key and a different effective request return `409`
 - malformed request bodies, invalid timestamps, invalid amounts, and missing required fields return `400`
+- `counterparty` is trimmed, lowercased, and normalizes to `null` when empty after trim
+- `description` is trimmed and normalizes to `null` when empty after trim
+- `counterparty` max length is `120`
+- `description` max length is `1000`
+- non-string metadata values return `400`
 - unknown target accounts return `404`
 - new transactions cannot be created against closed accounts and return `409`
 - success responses return the created transaction row
@@ -168,9 +179,16 @@ Query parameters:
 - optional `accountId`
 - optional `from`
 - optional `to`
+- optional `direction=sent|received|all`
+- optional `categoryIn` (repeated)
+- optional `categoryNotIn` (repeated)
+- optional `amountMin`
+- optional `amountMax`
+- optional `search`
 
 Default behavior:
 - no pagination in v1
+- `direction` defaults to `all`
 - transactions are ordered by `occurredAt` descending with transaction `id` as deterministic tie-breaker
 - `from` filters on `occurredAt` inclusively
 - `to` filters on `occurredAt` exclusively
@@ -194,12 +212,24 @@ Read rules:
   - `snapshotId`
   - `snapshotOccurredAt`
   - optional `reason`
+- `counterparty` and `description` are always present in row responses
+- reconciliation adjustment rows set `counterparty` and `description` to `null`
 - adjustment rows are signed by the backend so they can flow through the existing sent/received report logic
 - each note object in `notes` contains:
   - `id`
   - `text`
   - `createdAt`
   - `updatedAt`
+- `direction=sent` returns only sent rows
+- `direction=received` returns only received rows
+- `direction=all` returns sent, received, and adjustment rows under existing ledger behavior
+- category filters evaluate active split categories when a split is active
+- category filters evaluate whole-transaction category only when no split is active
+- category include/exclude overlap returns `400`
+- amount filters compare against absolute row `amount` (integer cents)
+- `amountMin` and `amountMax` must be integer cents when provided
+- `amountMin > amountMax` returns `400`
+- `search` is case-insensitive and matches `counterparty` and `description`
 - unknown or foreign-scope `accountId` filters return an empty list
 - `from == to` returns an empty list
 - `from > to` returns `400`
@@ -303,6 +333,45 @@ Rules:
 - success returns the updated snapshot reconciliation state and the current adjustment summary
 
 ## Operations
+### `POST /api/v1/finance/transactions/{id}/metadata`
+Updates metadata on one transaction.
+
+Request fields:
+- optional `counterparty`
+- optional `description`
+
+Rules:
+- at least one metadata field must be provided
+- omitted metadata fields preserve their current values
+- provided metadata fields replace their current values
+- provided `counterparty` values are trimmed, lowercased, and normalize to `null` when empty after trim
+- provided `description` values are trimmed and normalize to `null` when empty after trim
+- `counterparty` max length is `120`
+- `description` max length is `1000`
+- non-string metadata values return `400`
+- unknown transactions return `404`
+- reconciliation adjustment rows are not mutable through this endpoint and return `404`
+- success returns the updated transaction row
+
+### `GET /api/v1/finance/counterparties/suggest`
+Returns ranked counterparty suggestions for data entry.
+
+Query parameters:
+- required `q`
+- optional `limit`
+- optional `direction=sent|received|all`
+- optional `accountId`
+
+Rules:
+- if `q` is missing or empty, return an empty `items` list
+- `limit` defaults to `8` and maxes at `20`
+- suggestion candidates are sourced from canonical stored counterparties (trimmed and lowercased at write time)
+- ranking precedence is: prefix match, then higher usage count, then more recent usage, then lexicographically smaller value
+- `suggestedCategory` returns the strongest category slug association for the counterparty, ordered by frequency then recency
+- reconciliation adjustment rows do not contribute suggestion candidates
+- invalid query parameter values return `400`
+- success returns `{ items: [...] }` where each item has `value`, `usageCount`, `lastUsedAt`, and `suggestedCategory`
+
 ### `POST /api/v1/finance/transactions/{id}/categorize`
 Assigns a whole-transaction category to a transaction.
 
@@ -399,16 +468,15 @@ Query parameters:
 - required `from`
 - required `to`
 - optional `direction=sent|received|all`
-- optional `accountIn`
-- optional `accountNotIn`
-- optional `categoryIn`
-- optional `categoryNotIn`
-
-Encoding rules:
-- `accountIn`, `accountNotIn`, `categoryIn`, and `categoryNotIn` use repeated query parameters in v1
-- repeated-parameter examples include `accountIn=a&accountIn=b` and `categoryNotIn=x`
+- optional `accountId`
+- optional `categoryIn` (repeated)
+- optional `categoryNotIn` (repeated)
+- optional `amountMin`
+- optional `amountMax`
+- optional `search`
 
 Filter rules:
+- report filters share the same interpretation as `GET /transactions` for overlapping dimensions
 - `direction=sent` aggregates only expense transactions
 - `direction=received` aggregates only income transactions
 - `direction=all` aggregates net balance delta with income positive and spending negative
@@ -418,7 +486,10 @@ Filter rules:
 - overlapping include and exclude values for the same filter dimension return `400`
 - category filters apply to active split categories when a split is active
 - whole-transaction category is ignored while a split is active
-- category filters may include the special token `uncategorized`
+- amount filters use absolute row `amount` semantics consistent with ledger filtering
+- `search` is case-insensitive over `counterparty` and `description`
+- invalid amount bounds return `400`
+- category filters may include the special value `uncategorized`
 - `uncategorized` matches transactions with no active category state
 - `uncategorized` also matches transactions explicitly assigned `Uncategorized Expense` or `Uncategorized Income`
 - `uncategorized` also matches split rows assigned to `Uncategorized Expense` or `Uncategorized Income`
@@ -435,6 +506,46 @@ Response rules:
 - `transactionIds` contains the ids of the transactions and adjustment rows included in the aggregate
 - transactions matched through multiple split rows still contribute once to `count` and appear once in `transactionIds`
 - `transactionIds` follow the same deterministic order as the ledger: `occurredAt` descending with transaction `id` as tie-breaker
+
+### `GET /report/analytics`
+Returns analytics-oriented aggregates for the filtered transaction set.
+
+Query parameters:
+- required `from`
+- required `to`
+- optional `direction=sent|received|all`
+- optional `accountId`
+- optional `categoryIn` (repeated)
+- optional `categoryNotIn` (repeated)
+- optional `amountMin`
+- optional `amountMax`
+- optional `search`
+
+Filter rules:
+- analytics filters share the same interpretation as `GET /transactions` for overlapping dimensions
+- `direction` uses the same sent/received/all filter behavior as ledger/report filtering
+- category filters use split-aware semantics consistent with report filtering
+- amount filters use absolute row `amount` semantics consistent with ledger filtering
+- `search` is case-insensitive over `counterparty` and `description`
+- invalid or missing required `from`/`to` return `400`
+- overlapping `categoryIn`/`categoryNotIn` values return `400`
+- invalid amount bounds return `400`
+
+Response fields:
+- `summary`
+- `categoryBreakdown`
+- `cashflowSeries`
+- `accountBalances`
+
+Response rules:
+- analytics responses are deterministic for identical effective query inputs
+- analytics responses do not include `transactionIds`
+- `summary` totals and counts align with equivalent `GET /report` filters
+- `cashflowSeries` bucket granularity is selected automatically by effective `[from, to)` span:
+  - span `<= 62 days`: day buckets
+  - span `<= 366 days`: week buckets
+  - span `> 366 days`: month buckets
+- `cashflowSeries` buckets are contiguous, non-overlapping, and cover the full requested `[from, to)` window
 
 ## Export
 ### `GET /export`

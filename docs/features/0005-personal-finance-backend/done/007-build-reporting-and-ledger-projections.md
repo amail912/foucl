@@ -11,8 +11,8 @@ As a user, I want ledger and aggregate report views, so I can inspect history an
 - When split-driven category filtering is active, aggregate totals sum only the matching split-row amounts.
 - Transactions matched through one or more split rows still contribute once to `count` and once to `transactionIds`.
 - `direction=all` returns net balance delta with income positive and spending negative.
-- Category filters may target explicit category ids or the special `uncategorized` token.
-- The `uncategorized` token matches transactions with no active category state and transactions explicitly assigned `Uncategorized Expense` or `Uncategorized Income`, including split rows.
+- Category filters may target explicit category ids or the special `uncategorized` value.
+- The `uncategorized` value matches transactions with no active category state and transactions explicitly assigned `Uncategorized Expense` or `Uncategorized Income`, including split rows.
 
 ## Data And Contracts
 - Refines `GET /api/v1/finance/transactions` and defines `GET /api/v1/finance/report`.

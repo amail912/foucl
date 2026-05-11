@@ -830,6 +830,8 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
           { financeTransactionCreateAccountId
           , financeTransactionCreateAmount
           , financeTransactionCreateOccurredAt
+          , financeTransactionCreateCounterparty
+          , financeTransactionCreateDescription
           }
             | financeTransactionCreateAmount <= 0 ->
                 badRequest "amount must be a positive integer"
@@ -858,11 +860,14 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
                               , financeTransactionWriteAmount = financeTransactionCreateAmount
                               , financeTransactionWriteOccurredAt = occurredAt
                               , financeTransactionWriteOccurredAtSupplied = occurredAtSupplied
+                              , financeTransactionWriteCounterparty = financeTransactionCreateCounterparty
+                              , financeTransactionWriteDescription = financeTransactionCreateDescription
                               }
                         createResult <- liftIO $ runExceptT (repoCreateFinanceTransaction financeTransactionRepo principalUserId writeRequest)
                         case createResult of
                           Left NotFound -> notFound (jsonMessage "Account not found")
                           Left AlreadyExists -> setResponseCode 409 >> pure (jsonMessage "Idempotency key already used for a different request")
+                          Left WriteFailure -> badRequest "counterparty/description validation failed"
                           Left _ -> internalServerError emptyResponse
                           Right transaction -> ok (jsonResponse transaction)
 

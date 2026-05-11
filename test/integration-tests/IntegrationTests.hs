@@ -750,17 +750,19 @@ runIntegrationTests = do
         account <- createFinanceAccount cookie "Daily Checking"
         accountId <- requireObjectStringField "id" account
 
-        sentResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "sent-key-1" (object ["accountId" .= accountId, "amount" .= (2500 :: Int), "occurredAt" .= ("2026-03-01T09:00:00Z" :: String)])
+        sentResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "sent-key-1" (object ["accountId" .= accountId, "amount" .= (2500 :: Int), "occurredAt" .= ("2026-03-01T09:00:00Z" :: String), "counterparty" .= ("  ACME Store  " :: String), "description" .= ("  Grocery run  " :: String)])
         assertStatusCode "Sent transaction create should succeed" 200 sentResp
         assertFinanceTransactionDirectionAndAmount "sent" 2500 (getResponseBody sentResp)
+        assertFinanceTransactionMetadata (Just "acme store") (Just "Grocery run") (getResponseBody sentResp)
 
-        sentRetryResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "sent-key-1" (object ["accountId" .= accountId, "amount" .= (2500 :: Int), "occurredAt" .= ("2026-03-01T09:00:00Z" :: String)])
+        sentRetryResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "sent-key-1" (object ["accountId" .= accountId, "amount" .= (2500 :: Int), "occurredAt" .= ("2026-03-01T09:00:00Z" :: String), "counterparty" .= ("acme store" :: String), "description" .= ("Grocery run" :: String)])
         assertStatusCode "Idempotent sent transaction retry should succeed" 200 sentRetryResp
         assertEqual "Expected idempotent sent transaction retry to return the original row" (getResponseBody sentResp) (getResponseBody sentRetryResp)
 
-        receivedResp <- createFinanceTransactionExpectValue cookie financeTransactionsReceivedEndpoint "received-key-1" (object ["accountId" .= accountId, "amount" .= (4200 :: Int)])
+        receivedResp <- createFinanceTransactionExpectValue cookie financeTransactionsReceivedEndpoint "received-key-1" (object ["accountId" .= accountId, "amount" .= (4200 :: Int), "counterparty" .= ("" :: String), "description" .= ("   " :: String)])
         assertStatusCode "Received transaction create should succeed" 200 receivedResp
         assertFinanceTransactionDirectionAndAmount "received" 4200 (getResponseBody receivedResp)
+        assertFinanceTransactionMetadata Nothing Nothing (getResponseBody receivedResp)
 
         missingKeyResp <- createFinanceTransactionWithoutIdempotencyHeader cookie financeTransactionsSentEndpoint (object ["accountId" .= accountId, "amount" .= (120 :: Int)])
         assertStatusCode "Missing idempotency key should return 400" 400 missingKeyResp
@@ -782,9 +784,21 @@ runIntegrationTests = do
         assertStatusCode "Unknown transaction account should return 404" 404 unknownAccountResp
         assertMessageResponse "Account not found" unknownAccountResp
 
-        conflictingIdempotencyResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "sent-key-1" (object ["accountId" .= accountId, "amount" .= (2600 :: Int), "occurredAt" .= ("2026-03-01T09:00:00Z" :: String)])
+        conflictingIdempotencyResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "sent-key-1" (object ["accountId" .= accountId, "amount" .= (2600 :: Int), "occurredAt" .= ("2026-03-01T09:00:00Z" :: String), "counterparty" .= ("acme store" :: String), "description" .= ("Grocery run" :: String)])
         assertStatusCode "Reusing an idempotency key with a different request should return 409" 409 conflictingIdempotencyResp
         assertMessageResponse "Idempotency key already used for a different request" conflictingIdempotencyResp
+
+        conflictingMetadataIdempotencyResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "sent-key-1" (object ["accountId" .= accountId, "amount" .= (2500 :: Int), "occurredAt" .= ("2026-03-01T09:00:00Z" :: String), "counterparty" .= ("different" :: String), "description" .= ("Grocery run" :: String)])
+        assertStatusCode "Reusing an idempotency key with a different normalized metadata request should return 409" 409 conflictingMetadataIdempotencyResp
+        assertMessageResponse "Idempotency key already used for a different request" conflictingMetadataIdempotencyResp
+
+        overlongCounterpartyResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "sent-key-overlong-counterparty" (object ["accountId" .= accountId, "amount" .= (300 :: Int), "counterparty" .= (replicate 121 'a')])
+        assertStatusCode "Overlong counterparty should return 400" 400 overlongCounterpartyResp
+        assertMessageResponse "counterparty/description validation failed" overlongCounterpartyResp
+
+        overlongDescriptionResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "sent-key-overlong-description" (object ["accountId" .= accountId, "amount" .= (300 :: Int), "description" .= (replicate 1001 'd')])
+        assertStatusCode "Overlong description should return 400" 400 overlongDescriptionResp
+        assertMessageResponse "counterparty/description validation failed" overlongDescriptionResp
 
         _ <- closeFinanceAccount cookie accountId
         closedSentResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "sent-key-closed" (object ["accountId" .= accountId, "amount" .= (200 :: Int)])
@@ -794,6 +808,11 @@ runIntegrationTests = do
         closedReceivedResp <- createFinanceTransactionExpectValue cookie financeTransactionsReceivedEndpoint "received-key-closed" (object ["accountId" .= accountId, "amount" .= (200 :: Int)])
         assertStatusCode "Closed account received transaction create should return 409" 409 closedReceivedResp
         assertMessageResponse "Closed accounts cannot accept new transactions" closedReceivedResp
+
+        listedTransactions <- getFinanceTransactions cookie []
+        case listedTransactions of
+          latestRow : _ -> assertFinanceTransactionMetadata Nothing Nothing latestRow
+          _ -> assertFailure "Expected at least one listed transaction row for metadata assertions"
 
       it "should list finance transactions with deterministic ordering and half-open filters" $ do
         uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
@@ -2743,6 +2762,18 @@ assertFinanceTransactionDirectionAndAmount expectedDirection expectedAmount resp
       case parseMaybe (.: "id") value of
         Just actualId -> assertBool "Expected finance transaction id to be non-empty" (not (null (actualId :: String)))
         Nothing -> assertFailure "Expected finance transaction id"
+    _ -> assertFailure "Expected finance transaction response object"
+
+assertFinanceTransactionMetadata :: Maybe String -> Maybe String -> Value -> Assertion
+assertFinanceTransactionMetadata expectedCounterparty expectedDescription responseBody =
+  case responseBody of
+    Object value -> do
+      case parseMaybe (.: "counterparty") value of
+        Just actualCounterparty -> assertEqual "Expected finance transaction counterparty" expectedCounterparty (actualCounterparty :: Maybe String)
+        Nothing -> assertFailure "Expected finance transaction counterparty"
+      case parseMaybe (.: "description") value of
+        Just actualDescription -> assertEqual "Expected finance transaction description" expectedDescription (actualDescription :: Maybe String)
+        Nothing -> assertFailure "Expected finance transaction description"
     _ -> assertFailure "Expected finance transaction response object"
 
 assertFinanceReportValues :: Int -> Int -> [String] -> Value -> Assertion

@@ -36,7 +36,9 @@ CREATE TABLE finance_transactions (
   direction TEXT NOT NULL CHECK (direction IN ('sent', 'received')),
   amount BIGINT NOT NULL CHECK (amount > 0),
   occurred_at TIMESTAMPTZ NOT NULL,
-  recorded_at TIMESTAMPTZ NOT NULL
+  recorded_at TIMESTAMPTZ NOT NULL,
+  counterparty TEXT NULL,
+  description TEXT NULL
 );
 
 CREATE TABLE finance_transaction_idempotency (
@@ -48,6 +50,8 @@ CREATE TABLE finance_transaction_idempotency (
   occurred_at_supplied BOOLEAN NOT NULL,
   occurred_at TIMESTAMPTZ NOT NULL,
   transaction_id TEXT NOT NULL,
+  counterparty TEXT NULL,
+  description TEXT NULL,
   PRIMARY KEY (user_id, idempotency_key)
 );
 

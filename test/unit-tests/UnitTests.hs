@@ -1948,7 +1948,11 @@ financeMigrationUpCreatesSchema =
           normalizedNameType <- fetchColumnType ctx "finance_accounts" "normalized_name"
           statusType <- fetchColumnType ctx "finance_accounts" "status"
           transactionDirectionType <- fetchColumnType ctx "finance_transactions" "direction"
+          transactionCounterpartyType <- fetchColumnType ctx "finance_transactions" "counterparty"
+          transactionDescriptionType <- fetchColumnType ctx "finance_transactions" "description"
           idempotencyFlagType <- fetchColumnType ctx "finance_transaction_idempotency" "occurred_at_supplied"
+          idempotencyCounterpartyType <- fetchColumnType ctx "finance_transaction_idempotency" "counterparty"
+          idempotencyDescriptionType <- fetchColumnType ctx "finance_transaction_idempotency" "description"
           categoryOwnerType <- fetchColumnType ctx "finance_categories" "owner"
           categorySelectableType <- fetchColumnType ctx "finance_categories" "selectable"
           splitAmountType <- fetchColumnType ctx "finance_transaction_splits" "amount"
@@ -1965,7 +1969,11 @@ financeMigrationUpCreatesSchema =
           assertEqual "Expected finance_accounts.normalized_name to be text" (Just "text") normalizedNameType
           assertEqual "Expected finance_accounts.status to be text" (Just "text") statusType
           assertEqual "Expected finance_transactions.direction to be text" (Just "text") transactionDirectionType
+          assertEqual "Expected finance_transactions.counterparty to be text" (Just "text") transactionCounterpartyType
+          assertEqual "Expected finance_transactions.description to be text" (Just "text") transactionDescriptionType
           assertEqual "Expected finance_transaction_idempotency.occurred_at_supplied to be boolean" (Just "boolean") idempotencyFlagType
+          assertEqual "Expected finance_transaction_idempotency.counterparty to be text" (Just "text") idempotencyCounterpartyType
+          assertEqual "Expected finance_transaction_idempotency.description to be text" (Just "text") idempotencyDescriptionType
           assertEqual "Expected finance_categories.owner to be text" (Just "text") categoryOwnerType
           assertEqual "Expected finance_categories.selectable to be boolean" (Just "boolean") categorySelectableType
           assertEqual "Expected finance_transaction_splits.amount to be bigint" (Just "bigint") splitAmountType
@@ -3171,6 +3179,8 @@ pgFinanceAccountRepoSnapshotsAndReconciliation =
                 , financeTransactionWriteAmount = 5000
                 , financeTransactionWriteOccurredAt = read "2026-04-01 10:00:00 UTC"
                 , financeTransactionWriteOccurredAtSupplied = True
+                , financeTransactionWriteCounterparty = Nothing
+                , financeTransactionWriteDescription = Nothing
                 }
               _ <- runExceptT $ repoCreateFinanceTransaction transactionRepo userId FinanceTransactionWriteRequest
                 { financeTransactionWriteIdempotencyKey = "snap-key-2"
@@ -3179,6 +3189,8 @@ pgFinanceAccountRepoSnapshotsAndReconciliation =
                 , financeTransactionWriteAmount = 1200
                 , financeTransactionWriteOccurredAt = read "2026-04-02 10:00:00 UTC"
                 , financeTransactionWriteOccurredAtSupplied = True
+                , financeTransactionWriteCounterparty = Nothing
+                , financeTransactionWriteDescription = Nothing
                 }
               createSnapshot <- runExceptT $ repoCreateFinanceAccountSnapshot accountRepo userId (financeAccountId createdAccount) 3500 (read "2026-04-02 10:00:00 UTC")
               duplicateSnapshot <- runExceptT $ repoCreateFinanceAccountSnapshot accountRepo userId (financeAccountId createdAccount) 3550 (read "2026-04-02 10:00:00 UTC")
@@ -3212,6 +3224,8 @@ pgFinanceAccountRepoSnapshotsAndReconciliation =
                         , financeTransactionWriteAmount = 500
                         , financeTransactionWriteOccurredAt = read "2026-04-04 10:00:00 UTC"
                         , financeTransactionWriteOccurredAtSupplied = True
+                        , financeTransactionWriteCounterparty = Nothing
+                        , financeTransactionWriteDescription = Nothing
                         }
                       listed <- runExceptT $ repoListFinanceAccountSnapshots accountRepo userId (financeAccountId createdAccount)
                       latestRecon <- runExceptT $ repoGetFinanceAccountReconciliationLatest accountRepo userId (financeAccountId createdAccount)
@@ -3448,6 +3462,8 @@ pgFinanceTransactionRepoCreateAndIdempotency =
                 , financeTransactionWriteAmount = 2500
                 , financeTransactionWriteOccurredAt = read "2026-01-02 10:00:00 UTC"
                 , financeTransactionWriteOccurredAtSupplied = True
+                , financeTransactionWriteCounterparty = Nothing
+                , financeTransactionWriteDescription = Nothing
                 }
               sentRetried <- runExceptT $ repoCreateFinanceTransaction transactionRepo userId FinanceTransactionWriteRequest
                 { financeTransactionWriteIdempotencyKey = "idem-sent"
@@ -3456,6 +3472,8 @@ pgFinanceTransactionRepoCreateAndIdempotency =
                 , financeTransactionWriteAmount = 2500
                 , financeTransactionWriteOccurredAt = read "2026-01-02 10:00:00 UTC"
                 , financeTransactionWriteOccurredAtSupplied = True
+                , financeTransactionWriteCounterparty = Nothing
+                , financeTransactionWriteDescription = Nothing
                 }
               receivedCreated <- runExceptT $ repoCreateFinanceTransaction transactionRepo userId FinanceTransactionWriteRequest
                 { financeTransactionWriteIdempotencyKey = "idem-received"
@@ -3464,6 +3482,8 @@ pgFinanceTransactionRepoCreateAndIdempotency =
                 , financeTransactionWriteAmount = 3200
                 , financeTransactionWriteOccurredAt = read "2026-01-03 10:00:00 UTC"
                 , financeTransactionWriteOccurredAtSupplied = True
+                , financeTransactionWriteCounterparty = Nothing
+                , financeTransactionWriteDescription = Nothing
                 }
               case (sentCreated, sentRetried, receivedCreated) of
                 (Right firstSent, Right retriedSent, Right receivedTxn) -> do
@@ -3495,6 +3515,8 @@ pgFinanceTransactionRepoRejectsIdempotencyConflicts =
                 , financeTransactionWriteAmount = 4200
                 , financeTransactionWriteOccurredAt = read "2026-02-01 09:00:00 UTC"
                 , financeTransactionWriteOccurredAtSupplied = True
+                , financeTransactionWriteCounterparty = Nothing
+                , financeTransactionWriteDescription = Nothing
                 }
               conflictingRetry <- runExceptT $ repoCreateFinanceTransaction transactionRepo userId FinanceTransactionWriteRequest
                 { financeTransactionWriteIdempotencyKey = "idem-conflict"
@@ -3503,6 +3525,8 @@ pgFinanceTransactionRepoRejectsIdempotencyConflicts =
                 , financeTransactionWriteAmount = 4300
                 , financeTransactionWriteOccurredAt = read "2026-02-01 09:00:00 UTC"
                 , financeTransactionWriteOccurredAtSupplied = True
+                , financeTransactionWriteCounterparty = Nothing
+                , financeTransactionWriteDescription = Nothing
                 }
               case (firstCreate, conflictingRetry) of
                 (Right _, Left AlreadyExists) -> assertBool "Expected conflicting idempotent retry to return AlreadyExists" True
@@ -3531,6 +3555,8 @@ pgFinanceTransactionRepoListWithFilters =
                 , financeTransactionWriteAmount = 101
                 , financeTransactionWriteOccurredAt = read "2026-04-01 10:00:00 UTC"
                 , financeTransactionWriteOccurredAtSupplied = True
+                , financeTransactionWriteCounterparty = Nothing
+                , financeTransactionWriteDescription = Nothing
                 }
               _ <- runExceptT $ repoCreateFinanceTransaction transactionRepo userId FinanceTransactionWriteRequest
                 { financeTransactionWriteIdempotencyKey = "list-key-2"
@@ -3539,6 +3565,8 @@ pgFinanceTransactionRepoListWithFilters =
                 , financeTransactionWriteAmount = 202
                 , financeTransactionWriteOccurredAt = read "2026-04-03 10:00:00 UTC"
                 , financeTransactionWriteOccurredAtSupplied = True
+                , financeTransactionWriteCounterparty = Nothing
+                , financeTransactionWriteDescription = Nothing
                 }
               _ <- runExceptT $ repoCreateFinanceTransaction transactionRepo userId FinanceTransactionWriteRequest
                 { financeTransactionWriteIdempotencyKey = "list-key-3"
@@ -3547,6 +3575,8 @@ pgFinanceTransactionRepoListWithFilters =
                 , financeTransactionWriteAmount = 303
                 , financeTransactionWriteOccurredAt = read "2026-04-02 10:00:00 UTC"
                 , financeTransactionWriteOccurredAtSupplied = True
+                , financeTransactionWriteCounterparty = Nothing
+                , financeTransactionWriteDescription = Nothing
                 }
               firstSameTime <- runExceptT $ repoCreateFinanceTransaction transactionRepo userId FinanceTransactionWriteRequest
                 { financeTransactionWriteIdempotencyKey = "list-key-4"
@@ -3555,6 +3585,8 @@ pgFinanceTransactionRepoListWithFilters =
                 , financeTransactionWriteAmount = 404
                 , financeTransactionWriteOccurredAt = read "2026-04-02 10:00:00 UTC"
                 , financeTransactionWriteOccurredAtSupplied = True
+                , financeTransactionWriteCounterparty = Nothing
+                , financeTransactionWriteDescription = Nothing
                 }
               secondSameTime <- runExceptT $ repoCreateFinanceTransaction transactionRepo userId FinanceTransactionWriteRequest
                 { financeTransactionWriteIdempotencyKey = "list-key-5"
@@ -3563,6 +3595,8 @@ pgFinanceTransactionRepoListWithFilters =
                 , financeTransactionWriteAmount = 505
                 , financeTransactionWriteOccurredAt = read "2026-04-02 10:00:00 UTC"
                 , financeTransactionWriteOccurredAtSupplied = True
+                , financeTransactionWriteCounterparty = Nothing
+                , financeTransactionWriteDescription = Nothing
                 }
               allListed <- runExceptT $ repoListFinanceTransactions transactionRepo userId Nothing Nothing Nothing
               primaryListed <- runExceptT $ repoListFinanceTransactions transactionRepo userId (Just (financeAccountId primary)) Nothing Nothing
@@ -3605,6 +3639,8 @@ pgFinanceTransactionRepoTransferLinking =
                 , financeTransactionWriteAmount = 5000
                 , financeTransactionWriteOccurredAt = read "2026-04-10 10:00:00 UTC"
                 , financeTransactionWriteOccurredAtSupplied = True
+                , financeTransactionWriteCounterparty = Nothing
+                , financeTransactionWriteDescription = Nothing
                 }
               receivedCreated <- runExceptT $ repoCreateFinanceTransaction transactionRepo userId FinanceTransactionWriteRequest
                 { financeTransactionWriteIdempotencyKey = "transfer-link-received"
@@ -3613,6 +3649,8 @@ pgFinanceTransactionRepoTransferLinking =
                 , financeTransactionWriteAmount = 5000
                 , financeTransactionWriteOccurredAt = read "2026-04-10 10:01:00 UTC"
                 , financeTransactionWriteOccurredAtSupplied = True
+                , financeTransactionWriteCounterparty = Nothing
+                , financeTransactionWriteDescription = Nothing
                 }
               case (sentCreated, receivedCreated) of
                 (Right sentTxn, Right receivedTxn) -> do
@@ -3662,6 +3700,8 @@ pgFinanceTransactionRepoNoteLifecycle =
                 , financeTransactionWriteAmount = 111
                 , financeTransactionWriteOccurredAt = read "2026-04-20 10:00:00 UTC"
                 , financeTransactionWriteOccurredAtSupplied = True
+                , financeTransactionWriteCounterparty = Nothing
+                , financeTransactionWriteDescription = Nothing
                 }
               case createdTxn of
                 Left err -> assertFailure ("Expected finance transaction create success, got " ++ show err)

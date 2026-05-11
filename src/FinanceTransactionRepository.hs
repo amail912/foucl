@@ -28,7 +28,7 @@ module FinanceTransactionRepository
 
 import Control.Monad.Except (ExceptT, throwError)
 import Control.Monad.IO.Class (liftIO)
-import Data.Char (isSpace)
+import Data.Char (isSpace, toLower)
 import Data.Aeson (FromJSON(parseJSON), ToJSON(toJSON), Value, object, withObject, (.:), (.:?), (.=))
 import Data.Int (Int64)
 import Data.List (dropWhileEnd, sortOn)
@@ -70,6 +70,8 @@ data FinanceTransactionCreateRequest = FinanceTransactionCreateRequest
   { financeTransactionCreateAccountId :: !String
   , financeTransactionCreateAmount :: !Int
   , financeTransactionCreateOccurredAt :: !(Maybe String)
+  , financeTransactionCreateCounterparty :: !(Maybe String)
+  , financeTransactionCreateDescription :: !(Maybe String)
   }
 
 data FinanceTransactionNoteCreateRequest = FinanceTransactionNoteCreateRequest
@@ -106,6 +108,8 @@ data FinanceTransactionWriteRequest = FinanceTransactionWriteRequest
   , financeTransactionWriteAmount :: !Int
   , financeTransactionWriteOccurredAt :: !UTCTime
   , financeTransactionWriteOccurredAtSupplied :: !Bool
+  , financeTransactionWriteCounterparty :: !(Maybe String)
+  , financeTransactionWriteDescription :: !(Maybe String)
   }
 
 data FinanceTransactionDirection
@@ -147,6 +151,8 @@ data FinanceTransaction = FinanceTransaction
   , financeTransactionAmount :: !Int
   , financeTransactionOccurredAt :: !UTCTime
   , financeTransactionRecordedAt :: !UTCTime
+  , financeTransactionCounterparty :: !(Maybe String)
+  , financeTransactionDescription :: !(Maybe String)
   , financeTransactionTransfer :: !(Maybe FinanceTransactionTransfer)
   , financeTransactionCategory :: !(Maybe String)
   , financeTransactionSplits :: ![FinanceTransactionSplitRow]
@@ -197,6 +203,8 @@ instance FromJSON FinanceTransactionCreateRequest where
       <$> value .: "accountId"
       <*> value .: "amount"
       <*> value .:? "occurredAt"
+      <*> value .:? "counterparty"
+      <*> value .:? "description"
 
 instance FromJSON FinanceTransactionNoteCreateRequest where
   parseJSON = withObject "FinanceTransactionNoteCreateRequest" $ \value ->
@@ -279,6 +287,8 @@ instance ToJSON FinanceTransaction where
     , financeTransactionAmount
     , financeTransactionOccurredAt
     , financeTransactionRecordedAt
+    , financeTransactionCounterparty
+    , financeTransactionDescription
     , financeTransactionTransfer
     , financeTransactionCategory
     , financeTransactionSplits
@@ -292,6 +302,8 @@ instance ToJSON FinanceTransaction where
         , "amount" .= financeTransactionAmount
         , "occurredAt" .= financeTransactionOccurredAt
         , "recordedAt" .= financeTransactionRecordedAt
+        , "counterparty" .= financeTransactionCounterparty
+        , "description" .= financeTransactionDescription
         , "transfer" .= financeTransactionTransfer
         , "category" .= financeTransactionCategory
         , "splits" .= financeTransactionSplits
@@ -380,13 +392,13 @@ financeTransactionPostgresHealthChecks conn = do
     (\err -> "Finance schema check failed for finance_events: " ++ show err)
   tryExcept
     (query_ conn
-      "SELECT user_id, transaction_id, account_id, direction, amount, occurred_at, recorded_at FROM finance_transactions LIMIT 0"
-      :: IO [(String, String, String, String, Int64, UTCTime, UTCTime)])
+      "SELECT user_id, transaction_id, account_id, direction, amount, occurred_at, recorded_at, counterparty, description FROM finance_transactions LIMIT 0"
+      :: IO [(String, String, String, String, Int64, UTCTime, UTCTime, Maybe String, Maybe String)])
     (\err -> "Finance schema check failed for finance_transactions: " ++ show err)
   tryExcept
     (query_ conn
-      "SELECT user_id, idempotency_key, direction, account_id, amount, occurred_at_supplied, occurred_at, transaction_id FROM finance_transaction_idempotency LIMIT 0"
-      :: IO [(String, String, String, String, Int64, Bool, UTCTime, String)])
+      "SELECT user_id, idempotency_key, direction, account_id, amount, occurred_at_supplied, occurred_at, transaction_id, counterparty, description FROM finance_transaction_idempotency LIMIT 0"
+      :: IO [(String, String, String, String, Int64, Bool, UTCTime, String, Maybe String, Maybe String)])
     (\err -> "Finance schema check failed for finance_transaction_idempotency: " ++ show err)
   tryExcept
     (query_ conn
@@ -423,16 +435,20 @@ pgCreateFinanceTransaction pool userId request@FinanceTransactionWriteRequest
   , financeTransactionWriteAmount
   , financeTransactionWriteOccurredAt
   , financeTransactionWriteOccurredAtSupplied
+  , financeTransactionWriteCounterparty
+  , financeTransactionWriteDescription
   } =
     withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+      normalizedCounterparty <- normalizeCounterparty financeTransactionWriteCounterparty
+      normalizedDescription <- normalizeDescription financeTransactionWriteDescription
       existingRows <- tryExcept
         (query conn
-          "SELECT direction, account_id, amount, occurred_at_supplied, occurred_at, transaction_id FROM finance_transaction_idempotency WHERE user_id = ? AND idempotency_key = ?"
+          "SELECT direction, account_id, amount, occurred_at_supplied, occurred_at, transaction_id, counterparty, description FROM finance_transaction_idempotency WHERE user_id = ? AND idempotency_key = ?"
           (userId, financeTransactionWriteIdempotencyKey))
         mapSqlReadException
       case existingRows of
-        [(storedDirection, storedAccountId, storedAmount, storedOccurredAtSupplied, storedOccurredAt, transactionId)] ->
-          if idempotencyMatches request storedDirection storedAccountId storedAmount storedOccurredAtSupplied storedOccurredAt
+        [(storedDirection, storedAccountId, storedAmount, storedOccurredAtSupplied, storedOccurredAt, transactionId, storedCounterparty, storedDescription)] ->
+          if idempotencyMatches request normalizedCounterparty normalizedDescription storedDirection storedAccountId storedAmount storedOccurredAtSupplied storedOccurredAt storedCounterparty storedDescription
             then pgLoadFinanceTransactionByIdInConn conn userId transactionId
             else throwError AlreadyExists
         [] -> do
@@ -457,13 +473,15 @@ pgCreateFinanceTransaction pool userId request@FinanceTransactionWriteRequest
                       , "direction" .= financeTransactionDirectionText financeTransactionWriteDirection
                       , "amount" .= financeTransactionWriteAmount
                       , "occurredAtSupplied" .= financeTransactionWriteOccurredAtSupplied
+                      , "counterparty" .= normalizedCounterparty
+                      , "description" .= normalizedDescription
                       ]
                 }
               _ <- execute conn
-                "INSERT INTO finance_transactions (user_id, transaction_id, account_id, direction, amount, occurred_at, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
-                (userId, transactionId, financeTransactionWriteAccountId, financeTransactionDirectionText financeTransactionWriteDirection, financeTransactionWriteAmount, financeTransactionWriteOccurredAt, recordedAt)
+                "INSERT INTO finance_transactions (user_id, transaction_id, account_id, direction, amount, occurred_at, recorded_at, counterparty, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                (userId, transactionId, financeTransactionWriteAccountId, financeTransactionDirectionText financeTransactionWriteDirection, financeTransactionWriteAmount, financeTransactionWriteOccurredAt, recordedAt, normalizedCounterparty, normalizedDescription)
               _ <- execute conn
-                "INSERT INTO finance_transaction_idempotency (user_id, idempotency_key, direction, account_id, amount, occurred_at_supplied, occurred_at, transaction_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                "INSERT INTO finance_transaction_idempotency (user_id, idempotency_key, direction, account_id, amount, occurred_at_supplied, occurred_at, transaction_id, counterparty, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 ( userId
                 , financeTransactionWriteIdempotencyKey
                 , financeTransactionDirectionText financeTransactionWriteDirection
@@ -472,6 +490,8 @@ pgCreateFinanceTransaction pool userId request@FinanceTransactionWriteRequest
                 , financeTransactionWriteOccurredAtSupplied
                 , financeTransactionWriteOccurredAt
                 , transactionId
+                , normalizedCounterparty
+                , normalizedDescription
                 )
               pure ())
             mapSqlWriteException
@@ -524,9 +544,9 @@ pgLoadFinanceTransactionByIdInConn :: Connection -> String -> String -> ExceptT 
 pgLoadFinanceTransactionByIdInConn conn userId transactionId = do
   rows <- tryExcept
     (query conn
-      "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at FROM finance_transactions WHERE user_id = ? AND transaction_id = ?"
+      "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at, counterparty, description FROM finance_transactions WHERE user_id = ? AND transaction_id = ?"
       (userId, transactionId)
-      :: IO [(String, Text, String, Int64, UTCTime, UTCTime)])
+      :: IO [(String, Text, String, Int64, UTCTime, UTCTime, Maybe String, Maybe String)])
     mapSqlReadException
   case rows of
     [] -> throwError NotFound
@@ -550,35 +570,35 @@ pgListFinanceTransactions pool userId mAccountId mFrom mTo =
       case (mAccountId, mFrom, mTo) of
         (Nothing, Nothing, Nothing) ->
           query conn
-            "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at FROM finance_transactions WHERE user_id = ? ORDER BY occurred_at DESC, transaction_id ASC"
+            "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at, counterparty, description FROM finance_transactions WHERE user_id = ? ORDER BY occurred_at DESC, transaction_id ASC"
             (Only userId)
         (Just accountId, Nothing, Nothing) ->
           query conn
-            "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at FROM finance_transactions WHERE user_id = ? AND account_id = ? ORDER BY occurred_at DESC, transaction_id ASC"
+            "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at, counterparty, description FROM finance_transactions WHERE user_id = ? AND account_id = ? ORDER BY occurred_at DESC, transaction_id ASC"
             (userId, accountId)
         (Nothing, Just fromTs, Nothing) ->
           query conn
-            "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at FROM finance_transactions WHERE user_id = ? AND occurred_at >= ? ORDER BY occurred_at DESC, transaction_id ASC"
+            "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at, counterparty, description FROM finance_transactions WHERE user_id = ? AND occurred_at >= ? ORDER BY occurred_at DESC, transaction_id ASC"
             (userId, fromTs)
         (Nothing, Nothing, Just toTs) ->
           query conn
-            "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at FROM finance_transactions WHERE user_id = ? AND occurred_at < ? ORDER BY occurred_at DESC, transaction_id ASC"
+            "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at, counterparty, description FROM finance_transactions WHERE user_id = ? AND occurred_at < ? ORDER BY occurred_at DESC, transaction_id ASC"
             (userId, toTs)
         (Just accountId, Just fromTs, Nothing) ->
           query conn
-            "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at FROM finance_transactions WHERE user_id = ? AND account_id = ? AND occurred_at >= ? ORDER BY occurred_at DESC, transaction_id ASC"
+            "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at, counterparty, description FROM finance_transactions WHERE user_id = ? AND account_id = ? AND occurred_at >= ? ORDER BY occurred_at DESC, transaction_id ASC"
             (userId, accountId, fromTs)
         (Just accountId, Nothing, Just toTs) ->
           query conn
-            "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at FROM finance_transactions WHERE user_id = ? AND account_id = ? AND occurred_at < ? ORDER BY occurred_at DESC, transaction_id ASC"
+            "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at, counterparty, description FROM finance_transactions WHERE user_id = ? AND account_id = ? AND occurred_at < ? ORDER BY occurred_at DESC, transaction_id ASC"
             (userId, accountId, toTs)
         (Nothing, Just fromTs, Just toTs) ->
           query conn
-            "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at FROM finance_transactions WHERE user_id = ? AND occurred_at >= ? AND occurred_at < ? ORDER BY occurred_at DESC, transaction_id ASC"
+            "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at, counterparty, description FROM finance_transactions WHERE user_id = ? AND occurred_at >= ? AND occurred_at < ? ORDER BY occurred_at DESC, transaction_id ASC"
             (userId, fromTs, toTs)
         (Just accountId, Just fromTs, Just toTs) ->
           query conn
-            "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at FROM finance_transactions WHERE user_id = ? AND account_id = ? AND occurred_at >= ? AND occurred_at < ? ORDER BY occurred_at DESC, transaction_id ASC"
+            "SELECT transaction_id, direction, account_id, amount, occurred_at, recorded_at, counterparty, description FROM finance_transactions WHERE user_id = ? AND account_id = ? AND occurred_at >= ? AND occurred_at < ? ORDER BY occurred_at DESC, transaction_id ASC"
             (userId, accountId, fromTs, toTs)
     runAdjustmentListQuery conn =
       case (mAccountId, mFrom, mTo) of
@@ -906,6 +926,24 @@ normalizeNoteText text =
         then Nothing
         else Just trimmed
 
+normalizeCounterparty :: Maybe String -> ExceptT RepositoryError IO (Maybe String)
+normalizeCounterparty mCounterparty =
+  case fmap (map toLower . trimWhitespace) mCounterparty of
+    Nothing -> pure Nothing
+    Just value
+      | null value -> pure Nothing
+      | length value > 120 -> throwError WriteFailure
+      | otherwise -> pure (Just value)
+
+normalizeDescription :: Maybe String -> ExceptT RepositoryError IO (Maybe String)
+normalizeDescription mDescription =
+  case fmap trimWhitespace mDescription of
+    Nothing -> pure Nothing
+    Just value
+      | null value -> pure Nothing
+      | length value > 1000 -> throwError WriteFailure
+      | otherwise -> pure (Just value)
+
 trimWhitespace :: String -> String
 trimWhitespace = dropWhile isSpace . dropWhileEnd isSpace
 
@@ -1229,8 +1267,8 @@ hydrateNotesState conn userId transaction = do
         ]
   pure transaction { financeTransactionNotes = notes }
 
-decodeBaseTransaction :: (String, Text, String, Int64, UTCTime, UTCTime) -> ExceptT RepositoryError IO FinanceTransaction
-decodeBaseTransaction (transactionId, directionText, accountId, amount, occurredAt, recordedAt) =
+decodeBaseTransaction :: (String, Text, String, Int64, UTCTime, UTCTime, Maybe String, Maybe String) -> ExceptT RepositoryError IO FinanceTransaction
+decodeBaseTransaction (transactionId, directionText, accountId, amount, occurredAt, recordedAt, counterparty, description) =
   case directionFromText directionText of
     Nothing -> throwError ReadFailure
     Just financeTransactionDirection ->
@@ -1241,6 +1279,8 @@ decodeBaseTransaction (transactionId, directionText, accountId, amount, occurred
         , financeTransactionAmount = fromIntegral amount
         , financeTransactionOccurredAt = occurredAt
         , financeTransactionRecordedAt = recordedAt
+        , financeTransactionCounterparty = counterparty
+        , financeTransactionDescription = description
         , financeTransactionTransfer = Nothing
         , financeTransactionCategory = Nothing
         , financeTransactionSplits = []
@@ -1290,6 +1330,8 @@ financeAdjustmentRowToTransaction FinanceAdjustmentRow
       , financeTransactionAmount = financeAdjustmentRowAmount
       , financeTransactionOccurredAt = financeAdjustmentRowSnapshotOccurredAt
       , financeTransactionRecordedAt = financeAdjustmentRowRecordedAt
+      , financeTransactionCounterparty = Nothing
+      , financeTransactionDescription = Nothing
       , financeTransactionTransfer = Nothing
       , financeTransactionCategory = Nothing
       , financeTransactionSplits = []
@@ -1308,7 +1350,7 @@ financeTransactionSortKey :: FinanceTransaction -> (Down UTCTime, String)
 financeTransactionSortKey transaction =
   (Down (financeTransactionOccurredAt transaction), financeTransactionId transaction)
 
-idempotencyMatches :: FinanceTransactionWriteRequest -> Text -> String -> Int64 -> Bool -> UTCTime -> Bool
+idempotencyMatches :: FinanceTransactionWriteRequest -> Maybe String -> Maybe String -> Text -> String -> Int64 -> Bool -> UTCTime -> Maybe String -> Maybe String -> Bool
 idempotencyMatches FinanceTransactionWriteRequest
   { financeTransactionWriteDirection
   , financeTransactionWriteAccountId
@@ -1316,16 +1358,22 @@ idempotencyMatches FinanceTransactionWriteRequest
   , financeTransactionWriteOccurredAt
   , financeTransactionWriteOccurredAtSupplied
   }
+  normalizedCounterparty
+  normalizedDescription
   storedDirection
   storedAccountId
   storedAmount
   storedOccurredAtSupplied
-  storedOccurredAt =
+  storedOccurredAt
+  storedCounterparty
+  storedDescription =
     financeTransactionDirectionText financeTransactionWriteDirection == storedDirection
       && financeTransactionWriteAccountId == storedAccountId
       && fromIntegral financeTransactionWriteAmount == storedAmount
       && financeTransactionWriteOccurredAtSupplied == storedOccurredAtSupplied
       && (not financeTransactionWriteOccurredAtSupplied || financeTransactionWriteOccurredAt == storedOccurredAt)
+      && normalizedCounterparty == storedCounterparty
+      && normalizedDescription == storedDescription
 
 data FinanceCanonicalEvent = FinanceCanonicalEvent
   { canonicalEventId :: !String

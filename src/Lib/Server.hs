@@ -105,6 +105,18 @@ data StoredTripItem = StoredTripItem
   , storedTripCalendarItem :: !Agenda.CalendarItem
   }
 
+data FinanceQueryFilters = FinanceQueryFilters
+  { financeQueryAccountId :: !(Maybe String)
+  , financeQueryFrom :: !(Maybe UTCTime)
+  , financeQueryTo :: !(Maybe UTCTime)
+  , financeQueryDirection :: !FinanceReportDirection
+  , financeQueryCategoryIn :: ![String]
+  , financeQueryCategoryNotIn :: ![String]
+  , financeQueryAmountMin :: !(Maybe Int)
+  , financeQueryAmountMax :: !(Maybe Int)
+  , financeQuerySearch :: !(Maybe String)
+  }
+
 instance ToJSON TripPlace where
   toJSON (TripPlace placeName) = object ["name" .= placeName]
 
@@ -881,40 +893,25 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
       nullDir
       method GET
       request <- askRq
-      mAccountId <- (Just <$> look "accountId") `mplus` pure Nothing
-      mFromRaw <- (Just <$> look "from") `mplus` pure Nothing
-      mToRaw <- (Just <$> look "to") `mplus` pure Nothing
-      mAmountMinRaw <- (Just <$> look "amountMin") `mplus` pure Nothing
-      mAmountMaxRaw <- (Just <$> look "amountMax") `mplus` pure Nothing
-      mSearch <- (Just <$> look "search") `mplus` pure Nothing
-      let mDirectionRaw = queryParamValues "direction" request
-          categoryInValues = queryParamValues "categoryIn" request
-          categoryNotInValues = queryParamValues "categoryNotIn" request
-      case (parseQueryTime "from" mFromRaw, parseQueryTime "to" mToRaw, parseReportDirection mDirectionRaw, parseOptionalInt "amountMin" mAmountMinRaw, parseOptionalInt "amountMax" mAmountMaxRaw) of
-        (_, _, _, Left message, _) -> badRequest message
-        (_, _, _, _, Left message) -> badRequest message
-        (_, _, Left message, _, _) -> badRequest message
-        (Left message, _, _, _, _) -> badRequest message
-        (_, Left message, _, _, _) -> badRequest message
-        (Right mFrom, Right mTo, Right direction, Right mAmountMin, Right mAmountMax) ->
-          case (mFrom, mTo) of
+      case parseFinanceQueryFilters request of
+        Left message -> badRequest message
+        Right filters ->
+          case (financeQueryFrom filters, financeQueryTo filters) of
             (Just fromTs, Just toTs)
               | fromTs > toTs -> badRequest "from must be less than or equal to to"
               | fromTs == toTs -> ok (jsonResponse ([] :: [FinanceTransaction]))
-            _ | hasOverlap categoryInValues categoryNotInValues -> badRequest "categoryIn and categoryNotIn must not overlap"
-              | maybe False (\amountMin -> maybe False (amountMin >) mAmountMax) mAmountMin -> badRequest "amountMin must be less than or equal to amountMax"
             _ -> do
               let listRequest =
                     FinanceTransactionsListRequest
-                      { financeTransactionsListAccountId = mAccountId
-                      , financeTransactionsListFrom = mFrom
-                      , financeTransactionsListTo = mTo
-                      , financeTransactionsListDirection = direction
-                      , financeTransactionsListCategoryIn = categoryInValues
-                      , financeTransactionsListCategoryNotIn = categoryNotInValues
-                      , financeTransactionsListAmountMin = mAmountMin
-                      , financeTransactionsListAmountMax = mAmountMax
-                      , financeTransactionsListSearch = mSearch
+                      { financeTransactionsListAccountId = financeQueryAccountId filters
+                      , financeTransactionsListFrom = financeQueryFrom filters
+                      , financeTransactionsListTo = financeQueryTo filters
+                      , financeTransactionsListDirection = financeQueryDirection filters
+                      , financeTransactionsListCategoryIn = financeQueryCategoryIn filters
+                      , financeTransactionsListCategoryNotIn = financeQueryCategoryNotIn filters
+                      , financeTransactionsListAmountMin = financeQueryAmountMin filters
+                      , financeTransactionsListAmountMax = financeQueryAmountMax filters
+                      , financeTransactionsListSearch = financeQuerySearch filters
                       }
               result <- liftIO $ runExceptT (repoListFinanceTransactionsFiltered financeTransactionRepo principalUserId listRequest)
               case result of
@@ -1267,6 +1264,24 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
     parseSingleOptionalParam fieldName _ = Left (fieldName ++ " must be provided at most once")
 
     parseFinanceReportRequest request = do
+      filters <- parseFinanceQueryFilters request
+      fromTs <- maybe (Left "from is required") Right (financeQueryFrom filters)
+      toTs <- maybe (Left "to is required") Right (financeQueryTo filters)
+      if fromTs >= toTs
+        then Left "from must be less than to"
+        else Right FinanceReportRequest
+          { financeReportFrom = fromTs
+          , financeReportTo = toTs
+          , financeReportDirection = financeQueryDirection filters
+          , financeReportAccountId = financeQueryAccountId filters
+          , financeReportCategoryIn = financeQueryCategoryIn filters
+          , financeReportCategoryNotIn = financeQueryCategoryNotIn filters
+          , financeReportAmountMin = financeQueryAmountMin filters
+          , financeReportAmountMax = financeQueryAmountMax filters
+          , financeReportSearch = financeQuerySearch filters
+          }
+
+    parseFinanceQueryFilters request = do
       let mDirectionRaw = queryParamValues "direction" request
           fromValues = queryParamValues "from" request
           toValues = queryParamValues "to" request
@@ -1287,25 +1302,21 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
       direction <- parseReportDirection mDirectionRaw
       mAmountMin <- parseOptionalInt "amountMin" mAmountMinRaw
       mAmountMax <- parseOptionalInt "amountMax" mAmountMaxRaw
-      fromTs <- maybe (Left "from is required") Right fromParsed
-      toTs <- maybe (Left "to is required") Right toParsed
-      if fromTs >= toTs
-        then Left "from must be less than to"
-        else if hasOverlap categoryInValues categoryNotInValues
-          then Left "categoryIn and categoryNotIn must not overlap"
-          else if maybe False (\amountMin -> maybe False (amountMin >) mAmountMax) mAmountMin
-            then Left "amountMin must be less than or equal to amountMax"
-            else Right FinanceReportRequest
-              { financeReportFrom = fromTs
-              , financeReportTo = toTs
-              , financeReportDirection = direction
-              , financeReportAccountId = accountId
-              , financeReportCategoryIn = categoryInValues
-              , financeReportCategoryNotIn = categoryNotInValues
-              , financeReportAmountMin = mAmountMin
-              , financeReportAmountMax = mAmountMax
-              , financeReportSearch = mSearch
-              }
+      if hasOverlap categoryInValues categoryNotInValues
+        then Left "categoryIn and categoryNotIn must not overlap"
+        else if maybe False (\amountMin -> maybe False (amountMin >) mAmountMax) mAmountMin
+          then Left "amountMin must be less than or equal to amountMax"
+          else Right FinanceQueryFilters
+            { financeQueryAccountId = accountId
+            , financeQueryFrom = fromParsed
+            , financeQueryTo = toParsed
+            , financeQueryDirection = direction
+            , financeQueryCategoryIn = categoryInValues
+            , financeQueryCategoryNotIn = categoryNotInValues
+            , financeQueryAmountMin = mAmountMin
+            , financeQueryAmountMax = mAmountMax
+            , financeQuerySearch = mSearch
+            }
 
     hasOverlap leftValues rightValues =
       let leftSet = Set.fromList leftValues

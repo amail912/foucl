@@ -1263,6 +1263,10 @@ runIntegrationTests = do
 
         allReport <- getFinanceReport cookie [("from", "2026-04-01T00:00:00Z"), ("to", "2026-04-08T00:00:00Z"), ("direction", "all")]
         assertFinanceReportValues (-700) 6 [tx7Id, tx5Id, tx4Id, tx3Id, tx2Id, tx1Id] allReport
+        allLedger <- getFinanceTransactions cookie [("from", "2026-04-01T00:00:00Z"), ("to", "2026-04-08T00:00:00Z"), ("direction", "all")]
+        assertEqual "Equivalent report and ledger queries should match transaction id universe"
+          (sort [tx7Id, tx5Id, tx4Id, tx3Id, tx2Id, tx1Id])
+          (sort (map financeTransactionIdValue allLedger))
 
         petsReport <- getFinanceReport cookie
           [ ("from", "2026-04-01T00:00:00Z")
@@ -1271,6 +1275,15 @@ runIntegrationTests = do
           , ("categoryIn", "pets.food")
           ]
         assertFinanceReportValues 2500 3 [tx7Id, tx3Id, tx1Id] petsReport
+        petsLedger <- getFinanceTransactions cookie
+          [ ("from", "2026-04-01T00:00:00Z")
+          , ("to", "2026-04-08T00:00:00Z")
+          , ("direction", "sent")
+          , ("categoryIn", "pets.food")
+          ]
+        assertEqual "Split/category filters should keep report and ledger parity"
+          (sort [tx7Id, tx3Id, tx1Id])
+          (sort (map financeTransactionIdValue petsLedger))
 
         uncategorizedAll <- getFinanceReport cookie
           [ ("from", "2026-04-01T00:00:00Z")
@@ -1297,6 +1310,21 @@ runIntegrationTests = do
           ]
         assertStatusCode "Overlapping category include/exclude should return 400" 400 overlapCategoryResp
         assertMessageResponse "categoryIn and categoryNotIn must not overlap" overlapCategoryResp
+        overlapCategoryLedgerResp <- getFinanceTransactionsExpectValue cookie [("categoryIn", "pets.food"), ("categoryNotIn", "pets.food")]
+        assertStatusCode "Overlapping category include/exclude should return 400 for ledger too" 400 overlapCategoryLedgerResp
+        assertMessageResponse "categoryIn and categoryNotIn must not overlap" overlapCategoryLedgerResp
+
+        duplicateAccountReportResp <- getFinanceReportExpectValue cookie
+          [ ("from", "2026-04-01T00:00:00Z")
+          , ("to", "2026-04-08T00:00:00Z")
+          , ("accountId", accountAId)
+          , ("accountId", accountBId)
+          ]
+        assertStatusCode "Duplicate accountId should return 400 for report" 400 duplicateAccountReportResp
+        assertMessageResponse "accountId must be provided at most once" duplicateAccountReportResp
+        duplicateAccountLedgerResp <- getFinanceTransactionsExpectValue cookie [("accountId", accountAId), ("accountId", accountBId)]
+        assertStatusCode "Duplicate accountId should return 400 for ledger" 400 duplicateAccountLedgerResp
+        assertMessageResponse "accountId must be provided at most once" duplicateAccountLedgerResp
 
         analyticsResp <- getFinanceReportAnalytics cookie [("from", "2026-04-01T00:00:00Z"), ("to", "2026-04-08T00:00:00Z"), ("direction", "all")]
         assertFinanceAnalyticsSummary (-700) 6 analyticsResp

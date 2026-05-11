@@ -805,10 +805,15 @@ pgListFinanceTransactionsFiltered pool userId request =
 matchesLedgerFilters :: FinanceTransactionsListRequest -> FinanceTransaction -> Bool
 matchesLedgerFilters request transaction =
   matchesDirection
+    && matchesTransferTreatment
     && matchesAmount
     && matchesSearch
     && matchesCategories
   where
+    matchesTransferTreatment =
+      case (financeTransactionsListFrom request, financeTransactionsListTo request) of
+        (Just _, Just _) -> financeTransactionTransfer transaction == Nothing
+        _ -> True
     matchesDirection =
       case financeTransactionsListDirection request of
         FinanceReportAll -> True
@@ -957,6 +962,9 @@ data ReportMatchedRow = ReportMatchedRow
   , matchedCategory :: !String
   , matchedAccountId :: !String
   , matchedOccurredAt :: !UTCTime
+  , matchedRawAmount :: !Int
+  , matchedCounterparty :: !(Maybe String)
+  , matchedDescription :: !(Maybe String)
   }
 
 decodeReportBaseRow :: (String, Text, String, Int64, UTCTime) -> ExceptT RepositoryError IO ReportBaseRow
@@ -997,9 +1005,10 @@ evaluateReportRow
   :: FinanceReportRequest
   -> Map.Map String String
   -> Map.Map String [(Int, Int64, String)]
+  -> Map.Map String (Maybe String, Maybe String)
   -> ReportBaseRow
   -> Maybe ReportMatchedRow
-evaluateReportRow request categoryMap splitMap baseRow =
+evaluateReportRow request categoryMap splitMap metadataMap baseRow =
   let categoryInSet = Set.fromList (financeReportCategoryIn request)
       categoryNotInSet = Set.fromList (financeReportCategoryNotIn request)
       accountIncluded =
@@ -1053,6 +1062,9 @@ evaluateReportRow request categoryMap splitMap baseRow =
                       , matchedCategory = "split"
                       , matchedAccountId = baseRowAccountId baseRow
                       , matchedOccurredAt = baseRowOccurredAt baseRow
+                      , matchedRawAmount = baseRowAmount baseRow
+                      , matchedCounterparty = fst (Map.findWithDefault (Nothing, Nothing) (baseRowId baseRow) metadataMap)
+                      , matchedDescription = snd (Map.findWithDefault (Nothing, Nothing) (baseRowId baseRow) metadataMap)
                       }
             else
               let normalizedWhole = if uncategorizedWholeMatch then "uncategorized" else wholeCategorySlug
@@ -1063,6 +1075,9 @@ evaluateReportRow request categoryMap splitMap baseRow =
                       , matchedCategory = normalizedWhole
                       , matchedAccountId = baseRowAccountId baseRow
                       , matchedOccurredAt = baseRowOccurredAt baseRow
+                      , matchedRawAmount = baseRowAmount baseRow
+                      , matchedCounterparty = fst (Map.findWithDefault (Nothing, Nothing) (baseRowId baseRow) metadataMap)
+                      , matchedDescription = snd (Map.findWithDefault (Nothing, Nothing) (baseRowId baseRow) metadataMap)
                       }
                     else Nothing
         else
@@ -1072,6 +1087,9 @@ evaluateReportRow request categoryMap splitMap baseRow =
             , matchedCategory = wholeCategorySlug
             , matchedAccountId = baseRowAccountId baseRow
             , matchedOccurredAt = baseRowOccurredAt baseRow
+            , matchedRawAmount = baseRowAmount baseRow
+            , matchedCounterparty = fst (Map.findWithDefault (Nothing, Nothing) (baseRowId baseRow) metadataMap)
+            , matchedDescription = snd (Map.findWithDefault (Nothing, Nothing) (baseRowId baseRow) metadataMap)
             }
 
 pgGetFinanceReportAnalytics :: Pool Connection -> String -> FinanceReportRequest -> ExceptT RepositoryError IO FinanceReportAnalyticsResult
@@ -1114,9 +1132,16 @@ loadMatchedReportRows conn userId request = do
           (userId, In transactionIds)
           :: IO [(String, Int, Int64, String)])
         mapSqlReadException
+      metadataRows <- tryExcept
+        (query conn
+          "SELECT transaction_id, counterparty, description FROM finance_transactions WHERE user_id = ? AND transaction_id IN ?"
+          (userId, In transactionIds)
+          :: IO [(String, Maybe String, Maybe String)])
+        mapSqlReadException
       let categoryMap = Map.fromList categoryRows
           splitMap = Map.fromListWith (++) [ (txId, [(splitIndex, splitAmount, splitCategory)]) | (txId, splitIndex, splitAmount, splitCategory) <- splitRows ]
-      pure [ row | Just row <- map (evaluateReportRow request categoryMap splitMap) combinedRows, reportRowMatchesAmountAndSearch request row ]
+          metadataMap = Map.fromList [ (txId, (counterparty, description)) | (txId, counterparty, description) <- metadataRows ]
+      pure [ row | Just row <- map (evaluateReportRow request categoryMap splitMap metadataMap) combinedRows, reportRowMatchesAmountAndSearch request row ]
   where
     loadBaseRows c =
       query c
@@ -1155,15 +1180,18 @@ reportRowMatchesAmountAndSearch :: FinanceReportRequest -> ReportMatchedRow -> B
 reportRowMatchesAmountAndSearch request row =
   amountLowerOk && amountUpperOk && searchOk
   where
-    contribution = matchedContribution row
-    amountLowerOk = maybe True (contribution >=) (financeReportAmountMin request)
-    amountUpperOk = maybe True (contribution <=) (financeReportAmountMax request)
+    amount = matchedRawAmount row
+    amountLowerOk = maybe True (amount >=) (financeReportAmountMin request)
+    amountUpperOk = maybe True (amount <=) (financeReportAmountMax request)
     searchOk =
       case fmap (map toLower) (financeReportSearch request) of
         Nothing -> True
-        Just q ->
-          let haystack = map toLower (matchedCategory row ++ " " ++ matchedId row ++ " " ++ matchedAccountId row)
-           in q `isInfixOf` haystack
+        Just normalizedSearch ->
+          let matchesField mValue =
+                case mValue of
+                  Nothing -> False
+                  Just value -> normalizedSearch `isInfixOf` map toLower value
+           in matchesField (matchedCounterparty row) || matchesField (matchedDescription row)
 
 buildCategoryBreakdown :: [ReportMatchedRow] -> [FinanceReportCategoryBreakdown]
 buildCategoryBreakdown rows =

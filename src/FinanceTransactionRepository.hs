@@ -8,6 +8,7 @@ module FinanceTransactionRepository
   , FinanceReportRequest(..)
   , FinanceTransactionsListRequest(..)
   , FinanceReportResult(..)
+  , FinanceReportAnalyticsResult(..)
   , FinanceTransactionNote(..)
   , FinanceTransactionAdjustment(..)
   , FinanceTransactionNoteCreateRequest(..)
@@ -42,7 +43,8 @@ import Data.Pool (Pool)
 import Data.Ord (Down(..))
 import qualified Data.Set as Set
 import Data.Text (Text)
-import Data.Time.Clock (UTCTime)
+import Data.Time.Clock (UTCTime(..), NominalDiffTime, addUTCTime, diffUTCTime, secondsToNominalDiffTime)
+import Data.Time.Calendar (addGregorianMonthsClip)
 import Data.UUID (toString)
 import Data.UUID.V4 (nextRandom)
 import Database.PostgreSQL.Simple
@@ -63,6 +65,7 @@ data FinanceTransactionRepository = FinanceTransactionRepository
   , repoListFinanceTransactions :: !(String -> Maybe String -> Maybe UTCTime -> Maybe UTCTime -> ExceptT RepositoryError IO [FinanceTransaction])
   , repoListFinanceTransactionsFiltered :: !(String -> FinanceTransactionsListRequest -> ExceptT RepositoryError IO [FinanceTransaction])
   , repoGetFinanceReport :: !(String -> FinanceReportRequest -> ExceptT RepositoryError IO FinanceReportResult)
+  , repoGetFinanceReportAnalytics :: !(String -> FinanceReportRequest -> ExceptT RepositoryError IO FinanceReportAnalyticsResult)
   , repoAddFinanceTransactionNote :: !(String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction)
   , repoUpdateFinanceTransactionNote :: !(String -> String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction)
   , repoUpdateFinanceTransactionMetadata :: !(String -> String -> FinanceTransactionMetadataUpdateRequest -> ExceptT RepositoryError IO FinanceTransaction)
@@ -158,16 +161,47 @@ data FinanceReportRequest = FinanceReportRequest
   { financeReportFrom :: !UTCTime
   , financeReportTo :: !UTCTime
   , financeReportDirection :: !FinanceReportDirection
-  , financeReportAccountIn :: ![String]
-  , financeReportAccountNotIn :: ![String]
+  , financeReportAccountId :: !(Maybe String)
   , financeReportCategoryIn :: ![String]
   , financeReportCategoryNotIn :: ![String]
+  , financeReportAmountMin :: !(Maybe Int)
+  , financeReportAmountMax :: !(Maybe Int)
+  , financeReportSearch :: !(Maybe String)
   } deriving (Eq, Show)
 
 data FinanceReportResult = FinanceReportResult
   { financeReportTotal :: !Int
   , financeReportCount :: !Int
   , financeReportTransactionIds :: ![String]
+  } deriving (Eq, Show)
+
+data FinanceReportCategoryBreakdown = FinanceReportCategoryBreakdown
+  { financeReportCategoryBreakdownCategory :: !String
+  , financeReportCategoryBreakdownTotal :: !Int
+  , financeReportCategoryBreakdownCount :: !Int
+  } deriving (Eq, Show)
+
+data FinanceReportCashflowBucket = FinanceReportCashflowBucket
+  { financeReportCashflowBucketFrom :: !UTCTime
+  , financeReportCashflowBucketTo :: !UTCTime
+  , financeReportCashflowBucketTotal :: !Int
+  } deriving (Eq, Show)
+
+data FinanceReportAccountBalance = FinanceReportAccountBalance
+  { financeReportAccountBalanceAccountId :: !String
+  , financeReportAccountBalanceTotal :: !Int
+  } deriving (Eq, Show)
+
+data FinanceReportAnalyticsSummary = FinanceReportAnalyticsSummary
+  { financeReportAnalyticsSummaryTotal :: !Int
+  , financeReportAnalyticsSummaryCount :: !Int
+  } deriving (Eq, Show)
+
+data FinanceReportAnalyticsResult = FinanceReportAnalyticsResult
+  { financeReportAnalyticsSummary :: !FinanceReportAnalyticsSummary
+  , financeReportAnalyticsCategoryBreakdown :: ![FinanceReportCategoryBreakdown]
+  , financeReportAnalyticsCashflowSeries :: ![FinanceReportCashflowBucket]
+  , financeReportAnalyticsAccountBalances :: ![FinanceReportAccountBalance]
   } deriving (Eq, Show)
 
 data FinanceTransactionsListRequest = FinanceTransactionsListRequest
@@ -384,6 +418,50 @@ instance ToJSON FinanceReportResult where
       , "transactionIds" .= financeReportTransactionIds
       ]
 
+instance ToJSON FinanceReportCategoryBreakdown where
+  toJSON FinanceReportCategoryBreakdown { financeReportCategoryBreakdownCategory, financeReportCategoryBreakdownTotal, financeReportCategoryBreakdownCount } =
+    object
+      [ "category" .= financeReportCategoryBreakdownCategory
+      , "total" .= financeReportCategoryBreakdownTotal
+      , "count" .= financeReportCategoryBreakdownCount
+      ]
+
+instance ToJSON FinanceReportCashflowBucket where
+  toJSON FinanceReportCashflowBucket { financeReportCashflowBucketFrom, financeReportCashflowBucketTo, financeReportCashflowBucketTotal } =
+    object
+      [ "from" .= financeReportCashflowBucketFrom
+      , "to" .= financeReportCashflowBucketTo
+      , "total" .= financeReportCashflowBucketTotal
+      ]
+
+instance ToJSON FinanceReportAccountBalance where
+  toJSON FinanceReportAccountBalance { financeReportAccountBalanceAccountId, financeReportAccountBalanceTotal } =
+    object
+      [ "accountId" .= financeReportAccountBalanceAccountId
+      , "total" .= financeReportAccountBalanceTotal
+      ]
+
+instance ToJSON FinanceReportAnalyticsSummary where
+  toJSON FinanceReportAnalyticsSummary { financeReportAnalyticsSummaryTotal, financeReportAnalyticsSummaryCount } =
+    object
+      [ "total" .= financeReportAnalyticsSummaryTotal
+      , "count" .= financeReportAnalyticsSummaryCount
+      ]
+
+instance ToJSON FinanceReportAnalyticsResult where
+  toJSON FinanceReportAnalyticsResult
+    { financeReportAnalyticsSummary
+    , financeReportAnalyticsCategoryBreakdown
+    , financeReportAnalyticsCashflowSeries
+    , financeReportAnalyticsAccountBalances
+    } =
+      object
+        [ "summary" .= financeReportAnalyticsSummary
+        , "categoryBreakdown" .= financeReportAnalyticsCategoryBreakdown
+        , "cashflowSeries" .= financeReportAnalyticsCashflowSeries
+        , "accountBalances" .= financeReportAnalyticsAccountBalances
+        ]
+
 instance ToJSON FinanceCounterpartySuggestionItem where
   toJSON FinanceCounterpartySuggestionItem
     { financeCounterpartySuggestionValue
@@ -442,6 +520,7 @@ postgresFinanceTransactionRepository pool =
     , repoListFinanceTransactions = pgListFinanceTransactions pool
     , repoListFinanceTransactionsFiltered = pgListFinanceTransactionsFiltered pool
     , repoGetFinanceReport = pgGetFinanceReport pool
+    , repoGetFinanceReportAnalytics = pgGetFinanceReportAnalytics pool
     , repoAddFinanceTransactionNote = pgAddFinanceTransactionNote pool
     , repoUpdateFinanceTransactionNote = pgUpdateFinanceTransactionNote pool
     , repoUpdateFinanceTransactionMetadata = pgUpdateFinanceTransactionMetadata pool
@@ -780,71 +859,12 @@ normalizeCategoryForLedgerFilter categorySlug
 pgGetFinanceReport :: Pool Connection -> String -> FinanceReportRequest -> ExceptT RepositoryError IO FinanceReportResult
 pgGetFinanceReport pool userId request =
   withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
-    rawBaseRows <- tryExcept (loadBaseRows conn) mapSqlReadException
-    rawAdjustmentRows <- tryExcept (loadAdjustmentRows conn) mapSqlReadException
-    baseRows <- mapM decodeReportBaseRow rawBaseRows
-    adjustmentRows <- mapM decodeAdjustmentReportBaseRow rawAdjustmentRows
-    let combinedRows = baseRows ++ adjustmentRows
-    if null combinedRows
-      then pure FinanceReportResult { financeReportTotal = 0, financeReportCount = 0, financeReportTransactionIds = [] }
-      else do
-        let transactionIds = map baseRowId combinedRows
-        categoryRows <- tryExcept
-          (query conn
-            "SELECT transaction_id, category FROM finance_transaction_categories WHERE user_id = ? AND transaction_id IN ?"
-            (userId, In transactionIds)
-            :: IO [(String, String)])
-          mapSqlReadException
-        splitRows <- tryExcept
-          (query conn
-            "SELECT transaction_id, split_index, amount, category FROM finance_transaction_splits WHERE user_id = ? AND transaction_id IN ? ORDER BY transaction_id ASC, split_index ASC"
-            (userId, In transactionIds)
-            :: IO [(String, Int, Int64, String)])
-          mapSqlReadException
-        let categoryMap = Map.fromList categoryRows
-            splitMap = Map.fromListWith (++) [ (txId, [(splitIndex, splitAmount, splitCategory)]) | (txId, splitIndex, splitAmount, splitCategory) <- splitRows ]
-            evaluated = map (evaluateReportRow request categoryMap splitMap) combinedRows
-            matched = [ row | Just row <- evaluated ]
-            total = sum (map matchedContribution matched)
-            ids = map matchedId matched
-        pure FinanceReportResult
-          { financeReportTotal = total
-          , financeReportCount = length matched
-          , financeReportTransactionIds = ids
-          }
-  where
-    loadBaseRows conn =
-      query conn
-        "SELECT t.transaction_id, t.direction, t.account_id, t.amount, t.occurred_at \
-        \FROM finance_transactions t \
-        \LEFT JOIN finance_transaction_links l ON l.user_id = t.user_id AND l.transaction_id = t.transaction_id \
-        \WHERE t.user_id = ? \
-        \AND t.occurred_at >= ? AND t.occurred_at < ? \
-        \AND l.transaction_id IS NULL \
-        \AND (? = '' OR t.direction = ?) \
-        \ORDER BY t.occurred_at DESC, t.transaction_id ASC"
-        ( userId
-        , financeReportFrom request
-        , financeReportTo request
-        , reportDirectionSqlFilter (financeReportDirection request)
-        , reportDirectionSqlFilter (financeReportDirection request)
-        )
-        :: IO [(String, Text, String, Int64, UTCTime)]
-    loadAdjustmentRows conn =
-      query conn
-        "SELECT snapshot_id, snapshot_occurred_at, account_id, amount, direction, reason \
-        \FROM finance_balance_snapshot_adjustments \
-        \WHERE user_id = ? \
-        \AND snapshot_occurred_at >= ? AND snapshot_occurred_at < ? \
-        \AND (? = '' OR direction = ?) \
-        \ORDER BY snapshot_occurred_at DESC, snapshot_id ASC"
-        ( userId
-        , financeReportFrom request
-        , financeReportTo request
-        , reportDirectionSqlFilter (financeReportDirection request)
-        , reportDirectionSqlFilter (financeReportDirection request)
-        )
-        :: IO [(String, UTCTime, String, Int64, Text, Maybe String)]
+    matched <- loadMatchedReportRows conn userId request
+    pure FinanceReportResult
+      { financeReportTotal = sum (map matchedContribution matched)
+      , financeReportCount = length matched
+      , financeReportTransactionIds = map matchedId matched
+      }
 
 pgSuggestFinanceCounterparties :: Pool Connection -> String -> FinanceCounterpartySuggestionsRequest -> ExceptT RepositoryError IO FinanceCounterpartySuggestionsResult
 pgSuggestFinanceCounterparties pool userId request =
@@ -921,6 +941,7 @@ pgSuggestFinanceCounterparties pool userId request =
 
 data ReportBaseRow = ReportBaseRow
   { baseRowId :: !String
+  , baseRowOccurredAt :: !UTCTime
   , baseRowDirection :: !FinanceTransactionDirection
   , baseRowAccountId :: !String
   , baseRowAmount :: !Int
@@ -933,6 +954,9 @@ data ReportBaseRow = ReportBaseRow
 data ReportMatchedRow = ReportMatchedRow
   { matchedId :: !String
   , matchedContribution :: !Int
+  , matchedCategory :: !String
+  , matchedAccountId :: !String
+  , matchedOccurredAt :: !UTCTime
   }
 
 decodeReportBaseRow :: (String, Text, String, Int64, UTCTime) -> ExceptT RepositoryError IO ReportBaseRow
@@ -942,6 +966,7 @@ decodeReportBaseRow (transactionId, directionText, accountId, amount, _occurredA
     Just parsedDirection ->
       pure ReportBaseRow
         { baseRowId = transactionId
+        , baseRowOccurredAt = _occurredAt
         , baseRowDirection = parsedDirection
         , baseRowAccountId = accountId
         , baseRowAmount = fromIntegral amount
@@ -958,6 +983,7 @@ decodeAdjustmentReportBaseRow (snapshotId, snapshotOccurredAt, accountId, amount
     Just parsedDirection ->
       pure ReportBaseRow
         { baseRowId = "adjustment:" ++ snapshotId
+        , baseRowOccurredAt = snapshotOccurredAt
         , baseRowDirection = parsedDirection
         , baseRowAccountId = accountId
         , baseRowAmount = fromIntegral amount
@@ -976,11 +1002,10 @@ evaluateReportRow
 evaluateReportRow request categoryMap splitMap baseRow =
   let categoryInSet = Set.fromList (financeReportCategoryIn request)
       categoryNotInSet = Set.fromList (financeReportCategoryNotIn request)
-      accountInSet = Set.fromList (financeReportAccountIn request)
-      accountNotInSet = Set.fromList (financeReportAccountNotIn request)
       accountIncluded =
-        (Set.null accountInSet || Set.member (baseRowAccountId baseRow) accountInSet)
-          && not (Set.member (baseRowAccountId baseRow) accountNotInSet)
+        case financeReportAccountId request of
+          Nothing -> True
+          Just accountId -> baseRowAccountId baseRow == accountId
       hasCategoryFilters = not (Set.null categoryInSet) || not (Set.null categoryNotInSet)
       orderedSplits =
         if baseRowIsAdjustment baseRow
@@ -1022,14 +1047,173 @@ evaluateReportRow request categoryMap splitMap baseRow =
               let matchingSplitAmounts = [ amount | (amount, categorySlug) <- orderedSplits, matchesCategory categorySlug ]
                in if null matchingSplitAmounts
                     then Nothing
-                    else Just ReportMatchedRow { matchedId = baseRowId baseRow, matchedContribution = signed (sum matchingSplitAmounts) }
+                    else Just ReportMatchedRow
+                      { matchedId = baseRowId baseRow
+                      , matchedContribution = signed (sum matchingSplitAmounts)
+                      , matchedCategory = "split"
+                      , matchedAccountId = baseRowAccountId baseRow
+                      , matchedOccurredAt = baseRowOccurredAt baseRow
+                      }
             else
               let normalizedWhole = if uncategorizedWholeMatch then "uncategorized" else wholeCategorySlug
                in if matchesCategory normalizedWhole
-                    then Just ReportMatchedRow { matchedId = baseRowId baseRow, matchedContribution = signed (baseRowAmount baseRow) }
+                    then Just ReportMatchedRow
+                      { matchedId = baseRowId baseRow
+                      , matchedContribution = signed (baseRowAmount baseRow)
+                      , matchedCategory = normalizedWhole
+                      , matchedAccountId = baseRowAccountId baseRow
+                      , matchedOccurredAt = baseRowOccurredAt baseRow
+                      }
                     else Nothing
         else
-          Just ReportMatchedRow { matchedId = baseRowId baseRow, matchedContribution = signed (baseRowAmount baseRow) }
+          Just ReportMatchedRow
+            { matchedId = baseRowId baseRow
+            , matchedContribution = signed (baseRowAmount baseRow)
+            , matchedCategory = wholeCategorySlug
+            , matchedAccountId = baseRowAccountId baseRow
+            , matchedOccurredAt = baseRowOccurredAt baseRow
+            }
+
+pgGetFinanceReportAnalytics :: Pool Connection -> String -> FinanceReportRequest -> ExceptT RepositoryError IO FinanceReportAnalyticsResult
+pgGetFinanceReportAnalytics pool userId request =
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    matched <- loadMatchedReportRows conn userId request
+    let total = sum (map matchedContribution matched)
+        count = length matched
+        summary = FinanceReportAnalyticsSummary total count
+        categoryBreakdown = buildCategoryBreakdown matched
+        cashflowSeries = buildCashflowSeries request matched
+        accountBalances = buildAccountBalances matched
+    pure FinanceReportAnalyticsResult
+      { financeReportAnalyticsSummary = summary
+      , financeReportAnalyticsCategoryBreakdown = categoryBreakdown
+      , financeReportAnalyticsCashflowSeries = cashflowSeries
+      , financeReportAnalyticsAccountBalances = accountBalances
+      }
+
+loadMatchedReportRows :: Connection -> String -> FinanceReportRequest -> ExceptT RepositoryError IO [ReportMatchedRow]
+loadMatchedReportRows conn userId request = do
+  rawBaseRows <- tryExcept (loadBaseRows conn) mapSqlReadException
+  rawAdjustmentRows <- tryExcept (loadAdjustmentRows conn) mapSqlReadException
+  baseRows <- mapM decodeReportBaseRow rawBaseRows
+  adjustmentRows <- mapM decodeAdjustmentReportBaseRow rawAdjustmentRows
+  let combinedRows = baseRows ++ adjustmentRows
+  if null combinedRows
+    then pure []
+    else do
+      let transactionIds = map baseRowId combinedRows
+      categoryRows <- tryExcept
+        (query conn
+          "SELECT transaction_id, category FROM finance_transaction_categories WHERE user_id = ? AND transaction_id IN ?"
+          (userId, In transactionIds)
+          :: IO [(String, String)])
+        mapSqlReadException
+      splitRows <- tryExcept
+        (query conn
+          "SELECT transaction_id, split_index, amount, category FROM finance_transaction_splits WHERE user_id = ? AND transaction_id IN ? ORDER BY transaction_id ASC, split_index ASC"
+          (userId, In transactionIds)
+          :: IO [(String, Int, Int64, String)])
+        mapSqlReadException
+      let categoryMap = Map.fromList categoryRows
+          splitMap = Map.fromListWith (++) [ (txId, [(splitIndex, splitAmount, splitCategory)]) | (txId, splitIndex, splitAmount, splitCategory) <- splitRows ]
+      pure [ row | Just row <- map (evaluateReportRow request categoryMap splitMap) combinedRows, reportRowMatchesAmountAndSearch request row ]
+  where
+    loadBaseRows c =
+      query c
+        "SELECT t.transaction_id, t.direction, t.account_id, t.amount, t.occurred_at \
+        \FROM finance_transactions t \
+        \LEFT JOIN finance_transaction_links l ON l.user_id = t.user_id AND l.transaction_id = t.transaction_id \
+        \WHERE t.user_id = ? \
+        \AND t.occurred_at >= ? AND t.occurred_at < ? \
+        \AND l.transaction_id IS NULL \
+        \AND (? = '' OR t.direction = ?) \
+        \ORDER BY t.occurred_at DESC, t.transaction_id ASC"
+        ( userId
+        , financeReportFrom request
+        , financeReportTo request
+        , reportDirectionSqlFilter (financeReportDirection request)
+        , reportDirectionSqlFilter (financeReportDirection request)
+        )
+        :: IO [(String, Text, String, Int64, UTCTime)]
+    loadAdjustmentRows c =
+      query c
+        "SELECT snapshot_id, snapshot_occurred_at, account_id, amount, direction, reason \
+        \FROM finance_balance_snapshot_adjustments \
+        \WHERE user_id = ? \
+        \AND snapshot_occurred_at >= ? AND snapshot_occurred_at < ? \
+        \AND (? = '' OR direction = ?) \
+        \ORDER BY snapshot_occurred_at DESC, snapshot_id ASC"
+        ( userId
+        , financeReportFrom request
+        , financeReportTo request
+        , reportDirectionSqlFilter (financeReportDirection request)
+        , reportDirectionSqlFilter (financeReportDirection request)
+        )
+        :: IO [(String, UTCTime, String, Int64, Text, Maybe String)]
+
+reportRowMatchesAmountAndSearch :: FinanceReportRequest -> ReportMatchedRow -> Bool
+reportRowMatchesAmountAndSearch request row =
+  amountLowerOk && amountUpperOk && searchOk
+  where
+    contribution = matchedContribution row
+    amountLowerOk = maybe True (contribution >=) (financeReportAmountMin request)
+    amountUpperOk = maybe True (contribution <=) (financeReportAmountMax request)
+    searchOk =
+      case fmap (map toLower) (financeReportSearch request) of
+        Nothing -> True
+        Just q ->
+          let haystack = map toLower (matchedCategory row ++ " " ++ matchedId row ++ " " ++ matchedAccountId row)
+           in q `isInfixOf` haystack
+
+buildCategoryBreakdown :: [ReportMatchedRow] -> [FinanceReportCategoryBreakdown]
+buildCategoryBreakdown rows =
+  map toBreakdown $
+    sortOn (\(category, _, _) -> category) $
+      Map.elems $
+        Map.fromListWith combine
+          [ (matchedCategory row, (matchedCategory row, matchedContribution row, 1 :: Int)) | row <- rows ]
+  where
+    combine (_, leftTotal, leftCount) (_, rightTotal, rightCount) = ("", leftTotal + rightTotal, leftCount + rightCount)
+    toBreakdown (category, total, count) =
+      FinanceReportCategoryBreakdown
+        { financeReportCategoryBreakdownCategory = category
+        , financeReportCategoryBreakdownTotal = total
+        , financeReportCategoryBreakdownCount = count
+        }
+
+buildAccountBalances :: [ReportMatchedRow] -> [FinanceReportAccountBalance]
+buildAccountBalances rows =
+  [ FinanceReportAccountBalance accountId total
+  | (accountId, total) <- sortOn fst (Map.toList (Map.fromListWith (+) [ (matchedAccountId row, matchedContribution row) | row <- rows ]))
+  ]
+
+buildCashflowSeries :: FinanceReportRequest -> [ReportMatchedRow] -> [FinanceReportCashflowBucket]
+buildCashflowSeries request rows =
+  map toBucket windowStarts
+  where
+    rangeSeconds = diffUTCTime (financeReportTo request) (financeReportFrom request)
+    nextFn =
+      if rangeSeconds <= 62 * 86400
+        then \t -> addUTCTime oneDay t
+        else if rangeSeconds <= 366 * 86400
+          then \t -> addUTCTime oneWeek t
+          else addMonthUTC
+    start = financeReportFrom request
+    windowStarts = takeWhile (< financeReportTo request) (iterate nextFn start)
+    toBucket windowFrom =
+      let windowTo = min (nextFn windowFrom) (financeReportTo request)
+          total = sum [ matchedContribution row | row <- rows, matchedOccurredAt row >= windowFrom, matchedOccurredAt row < windowTo ]
+       in FinanceReportCashflowBucket
+            { financeReportCashflowBucketFrom = windowFrom
+            , financeReportCashflowBucketTo = windowTo
+            , financeReportCashflowBucketTotal = total
+            }
+    oneDay :: NominalDiffTime
+    oneDay = secondsToNominalDiffTime 86400
+    oneWeek :: NominalDiffTime
+    oneWeek = secondsToNominalDiffTime (7 * 86400)
+addMonthUTC :: UTCTime -> UTCTime
+addMonthUTC ts = ts { utctDay = addGregorianMonthsClip 1 (utctDay ts) }
 
 reportDirectionSqlFilter :: FinanceReportDirection -> Text
 reportDirectionSqlFilter FinanceReportAll = ""

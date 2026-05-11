@@ -44,6 +44,7 @@ financeTransactionsEndpoint = "/api/v1/finance/transactions"
 financeTransactionsSentEndpoint = "/api/v1/finance/transactions/sent"
 financeTransactionsReceivedEndpoint = "/api/v1/finance/transactions/received"
 financeReportEndpoint = "/api/v1/finance/report"
+financeReportAnalyticsEndpoint = "/api/v1/finance/report/analytics"
 financeCounterpartySuggestEndpoint = "/api/v1/finance/counterparties/suggest"
 financeExportEndpoint = "/api/v1/finance/export"
 
@@ -446,6 +447,11 @@ runIntegrationTests = do
         assertStatusCode "Finance report should require auth" 401 reportResp
         assertMessageResponse "Not authenticated" reportResp
 
+        analyticsReq <- parseRequest "GET http://localhost:8081/api/v1/finance/report/analytics?from=2026-04-01T00:00:00Z&to=2026-04-30T00:00:00Z"
+        analyticsResp <- httpJSON $ setRequestMethod "GET" analyticsReq
+        assertStatusCode "Finance report analytics should require auth" 401 analyticsResp
+        assertMessageResponse "Not authenticated" analyticsResp
+
         counterpartiesReq <- parseRequest "GET http://localhost:8081/api/v1/finance/counterparties/suggest?q=a"
         counterpartiesResp <- httpJSON $ setRequestMethod "GET" counterpartiesReq
         assertStatusCode "Finance counterparty suggestions should require auth" 401 counterpartiesResp
@@ -648,7 +654,7 @@ runIntegrationTests = do
             assertEqual "Expected adjustment row nested reason to be trimmed" (Just "Adjustment reason") (financeTransactionAdjustmentReasonValue adjustmentRow)
           _ -> assertFailure "Expected exactly one adjustment row after creating an adjustment"
 
-        reportAfterAdjustment <- getFinanceReport cookie [("from", "2026-04-03T00:00:00Z"), ("to", "2026-04-05T00:00:00Z"), ("direction", "all"), ("accountIn", accountId)]
+        reportAfterAdjustment <- getFinanceReport cookie [("from", "2026-04-03T00:00:00Z"), ("to", "2026-04-05T00:00:00Z"), ("direction", "all"), ("accountId", accountId)]
         assertFinanceReportValues (-1300) 2 [tx3Id, "adjustment:" ++ secondSnapshotId] reportAfterAdjustment
 
         exportAfterAdjustmentResp <- getFinanceExportExpectValue cookie
@@ -1274,14 +1280,14 @@ runIntegrationTests = do
           ]
         assertFinanceReportValues (-1200) 3 [tx5Id, tx4Id, tx3Id] uncategorizedAll
 
-        overlapAccountResp <- getFinanceReportExpectValue cookie
+        duplicateAccountIdResp <- getFinanceReportExpectValue cookie
           [ ("from", "2026-04-01T00:00:00Z")
           , ("to", "2026-04-08T00:00:00Z")
-          , ("accountIn", accountAId)
-          , ("accountNotIn", accountAId)
+          , ("accountId", accountAId)
+          , ("accountId", accountBId)
           ]
-        assertStatusCode "Overlapping account include/exclude should return 400" 400 overlapAccountResp
-        assertMessageResponse "accountIn and accountNotIn must not overlap" overlapAccountResp
+        assertStatusCode "Duplicate accountId should return 400" 400 duplicateAccountIdResp
+        assertMessageResponse "accountId must be provided at most once" duplicateAccountIdResp
 
         overlapCategoryResp <- getFinanceReportExpectValue cookie
           [ ("from", "2026-04-01T00:00:00Z")
@@ -1291,6 +1297,10 @@ runIntegrationTests = do
           ]
         assertStatusCode "Overlapping category include/exclude should return 400" 400 overlapCategoryResp
         assertMessageResponse "categoryIn and categoryNotIn must not overlap" overlapCategoryResp
+
+        analyticsResp <- getFinanceReportAnalytics cookie [("from", "2026-04-01T00:00:00Z"), ("to", "2026-04-08T00:00:00Z"), ("direction", "all")]
+        assertFinanceAnalyticsSummary (-700) 6 analyticsResp
+        assertFinanceAnalyticsHasSections analyticsResp
 
       it "should append, update, and delete transaction notes with shared trim and validation rules" $ do
         uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
@@ -2865,6 +2875,21 @@ getFinanceExportExpectValue cookie = do
          $ setRequestHeader "Cookie" [BS.pack cookie]
          req
 
+getFinanceReportAnalytics :: String -> [(String, String)] -> IO Value
+getFinanceReportAnalytics cookie queryParams = do
+  resp <- getFinanceReportAnalyticsExpectValue cookie queryParams
+  assertStatusCode "Finance report analytics request should succeed" 200 resp
+  pure (getResponseBody resp)
+
+getFinanceReportAnalyticsExpectValue :: String -> [(String, String)] -> IO (Response Value)
+getFinanceReportAnalyticsExpectValue cookie queryParams = do
+  req <- parseRequest ("GET http://localhost:8081" ++ financeReportAnalyticsEndpoint)
+  httpJSON
+    $ setRequestMethod "GET"
+    $ setRequestQueryString (map (\(key, value) -> (BS.pack key, Just (BS.pack value))) queryParams)
+    $ setRequestHeader "Cookie" [BS.pack cookie]
+    req
+
 financeTransactionsRequest :: String -> [(String, String)] -> IO Request
 financeTransactionsRequest cookie queryParams = do
   req <- parseRequest ("GET http://localhost:8081" ++ financeTransactionsEndpoint)
@@ -3005,6 +3030,39 @@ assertFinanceReportValues expectedTotal expectedCount expectedIds responseBody =
         Just actualIds -> assertEqual "Expected report transaction ids" expectedIds (actualIds :: [String])
         Nothing -> assertFailure "Expected report transaction ids"
     _ -> assertFailure "Expected finance report response object"
+
+assertFinanceAnalyticsSummary :: Int -> Int -> Value -> Assertion
+assertFinanceAnalyticsSummary expectedTotal expectedCount responseBody =
+  case responseBody of
+    Object value ->
+      case parseMaybe (.: "summary") value of
+        Just (Object summaryObj) -> do
+          case parseMaybe (.: "total") summaryObj of
+            Just actualTotal -> assertEqual "Expected analytics summary total" expectedTotal (actualTotal :: Int)
+            Nothing -> assertFailure "Expected analytics summary total"
+          case parseMaybe (.: "count") summaryObj of
+            Just actualCount -> assertEqual "Expected analytics summary count" expectedCount (actualCount :: Int)
+            Nothing -> assertFailure "Expected analytics summary count"
+        _ -> assertFailure "Expected analytics summary object"
+    _ -> assertFailure "Expected finance analytics response object"
+
+assertFinanceAnalyticsHasSections :: Value -> Assertion
+assertFinanceAnalyticsHasSections responseBody =
+  case responseBody of
+    Object value -> do
+      case parseMaybe (.: "categoryBreakdown") value of
+        Just (_ :: [Value]) -> pure ()
+        Nothing -> assertFailure "Expected analytics categoryBreakdown"
+      case parseMaybe (.: "cashflowSeries") value of
+        Just (_ :: [Value]) -> pure ()
+        Nothing -> assertFailure "Expected analytics cashflowSeries"
+      case parseMaybe (.: "accountBalances") value of
+        Just (_ :: [Value]) -> pure ()
+        Nothing -> assertFailure "Expected analytics accountBalances"
+      case parseMaybe (.:? "transactionIds") value of
+        Just (Nothing :: Maybe [String]) -> pure ()
+        _ -> assertFailure "Analytics should not include transactionIds"
+    _ -> assertFailure "Expected finance analytics response object"
 
 requireObjectStringField :: String -> Value -> IO String
 requireObjectStringField fieldName responseBody =

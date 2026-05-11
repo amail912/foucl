@@ -667,7 +667,7 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
           , financeTransactionsNotes
           , financeTransactionsMetadata
           ]
-    , dir "report" financeReport
+    , dir "report" (msum [dir "analytics" financeReportAnalytics, financeReport])
     , dir "counterparties" financeCounterparties
     , dir "export" financeExport
     ]
@@ -956,40 +956,25 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
       nullDir
       method GET
       request <- askRq
-      mFromRaw <- (Just <$> look "from") `mplus` pure Nothing
-      mToRaw <- (Just <$> look "to") `mplus` pure Nothing
-      let mDirectionRaw = queryParamValues "direction" request
-          accountInValues = queryParamValues "accountIn" request
-          accountNotInValues = queryParamValues "accountNotIn" request
-          categoryInValues = queryParamValues "categoryIn" request
-          categoryNotInValues = queryParamValues "categoryNotIn" request
-      case (mFromRaw, mToRaw) of
-        (Nothing, _) -> badRequest "from is required"
-        (_, Nothing) -> badRequest "to is required"
-        (Just _, Just _) ->
-          case (parseQueryTime "from" mFromRaw, parseQueryTime "to" mToRaw, parseReportDirection mDirectionRaw) of
-            (Left message, _, _) -> badRequest message
-            (_, Left message, _) -> badRequest message
-            (_, _, Left message) -> badRequest message
-            (Right (Just fromTs), Right (Just toTs), Right direction)
-              | fromTs >= toTs -> badRequest "from must be less than to"
-              | hasOverlap accountInValues accountNotInValues -> badRequest "accountIn and accountNotIn must not overlap"
-              | hasOverlap categoryInValues categoryNotInValues -> badRequest "categoryIn and categoryNotIn must not overlap"
-              | otherwise -> do
-                  let reportRequest = FinanceReportRequest
-                        { financeReportFrom = fromTs
-                        , financeReportTo = toTs
-                        , financeReportDirection = direction
-                        , financeReportAccountIn = accountInValues
-                        , financeReportAccountNotIn = accountNotInValues
-                        , financeReportCategoryIn = categoryInValues
-                        , financeReportCategoryNotIn = categoryNotInValues
-                        }
-                  result <- liftIO $ runExceptT (repoGetFinanceReport financeTransactionRepo principalUserId reportRequest)
-                  case result of
-                    Left _ -> internalServerError emptyResponse
-                    Right reportResult -> ok (jsonResponse reportResult)
-            _ -> internalServerError emptyResponse
+      case parseFinanceReportRequest request of
+        Left message -> badRequest message
+        Right reportRequest -> do
+          result <- liftIO $ runExceptT (repoGetFinanceReport financeTransactionRepo principalUserId reportRequest)
+          case result of
+            Left _ -> internalServerError emptyResponse
+            Right reportResult -> ok (jsonResponse reportResult)
+
+    financeReportAnalytics = do
+      nullDir
+      method GET
+      request <- askRq
+      case parseFinanceReportRequest request of
+        Left message -> badRequest message
+        Right reportRequest -> do
+          result <- liftIO $ runExceptT (repoGetFinanceReportAnalytics financeTransactionRepo principalUserId reportRequest)
+          case result of
+            Left _ -> internalServerError emptyResponse
+            Right analyticsResult -> ok (jsonResponse analyticsResult)
 
     financeCounterparties = do
       dir "suggest" $ do
@@ -1280,6 +1265,47 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
     parseSingleOptionalParam _ [] = Right Nothing
     parseSingleOptionalParam fieldName [value] = Right (Just value)
     parseSingleOptionalParam fieldName _ = Left (fieldName ++ " must be provided at most once")
+
+    parseFinanceReportRequest request = do
+      let mDirectionRaw = queryParamValues "direction" request
+          fromValues = queryParamValues "from" request
+          toValues = queryParamValues "to" request
+          amountMinValues = queryParamValues "amountMin" request
+          amountMaxValues = queryParamValues "amountMax" request
+          searchValues = queryParamValues "search" request
+          accountIdValues = queryParamValues "accountId" request
+          categoryInValues = queryParamValues "categoryIn" request
+          categoryNotInValues = queryParamValues "categoryNotIn" request
+      mFromRaw <- parseSingleOptionalParam "from" fromValues
+      mToRaw <- parseSingleOptionalParam "to" toValues
+      mAmountMinRaw <- parseSingleOptionalParam "amountMin" amountMinValues
+      mAmountMaxRaw <- parseSingleOptionalParam "amountMax" amountMaxValues
+      mSearch <- parseSingleOptionalParam "search" searchValues
+      accountId <- parseSingleOptionalParam "accountId" accountIdValues
+      fromParsed <- parseQueryTime "from" mFromRaw
+      toParsed <- parseQueryTime "to" mToRaw
+      direction <- parseReportDirection mDirectionRaw
+      mAmountMin <- parseOptionalInt "amountMin" mAmountMinRaw
+      mAmountMax <- parseOptionalInt "amountMax" mAmountMaxRaw
+      fromTs <- maybe (Left "from is required") Right fromParsed
+      toTs <- maybe (Left "to is required") Right toParsed
+      if fromTs >= toTs
+        then Left "from must be less than to"
+        else if hasOverlap categoryInValues categoryNotInValues
+          then Left "categoryIn and categoryNotIn must not overlap"
+          else if maybe False (\amountMin -> maybe False (amountMin >) mAmountMax) mAmountMin
+            then Left "amountMin must be less than or equal to amountMax"
+            else Right FinanceReportRequest
+              { financeReportFrom = fromTs
+              , financeReportTo = toTs
+              , financeReportDirection = direction
+              , financeReportAccountId = accountId
+              , financeReportCategoryIn = categoryInValues
+              , financeReportCategoryNotIn = categoryNotInValues
+              , financeReportAmountMin = mAmountMin
+              , financeReportAmountMax = mAmountMax
+              , financeReportSearch = mSearch
+              }
 
     hasOverlap leftValues rightValues =
       let leftSet = Set.fromList leftValues

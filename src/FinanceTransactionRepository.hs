@@ -11,6 +11,7 @@ module FinanceTransactionRepository
   , FinanceTransactionAdjustment(..)
   , FinanceTransactionNoteCreateRequest(..)
   , FinanceTransactionNoteUpdateRequest(..)
+  , FinanceTransactionMetadataUpdateRequest(..)
   , FinanceTransactionLinkRequest(..)
   , FinanceTransactionSplitRow(..)
   , FinanceTransactionTransfer(..)
@@ -59,6 +60,7 @@ data FinanceTransactionRepository = FinanceTransactionRepository
   , repoGetFinanceReport :: !(String -> FinanceReportRequest -> ExceptT RepositoryError IO FinanceReportResult)
   , repoAddFinanceTransactionNote :: !(String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction)
   , repoUpdateFinanceTransactionNote :: !(String -> String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction)
+  , repoUpdateFinanceTransactionMetadata :: !(String -> String -> FinanceTransactionMetadataUpdateRequest -> ExceptT RepositoryError IO FinanceTransaction)
   , repoDeleteFinanceTransactionNote :: !(String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction)
   , repoCategorizeFinanceTransaction :: !(String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction)
   , repoSplitFinanceTransaction :: !(String -> String -> [FinanceTransactionSplitWriteRow] -> ExceptT RepositoryError IO FinanceTransaction)
@@ -80,6 +82,11 @@ data FinanceTransactionNoteCreateRequest = FinanceTransactionNoteCreateRequest
 
 data FinanceTransactionNoteUpdateRequest = FinanceTransactionNoteUpdateRequest
   { financeTransactionNoteUpdateText :: !String
+  }
+
+data FinanceTransactionMetadataUpdateRequest = FinanceTransactionMetadataUpdateRequest
+  { financeTransactionMetadataUpdateCounterparty :: !(Maybe (Maybe String))
+  , financeTransactionMetadataUpdateDescription :: !(Maybe (Maybe String))
   }
 
 data FinanceTransactionLinkRequest = FinanceTransactionLinkRequest
@@ -213,6 +220,12 @@ instance FromJSON FinanceTransactionNoteCreateRequest where
 instance FromJSON FinanceTransactionNoteUpdateRequest where
   parseJSON = withObject "FinanceTransactionNoteUpdateRequest" $ \value ->
     FinanceTransactionNoteUpdateRequest . trimWhitespace <$> value .: "text"
+
+instance FromJSON FinanceTransactionMetadataUpdateRequest where
+  parseJSON = withObject "FinanceTransactionMetadataUpdateRequest" $ \value ->
+    FinanceTransactionMetadataUpdateRequest
+      <$> value .:? "counterparty"
+      <*> value .:? "description"
 
 instance FromJSON FinanceTransactionLinkRequest where
   parseJSON = withObject "FinanceTransactionLinkRequest" $ \value ->
@@ -376,6 +389,7 @@ postgresFinanceTransactionRepository pool =
     , repoGetFinanceReport = pgGetFinanceReport pool
     , repoAddFinanceTransactionNote = pgAddFinanceTransactionNote pool
     , repoUpdateFinanceTransactionNote = pgUpdateFinanceTransactionNote pool
+    , repoUpdateFinanceTransactionMetadata = pgUpdateFinanceTransactionMetadata pool
     , repoDeleteFinanceTransactionNote = pgDeleteFinanceTransactionNote pool
     , repoCategorizeFinanceTransaction = pgCategorizeFinanceTransaction pool
     , repoSplitFinanceTransaction = pgSplitFinanceTransaction pool
@@ -888,6 +902,45 @@ pgUpdateFinanceTransactionNote pool userId transactionId noteId noteText =
           mapSqlWriteException
         pgLoadFinanceTransactionByIdInConn conn userId transactionId
 
+pgUpdateFinanceTransactionMetadata :: Pool Connection -> String -> String -> FinanceTransactionMetadataUpdateRequest -> ExceptT RepositoryError IO FinanceTransaction
+pgUpdateFinanceTransactionMetadata pool userId transactionId FinanceTransactionMetadataUpdateRequest
+  { financeTransactionMetadataUpdateCounterparty
+  , financeTransactionMetadataUpdateDescription
+  } =
+    withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+      if financeTransactionMetadataUpdateCounterparty == Nothing && financeTransactionMetadataUpdateDescription == Nothing
+        then throwError WriteFailure
+        else do
+          (existingCounterparty, existingDescription) <- requireTransactionMetadata conn userId transactionId
+          normalizedCounterparty <- normalizeCounterparty (resolveMetadataUpdate financeTransactionMetadataUpdateCounterparty existingCounterparty)
+          normalizedDescription <- normalizeDescription (resolveMetadataUpdate financeTransactionMetadataUpdateDescription existingDescription)
+          eventId <- liftIO (toString <$> nextRandom)
+          _ <- tryExcept
+            (withTransaction conn $ do
+              _ <- appendFinanceEvent conn FinanceCanonicalEvent
+                { canonicalEventId = eventId
+                , canonicalEventUserId = userId
+                , canonicalEventStreamId = "transaction:" ++ transactionId
+                , canonicalEventType = "TransactionMetadataUpdated"
+                , canonicalEventOccurredAt = Nothing
+                , canonicalEventIdempotencyKey = Nothing
+                , canonicalEventPayload =
+                    object
+                      [ "transactionId" .= transactionId
+                      , "counterparty" .= normalizedCounterparty
+                      , "description" .= normalizedDescription
+                      ]
+                }
+              updatedRows <- execute conn
+                "UPDATE finance_transactions SET counterparty = ?, description = ? WHERE user_id = ? AND transaction_id = ?"
+                (normalizedCounterparty, normalizedDescription, userId, transactionId)
+              if updatedRows == 1
+                then pure ()
+                else fail "Unexpected updated row count for finance transaction metadata update"
+            )
+            mapSqlWriteException
+          pgLoadFinanceTransactionByIdInConn conn userId transactionId
+
 pgDeleteFinanceTransactionNote :: Pool Connection -> String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction
 pgDeleteFinanceTransactionNote pool userId transactionId noteId =
   withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
@@ -959,6 +1012,23 @@ requireTransactionNote conn userId transactionId noteId = do
     [] -> throwError NotFound
     [_] -> pure ()
     _ -> throwError ReadFailure
+
+requireTransactionMetadata :: Connection -> String -> String -> ExceptT RepositoryError IO (Maybe String, Maybe String)
+requireTransactionMetadata conn userId transactionId = do
+  rows <- tryExcept
+    (query conn
+      "SELECT counterparty, description FROM finance_transactions WHERE user_id = ? AND transaction_id = ?"
+      (userId, transactionId)
+      :: IO [(Maybe String, Maybe String)])
+    mapSqlReadException
+  case rows of
+    [] -> throwError NotFound
+    [metadata] -> pure metadata
+    _ -> throwError ReadFailure
+
+resolveMetadataUpdate :: Maybe (Maybe String) -> Maybe String -> Maybe String
+resolveMetadataUpdate Nothing existingValue = existingValue
+resolveMetadataUpdate (Just updatedValue) _ = updatedValue
 
 pgCategorizeFinanceTransaction :: Pool Connection -> String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction
 pgCategorizeFinanceTransaction pool userId transactionId categorySlug =

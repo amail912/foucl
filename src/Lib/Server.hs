@@ -53,6 +53,7 @@ import FinanceTransactionRepository
   , FinanceTransactionLinkRequest(..)
   , FinanceTransactionNoteCreateRequest(..)
   , FinanceTransactionNoteUpdateRequest(..)
+  , FinanceTransactionMetadataUpdateRequest(..)
   , FinanceTransactionSplitRequest(..)
   , FinanceTransaction
   , FinanceTransactionRepository(..)
@@ -661,6 +662,7 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
           , financeTransactionsCategorize
           , financeTransactionsSplit
           , financeTransactionsNotes
+          , financeTransactionsMetadata
           ]
     , dir "report" financeReport
     , dir "export" financeExport
@@ -915,6 +917,13 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
       dir "notes" $ do
         msum [financeTransactionNoteCreate transactionId, financeTransactionNoteUpdate transactionId, financeTransactionNoteDelete transactionId]
 
+    financeTransactionsMetadata = path $ \transactionId -> do
+      dir "metadata" $ do
+        nullDir
+        method POST
+        body <- askRq >>= takeRequestBody
+        maybe (badRequest "Empty body") (handleTransactionMetadataUpdateBody transactionId) body
+
     financeReport = do
       nullDir
       method GET
@@ -1079,6 +1088,18 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
           case result of
             Left NotFound -> notFound (jsonMessage "Transaction or note not found")
             Left WriteFailure -> badRequest "text must not be blank and must not exceed 2000 characters"
+            Left _ -> internalServerError emptyResponse
+            Right transaction -> ok (jsonResponse transaction)
+
+    handleTransactionMetadataUpdateBody :: String -> RqBody -> ServerPartT IO Response
+    handleTransactionMetadataUpdateBody transactionId rqBody =
+      case decode' (unBody rqBody) :: Maybe FinanceTransactionMetadataUpdateRequest of
+        Nothing -> badRequest "Unable to decode the body as a FinanceTransactionMetadataUpdateRequest"
+        Just metadataUpdateRequest -> do
+          result <- liftIO $ runExceptT (repoUpdateFinanceTransactionMetadata financeTransactionRepo principalUserId transactionId metadataUpdateRequest)
+          case result of
+            Left NotFound -> notFound (jsonMessage "Transaction not found")
+            Left WriteFailure -> badRequest "counterparty/description validation failed"
             Left _ -> internalServerError emptyResponse
             Right transaction -> ok (jsonResponse transaction)
 

@@ -27,7 +27,7 @@ import           Test.HUnit
 import           Control.Concurrent (threadDelay)
 import           Control.Monad (when)
 import           Data.Time.Clock.POSIX (getPOSIXTime)
-import           Data.List (isInfixOf, sort, sortOn)
+import           Data.List (isInfixOf, isPrefixOf, sort, sortOn)
 import           Data.Char (toLower)
 import           System.Environment (lookupEnv)
 import AgendaModel (ItemStatus(..), ItemType(..))
@@ -482,6 +482,13 @@ runIntegrationTests = do
         assertStatusCode "Finance transaction note append should require auth" 401 notesResp
         assertMessageResponse "Not authenticated" notesResp
 
+        metadataReq <- parseRequest "POST http://localhost:8081/api/v1/finance/transactions/missing/metadata"
+        metadataResp <- httpJSON $ setRequestMethod "POST"
+                                  $ setRequestHeader "Content-Type" ["application/json"]
+                                  $ setRequestBodyJSON (object ["counterparty" .= ("hello" :: String)]) metadataReq
+        assertStatusCode "Finance transaction metadata update should require auth" 401 metadataResp
+        assertMessageResponse "Not authenticated" metadataResp
+
         notesUpdateReq <- parseRequest "PUT http://localhost:8081/api/v1/finance/transactions/missing/notes/missing"
         notesUpdateResp <- httpJSON $ setRequestMethod "PUT"
                                      $ setRequestHeader "Content-Type" ["application/json"]
@@ -852,6 +859,73 @@ runIntegrationTests = do
 
         emptyBoundaryTransactions <- getFinanceTransactions cookie [("from", "2026-04-02T10:00:00Z"), ("to", "2026-04-02T10:00:00Z")]
         assertEqual "Expected equal from/to boundary to return an empty ledger page" [] emptyBoundaryTransactions
+
+      it "should update finance transaction metadata with partial replace semantics and validation rules" $ do
+        cookie <- signinOnly baseUsername basePassword
+        account <- createFinanceAccount cookie "Metadata Edit Account"
+        accountId <- requireObjectStringField "id" account
+        createdResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "metadata-update-key-1"
+          (object
+            [ "accountId" .= accountId
+            , "amount" .= (2500 :: Int)
+            , "counterparty" .= ("initial merchant" :: String)
+            , "description" .= ("Initial description" :: String)
+            ])
+        assertStatusCode "Transaction create for metadata update scenario should succeed" 200 createdResp
+        let transactionId = financeTransactionIdValue (getResponseBody createdResp)
+
+        bothFieldsResp <- updateFinanceTransactionMetadataExpectValue cookie transactionId (object ["counterparty" .= ("  ACME Shop  " :: String), "description" .= ("  Weekly groceries  " :: String)])
+        assertStatusCode "Metadata update with both fields should succeed" 200 bothFieldsResp
+        assertFinanceTransactionMetadata (Just "acme shop") (Just "Weekly groceries") (getResponseBody bothFieldsResp)
+
+        preserveDescriptionResp <- updateFinanceTransactionMetadataExpectValue cookie transactionId (object ["counterparty" .= ("updated-only-counterparty" :: String)])
+        assertStatusCode "Metadata partial update should succeed" 200 preserveDescriptionResp
+        assertFinanceTransactionMetadata (Just "updated-only-counterparty") (Just "Weekly groceries") (getResponseBody preserveDescriptionResp)
+
+        normalizeNullResp <- updateFinanceTransactionMetadataExpectValue cookie transactionId (object ["counterparty" .= ("" :: String), "description" .= ("   " :: String)])
+        assertStatusCode "Metadata update should normalize blank strings to null" 200 normalizeNullResp
+        assertFinanceTransactionMetadata Nothing Nothing (getResponseBody normalizeNullResp)
+
+        emptyPayloadResp <- updateFinanceTransactionMetadataExpectValue cookie transactionId (object [])
+        assertStatusCode "Metadata update without fields should return 400" 400 emptyPayloadResp
+        assertMessageResponse "counterparty/description validation failed" emptyPayloadResp
+
+        invalidTypeResp <- updateFinanceTransactionMetadataExpectValue cookie transactionId (object ["counterparty" .= (123 :: Int)])
+        assertStatusCode "Metadata update with invalid metadata type should return 400" 400 invalidTypeResp
+        assertMessageResponse "Unable to decode the body as a FinanceTransactionMetadataUpdateRequest" invalidTypeResp
+
+        overlongCounterpartyResp <- updateFinanceTransactionMetadataExpectValue cookie transactionId (object ["counterparty" .= (replicate 121 'x')])
+        assertStatusCode "Metadata update with overlong counterparty should return 400" 400 overlongCounterpartyResp
+        assertMessageResponse "counterparty/description validation failed" overlongCounterpartyResp
+
+        overlongDescriptionResp <- updateFinanceTransactionMetadataExpectValue cookie transactionId (object ["description" .= (replicate 1001 'd')])
+        assertStatusCode "Metadata update with overlong description should return 400" 400 overlongDescriptionResp
+        assertMessageResponse "counterparty/description validation failed" overlongDescriptionResp
+
+        unknownTransactionResp <- updateFinanceTransactionMetadataExpectValue cookie "missing-transaction" (object ["counterparty" .= ("x" :: String)])
+        assertStatusCode "Metadata update for unknown transaction should return 404" 404 unknownTransactionResp
+        assertMessageResponse "Transaction not found" unknownTransactionResp
+
+        snapshotResp <- createFinanceAccountSnapshotExpectValue cookie accountId 1000 "2026-04-01T10:00:00Z"
+        assertStatusCode "Snapshot create should succeed for adjustment-row metadata test" 200 snapshotResp
+        snapshotId <- requireObjectStringField "snapshotId" (getResponseBody snapshotResp)
+        adjustmentResp <- createFinanceAccountSnapshotAdjustmentExpectValue cookie accountId snapshotId (Just "sync")
+        assertStatusCode "Adjustment create should succeed for adjustment-row metadata test" 200 adjustmentResp
+        listRows <- getFinanceTransactions cookie []
+        let adjustmentRows = filter (\row -> "adjustment:" `isPrefixOf` financeTransactionIdValue row) listRows
+        case adjustmentRows of
+          adjustmentRow : _ -> do
+            let adjustmentId = financeTransactionIdValue adjustmentRow
+            adjustmentMetadataResp <- updateFinanceTransactionMetadataExpectValue cookie adjustmentId (object ["counterparty" .= ("nope" :: String)])
+            assertStatusCode "Metadata update for adjustment rows should return 404" 404 adjustmentMetadataResp
+            assertMessageResponse "Transaction not found" adjustmentMetadataResp
+          _ -> assertFailure "Expected at least one adjustment row"
+
+        updatedRows <- getFinanceTransactions cookie []
+        let rowsWithTransactionId = filter (\row -> financeTransactionIdValue row == transactionId) updatedRows
+        case rowsWithTransactionId of
+          updatedRow : _ -> assertFinanceTransactionMetadata Nothing Nothing updatedRow
+          _ -> assertFailure "Expected updated transaction row to exist in ledger list"
 
       it "should validate finance transaction list filters and treat unknown account filters as empty results" $ do
         uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
@@ -2722,6 +2796,14 @@ updateFinanceTransactionNoteExpectValue cookie transactionId noteId textValue = 
          $ setRequestHeader "Cookie" [BS.pack cookie]
          $ setRequestHeader "Content-Type" ["application/json"]
          $ setRequestBodyJSON (object ["text" .= textValue]) req
+
+updateFinanceTransactionMetadataExpectValue :: String -> String -> Value -> IO (Response Value)
+updateFinanceTransactionMetadataExpectValue cookie transactionId payload = do
+  req <- parseRequest ("POST http://localhost:8081" ++ financeTransactionsEndpoint ++ "/" ++ transactionId ++ "/metadata")
+  httpJSON $ setRequestMethod "POST"
+         $ setRequestHeader "Cookie" [BS.pack cookie]
+         $ setRequestHeader "Content-Type" ["application/json"]
+         $ setRequestBodyJSON payload req
 
 deleteFinanceTransactionNoteExpectValue :: String -> String -> String -> IO (Response Value)
 deleteFinanceTransactionNoteExpectValue cookie transactionId noteId = do

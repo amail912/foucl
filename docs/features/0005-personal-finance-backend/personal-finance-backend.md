@@ -19,7 +19,6 @@ Provide an authenticated personal finance backend for manual transaction entry, 
 ## Stories
 
 ### Ready
-- [013 Transaction Metadata Update Endpoint](ready/013-transaction-metadata-update-endpoint.md) - Define metadata mutation behavior for existing transactions with validation and normalized write semantics.
 - [014 Counterparty Suggestions Endpoint](ready/014-counterparty-suggestions-endpoint.md) - Define counterparty typeahead query behavior, ranking precedence, and suggestion response shape.
 - [015 Extended Ledger Filtering Contract](ready/015-extended-ledger-filtering-contract.md) - Extend ledger queries with direction, category include/exclude, amount range, and metadata search filters.
 - [016 Analytics Report Endpoint And Shared Filter Contract](ready/016-analytics-report-endpoint-and-shared-filter-contract.md) - Add richer report analytics payloads and define shared filter semantics between report and ledger endpoints.
@@ -46,6 +45,7 @@ Provide an authenticated personal finance backend for manual transaction entry, 
 - [010d Remove Legacy Finance Event Storage And Finalize Rollout](done/010d-remove-legacy-finance-event-storage-and-finalize-rollout.md) - Finalize canonical-only finance storage by collapsing migration history to the canonical baseline and removing legacy event-table dependencies from tests/wiring.
 - [011 Reconciliation Adjustment Workflow](done/011-reconciliation-adjustment-workflow.md) - Define first-class snapshot-scoped reconciliation adjustments with signed report impact and a marker in ledger/export views.
 - [012 Rich Transaction Metadata Fields And Write Support](done/012-rich-transaction-metadata-fields-and-write-support.md) - Add optional counterparty and description metadata across transaction reads and create writes.
+- [013 Transaction Metadata Update Endpoint](done/013-transaction-metadata-update-endpoint.md) - Define metadata mutation behavior for existing transactions with validation and normalized write semantics.
 
 ### Canceled
 - [010c Cut Over Export And Read Projections To Canonical Events](canceled/010c-cut-over-export-and-read-projections-to-canonical-events.md) - Canceled because export canonical sourcing was already delivered in `008`, and replay/rebuild parity was dropped from current scope.

@@ -44,6 +44,7 @@ financeTransactionsEndpoint = "/api/v1/finance/transactions"
 financeTransactionsSentEndpoint = "/api/v1/finance/transactions/sent"
 financeTransactionsReceivedEndpoint = "/api/v1/finance/transactions/received"
 financeReportEndpoint = "/api/v1/finance/report"
+financeCounterpartySuggestEndpoint = "/api/v1/finance/counterparties/suggest"
 financeExportEndpoint = "/api/v1/finance/export"
 
 runIntegrationTests :: IO ()
@@ -444,6 +445,11 @@ runIntegrationTests = do
         reportResp <- httpJSON $ setRequestMethod "GET" reportReq
         assertStatusCode "Finance report should require auth" 401 reportResp
         assertMessageResponse "Not authenticated" reportResp
+
+        counterpartiesReq <- parseRequest "GET http://localhost:8081/api/v1/finance/counterparties/suggest?q=a"
+        counterpartiesResp <- httpJSON $ setRequestMethod "GET" counterpartiesReq
+        assertStatusCode "Finance counterparty suggestions should require auth" 401 counterpartiesResp
+        assertMessageResponse "Not authenticated" counterpartiesResp
 
         exportReq <- parseRequest "GET http://localhost:8081/api/v1/finance/export"
         exportResp <- httpJSON $ setRequestMethod "GET" exportReq
@@ -926,6 +932,80 @@ runIntegrationTests = do
         case rowsWithTransactionId of
           updatedRow : _ -> assertFinanceTransactionMetadata Nothing Nothing updatedRow
           _ -> assertFailure "Expected updated transaction row to exist in ledger list"
+
+      it "should return ranked counterparty suggestions with filters and suggestedCategory semantics" $ do
+        uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
+        let suggestUsername = "fin-suggest-" ++ show uniquenessSuffix
+        ensureApprovedSandboxUser baseUsername suggestUsername basePassword
+        cookie <- signinOnly suggestUsername basePassword
+        primaryAccount <- createFinanceAccount cookie "Suggest Primary"
+        secondaryAccount <- createFinanceAccount cookie "Suggest Secondary"
+        primaryAccountId <- requireObjectStringField "id" primaryAccount
+        secondaryAccountId <- requireObjectStringField "id" secondaryAccount
+
+        t1 <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "suggest-key-1" (object ["accountId" .= primaryAccountId, "amount" .= (100 :: Int), "occurredAt" .= ("2026-04-01T10:00:00Z" :: String), "counterparty" .= ("acme store" :: String)])
+        t2 <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "suggest-key-2" (object ["accountId" .= primaryAccountId, "amount" .= (110 :: Int), "occurredAt" .= ("2026-04-02T10:00:00Z" :: String), "counterparty" .= ("acme store" :: String)])
+        t3 <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "suggest-key-3" (object ["accountId" .= primaryAccountId, "amount" .= (120 :: Int), "occurredAt" .= ("2026-04-03T10:00:00Z" :: String), "counterparty" .= ("acme store" :: String)])
+        _ <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "suggest-key-4" (object ["accountId" .= primaryAccountId, "amount" .= (130 :: Int), "occurredAt" .= ("2026-04-04T10:00:00Z" :: String), "counterparty" .= ("the acme outlet" :: String)])
+        _ <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "suggest-key-5" (object ["accountId" .= primaryAccountId, "amount" .= (140 :: Int), "occurredAt" .= ("2026-04-05T10:00:00Z" :: String), "counterparty" .= ("the acme outlet" :: String)])
+        _ <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "suggest-key-6" (object ["accountId" .= primaryAccountId, "amount" .= (150 :: Int), "occurredAt" .= ("2026-04-06T10:00:00Z" :: String), "counterparty" .= ("acme alpha" :: String)])
+        _ <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "suggest-key-7" (object ["accountId" .= primaryAccountId, "amount" .= (160 :: Int), "occurredAt" .= ("2026-04-06T10:00:00Z" :: String), "counterparty" .= ("acme bravo" :: String)])
+        _ <- createFinanceTransactionExpectValue cookie financeTransactionsReceivedEndpoint "suggest-key-8" (object ["accountId" .= primaryAccountId, "amount" .= (170 :: Int), "occurredAt" .= ("2026-04-07T10:00:00Z" :: String), "counterparty" .= ("acme received" :: String)])
+        _ <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "suggest-key-9" (object ["accountId" .= secondaryAccountId, "amount" .= (180 :: Int), "occurredAt" .= ("2026-04-08T10:00:00Z" :: String), "counterparty" .= ("acme secondary" :: String)])
+
+        t1Id <- requireObjectStringField "id" (getResponseBody t1)
+        t2Id <- requireObjectStringField "id" (getResponseBody t2)
+        t3Id <- requireObjectStringField "id" (getResponseBody t3)
+        _ <- categorizeFinanceTransactionExpectValue cookie t1Id "pets.food"
+        _ <- categorizeFinanceTransactionExpectValue cookie t2Id "pets.food"
+        _ <- categorizeFinanceTransactionExpectValue cookie t3Id "personal.clothing"
+
+        missingQResp <- getFinanceCounterpartySuggestionsExpectValue cookie []
+        assertStatusCode "Missing q should return 200" 200 missingQResp
+        assertEqual "Missing q should return empty items" [] (financeCounterpartySuggestionValues (getResponseBody missingQResp))
+
+        emptyQResp <- getFinanceCounterpartySuggestionsExpectValue cookie [("q", "")]
+        assertStatusCode "Empty q should return 200" 200 emptyQResp
+        assertEqual "Empty q should return empty items" [] (financeCounterpartySuggestionValues (getResponseBody emptyQResp))
+
+        invalidLimitResp <- getFinanceCounterpartySuggestionsExpectValue cookie [("q", "acme"), ("limit", "0")]
+        assertStatusCode "Invalid limit should return 400" 400 invalidLimitResp
+        assertMessageResponse "limit must be a positive integer" invalidLimitResp
+
+        invalidDirectionResp <- getFinanceCounterpartySuggestionsExpectValue cookie [("q", "acme"), ("direction", "bad")]
+        assertStatusCode "Invalid direction should return 400" 400 invalidDirectionResp
+        assertMessageResponse "direction must be one of: sent, received, all" invalidDirectionResp
+
+        duplicatedAccountIdResp <- getFinanceCounterpartySuggestionsExpectValue cookie [("q", "acme"), ("accountId", primaryAccountId), ("accountId", secondaryAccountId)]
+        assertStatusCode "Duplicate accountId should return 400" 400 duplicatedAccountIdResp
+        assertMessageResponse "accountId must be provided at most once" duplicatedAccountIdResp
+
+        defaultResp <- getFinanceCounterpartySuggestionsExpectValue cookie [("q", "acme")]
+        assertStatusCode "Default suggestion request should succeed" 200 defaultResp
+        assertEqual "Expected prefix matches ahead of contains matches" ["acme store", "acme secondary", "acme received", "acme alpha", "acme bravo", "the acme outlet"] (financeCounterpartySuggestionValues (getResponseBody defaultResp))
+        assertEqual "Expected usage count for acme store" 3 (financeCounterpartySuggestionUsageCountFor "acme store" (getResponseBody defaultResp))
+        assertEqual "Expected suggestedCategory for acme store to use frequency then recency" (Just "pets.food") (financeCounterpartySuggestionCategoryFor "acme store" (getResponseBody defaultResp))
+        assertEqual "Expected suggestedCategory for uncategorized counterparty to be null" Nothing (financeCounterpartySuggestionCategoryFor "the acme outlet" (getResponseBody defaultResp))
+
+        directionSentResp <- getFinanceCounterpartySuggestionsExpectValue cookie [("q", "acme"), ("direction", "sent")]
+        assertStatusCode "Direction sent suggestions should succeed" 200 directionSentResp
+        assertBool "Direction sent should exclude received counterparties" ("acme received" `notElem` financeCounterpartySuggestionValues (getResponseBody directionSentResp))
+
+        directionReceivedResp <- getFinanceCounterpartySuggestionsExpectValue cookie [("q", "acme"), ("direction", "received")]
+        assertStatusCode "Direction received suggestions should succeed" 200 directionReceivedResp
+        assertEqual "Direction received should only include received counterparties" ["acme received"] (financeCounterpartySuggestionValues (getResponseBody directionReceivedResp))
+
+        accountFilterResp <- getFinanceCounterpartySuggestionsExpectValue cookie [("q", "acme"), ("accountId", primaryAccountId)]
+        assertStatusCode "Account filter suggestions should succeed" 200 accountFilterResp
+        assertBool "Account filter should exclude other-account counterparties" ("acme secondary" `notElem` financeCounterpartySuggestionValues (getResponseBody accountFilterResp))
+
+        unknownAccountFilterResp <- getFinanceCounterpartySuggestionsExpectValue cookie [("q", "acme"), ("accountId", "missing-account")]
+        assertStatusCode "Unknown account filter should succeed with empty items" 200 unknownAccountFilterResp
+        assertEqual "Unknown account filter should return empty items" [] (financeCounterpartySuggestionValues (getResponseBody unknownAccountFilterResp))
+
+        cappedLimitResp <- getFinanceCounterpartySuggestionsExpectValue cookie [("q", "acme"), ("limit", "999")]
+        assertStatusCode "Large limit request should succeed and cap" 200 cappedLimitResp
+        assertEqual "Expected capped result size to equal available dataset size" 6 (Prelude.length (financeCounterpartySuggestionValues (getResponseBody cappedLimitResp)))
 
       it "should validate finance transaction list filters and treat unknown account filters as empty results" $ do
         uniquenessSuffix <- round . (* 1000000) <$> getPOSIXTime
@@ -2731,6 +2811,11 @@ getFinanceReportExpectValue cookie queryParams = do
   req <- financeReportRequest cookie queryParams
   httpJSON req
 
+getFinanceCounterpartySuggestionsExpectValue :: String -> [(String, String)] -> IO (Response Value)
+getFinanceCounterpartySuggestionsExpectValue cookie queryParams = do
+  req <- financeCounterpartySuggestionsRequest cookie queryParams
+  httpJSON req
+
 getFinanceExportExpectValue :: String -> IO (Response Value)
 getFinanceExportExpectValue cookie = do
   req <- parseRequest ("GET http://localhost:8081" ++ financeExportEndpoint)
@@ -2747,6 +2832,12 @@ financeTransactionsRequest cookie queryParams = do
 financeReportRequest :: String -> [(String, String)] -> IO Request
 financeReportRequest cookie queryParams = do
   req <- parseRequest ("GET http://localhost:8081" ++ financeReportEndpoint)
+  let encodedQuery = map (\(k, v) -> (BS.pack k, Just (BS.pack v))) queryParams
+  pure $ setRequestHeader "Cookie" [BS.pack cookie] $ setRequestMethod "GET" $ setRequestQueryString encodedQuery req
+
+financeCounterpartySuggestionsRequest :: String -> [(String, String)] -> IO Request
+financeCounterpartySuggestionsRequest cookie queryParams = do
+  req <- parseRequest ("GET http://localhost:8081" ++ financeCounterpartySuggestEndpoint)
   let encodedQuery = map (\(k, v) -> (BS.pack k, Just (BS.pack v))) queryParams
   pure $ setRequestHeader "Cookie" [BS.pack cookie] $ setRequestMethod "GET" $ setRequestQueryString encodedQuery req
 
@@ -2991,6 +3082,57 @@ financeTransactionIdValue responseBody =
         Just actualId -> actualId
         Nothing -> error "Expected finance transaction id field"
     _ -> error "Expected finance transaction response object"
+
+financeCounterpartySuggestionValues :: Value -> [String]
+financeCounterpartySuggestionValues responseBody =
+  case responseBody of
+    Object value ->
+      case parseMaybe (.: "items") value of
+        Just items -> map financeCounterpartySuggestionValue items
+        Nothing -> error "Expected counterparty suggestions items field"
+    _ -> error "Expected counterparty suggestions response object"
+
+financeCounterpartySuggestionValue :: Value -> String
+financeCounterpartySuggestionValue responseBody =
+  case responseBody of
+    Object value ->
+      case parseMaybe (.: "value") value of
+        Just actualValue -> actualValue
+        Nothing -> error "Expected counterparty suggestion value field"
+    _ -> error "Expected counterparty suggestion object"
+
+financeCounterpartySuggestionUsageCountFor :: String -> Value -> Int
+financeCounterpartySuggestionUsageCountFor targetValue responseBody =
+  case filter (\item -> financeCounterpartySuggestionValue item == targetValue) (financeCounterpartySuggestionItems responseBody) of
+    item : _ ->
+      case item of
+        Object value ->
+          case parseMaybe (.: "usageCount") value of
+            Just usageCount -> usageCount
+            Nothing -> error "Expected counterparty suggestion usageCount field"
+        _ -> error "Expected counterparty suggestion object"
+    [] -> error "Expected target counterparty suggestion item"
+
+financeCounterpartySuggestionCategoryFor :: String -> Value -> Maybe String
+financeCounterpartySuggestionCategoryFor targetValue responseBody =
+  case filter (\item -> financeCounterpartySuggestionValue item == targetValue) (financeCounterpartySuggestionItems responseBody) of
+    item : _ ->
+      case item of
+        Object value ->
+          case parseMaybe (.: "suggestedCategory") value of
+            Just categoryValue -> categoryValue
+            Nothing -> error "Expected counterparty suggestion suggestedCategory field"
+        _ -> error "Expected counterparty suggestion object"
+    [] -> error "Expected target counterparty suggestion item"
+
+financeCounterpartySuggestionItems :: Value -> [Value]
+financeCounterpartySuggestionItems responseBody =
+  case responseBody of
+    Object value ->
+      case parseMaybe (.: "items") value of
+        Just items -> items
+        Nothing -> error "Expected counterparty suggestions items field"
+    _ -> error "Expected counterparty suggestions response object"
 
 financeTransactionCategoryValue :: Value -> Maybe String
 financeTransactionCategoryValue responseBody =

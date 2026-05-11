@@ -12,6 +12,9 @@ module FinanceTransactionRepository
   , FinanceTransactionNoteCreateRequest(..)
   , FinanceTransactionNoteUpdateRequest(..)
   , FinanceTransactionMetadataUpdateRequest(..)
+  , FinanceCounterpartySuggestionsRequest(..)
+  , FinanceCounterpartySuggestionsResult(..)
+  , FinanceCounterpartySuggestionItem(..)
   , FinanceTransactionLinkRequest(..)
   , FinanceTransactionSplitRow(..)
   , FinanceTransactionTransfer(..)
@@ -61,6 +64,7 @@ data FinanceTransactionRepository = FinanceTransactionRepository
   , repoAddFinanceTransactionNote :: !(String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction)
   , repoUpdateFinanceTransactionNote :: !(String -> String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction)
   , repoUpdateFinanceTransactionMetadata :: !(String -> String -> FinanceTransactionMetadataUpdateRequest -> ExceptT RepositoryError IO FinanceTransaction)
+  , repoSuggestFinanceCounterparties :: !(String -> FinanceCounterpartySuggestionsRequest -> ExceptT RepositoryError IO FinanceCounterpartySuggestionsResult)
   , repoDeleteFinanceTransactionNote :: !(String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction)
   , repoCategorizeFinanceTransaction :: !(String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction)
   , repoSplitFinanceTransaction :: !(String -> String -> [FinanceTransactionSplitWriteRow] -> ExceptT RepositoryError IO FinanceTransaction)
@@ -88,6 +92,24 @@ data FinanceTransactionMetadataUpdateRequest = FinanceTransactionMetadataUpdateR
   { financeTransactionMetadataUpdateCounterparty :: !(Maybe (Maybe String))
   , financeTransactionMetadataUpdateDescription :: !(Maybe (Maybe String))
   }
+
+data FinanceCounterpartySuggestionsRequest = FinanceCounterpartySuggestionsRequest
+  { financeCounterpartySuggestionsQuery :: !String
+  , financeCounterpartySuggestionsLimit :: !Int
+  , financeCounterpartySuggestionsDirection :: !FinanceReportDirection
+  , financeCounterpartySuggestionsAccountId :: !(Maybe String)
+  } deriving (Eq, Show)
+
+data FinanceCounterpartySuggestionItem = FinanceCounterpartySuggestionItem
+  { financeCounterpartySuggestionValue :: !String
+  , financeCounterpartySuggestionUsageCount :: !Int
+  , financeCounterpartySuggestionLastUsedAt :: !UTCTime
+  , financeCounterpartySuggestionSuggestedCategory :: !(Maybe String)
+  } deriving (Eq, Show)
+
+newtype FinanceCounterpartySuggestionsResult = FinanceCounterpartySuggestionsResult
+  { financeCounterpartySuggestionsItems :: [FinanceCounterpartySuggestionItem]
+  } deriving (Eq, Show)
 
 data FinanceTransactionLinkRequest = FinanceTransactionLinkRequest
   { financeTransactionLinkSourceTransactionId :: !String
@@ -348,6 +370,24 @@ instance ToJSON FinanceReportResult where
       , "transactionIds" .= financeReportTransactionIds
       ]
 
+instance ToJSON FinanceCounterpartySuggestionItem where
+  toJSON FinanceCounterpartySuggestionItem
+    { financeCounterpartySuggestionValue
+    , financeCounterpartySuggestionUsageCount
+    , financeCounterpartySuggestionLastUsedAt
+    , financeCounterpartySuggestionSuggestedCategory
+    } =
+      object
+        [ "value" .= financeCounterpartySuggestionValue
+        , "usageCount" .= financeCounterpartySuggestionUsageCount
+        , "lastUsedAt" .= financeCounterpartySuggestionLastUsedAt
+        , "suggestedCategory" .= financeCounterpartySuggestionSuggestedCategory
+        ]
+
+instance ToJSON FinanceCounterpartySuggestionsResult where
+  toJSON FinanceCounterpartySuggestionsResult { financeCounterpartySuggestionsItems } =
+    object ["items" .= financeCounterpartySuggestionsItems]
+
 instance ToJSON FinanceCanonicalEventEnvelope where
   toJSON FinanceCanonicalEventEnvelope
     { financeCanonicalEventNumber
@@ -390,6 +430,7 @@ postgresFinanceTransactionRepository pool =
     , repoAddFinanceTransactionNote = pgAddFinanceTransactionNote pool
     , repoUpdateFinanceTransactionNote = pgUpdateFinanceTransactionNote pool
     , repoUpdateFinanceTransactionMetadata = pgUpdateFinanceTransactionMetadata pool
+    , repoSuggestFinanceCounterparties = pgSuggestFinanceCounterparties pool
     , repoDeleteFinanceTransactionNote = pgDeleteFinanceTransactionNote pool
     , repoCategorizeFinanceTransaction = pgCategorizeFinanceTransaction pool
     , repoSplitFinanceTransaction = pgSplitFinanceTransaction pool
@@ -717,6 +758,79 @@ pgGetFinanceReport pool userId request =
         , reportDirectionSqlFilter (financeReportDirection request)
         )
         :: IO [(String, UTCTime, String, Int64, Text, Maybe String)]
+
+pgSuggestFinanceCounterparties :: Pool Connection -> String -> FinanceCounterpartySuggestionsRequest -> ExceptT RepositoryError IO FinanceCounterpartySuggestionsResult
+pgSuggestFinanceCounterparties pool userId request =
+  withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
+    rows <- tryExcept
+      (query conn
+        "WITH base AS ( \
+        \  SELECT t.transaction_id, t.counterparty, t.occurred_at \
+        \  FROM finance_transactions t \
+        \  WHERE t.user_id = ? \
+        \    AND t.counterparty IS NOT NULL \
+        \    AND (? = '' OR t.direction = ?) \
+        \    AND (? = '' OR t.account_id = ?) \
+        \    AND (t.counterparty LIKE ? OR t.counterparty LIKE ?) \
+        \), counters AS ( \
+        \  SELECT counterparty, COUNT(*)::bigint AS usage_count, MAX(occurred_at) AS last_used_at, \
+        \         CASE WHEN counterparty LIKE ? THEN 0 ELSE 1 END AS match_rank \
+        \  FROM base \
+        \  GROUP BY counterparty \
+        \), category_rows AS ( \
+        \  SELECT b.counterparty, c.category, b.occurred_at \
+        \  FROM base b \
+        \  JOIN finance_transaction_categories c \
+        \    ON c.user_id = ? AND c.transaction_id = b.transaction_id \
+        \  UNION ALL \
+        \  SELECT b.counterparty, s.category, b.occurred_at \
+        \  FROM base b \
+        \  JOIN finance_transaction_splits s \
+        \    ON s.user_id = ? AND s.transaction_id = b.transaction_id \
+        \), category_ranked AS ( \
+        \  SELECT counterparty, category, COUNT(*)::bigint AS category_count, MAX(occurred_at) AS category_last_used \
+        \  FROM category_rows \
+        \  GROUP BY counterparty, category \
+        \), category_best AS ( \
+        \  SELECT DISTINCT ON (counterparty) counterparty, category \
+        \  FROM category_ranked \
+        \  ORDER BY counterparty, category_count DESC, category_last_used DESC, category ASC \
+        \) \
+        \SELECT c.counterparty, c.usage_count, c.last_used_at, cb.category \
+        \FROM counters c \
+        \LEFT JOIN category_best cb ON cb.counterparty = c.counterparty \
+        \ORDER BY c.match_rank ASC, c.usage_count DESC, c.last_used_at DESC, c.counterparty ASC \
+        \LIMIT ?"
+        ( userId
+        , directionSql
+        , directionSql
+        , accountFilter
+        , accountFilter
+        , prefixPattern
+        , containsPattern
+        , prefixPattern
+        , userId
+        , userId
+        , fromIntegral (financeCounterpartySuggestionsLimit request) :: Int64
+        )
+        :: IO [(String, Int64, UTCTime, Maybe String)])
+      mapSqlReadException
+    let items =
+          [ FinanceCounterpartySuggestionItem
+              { financeCounterpartySuggestionValue = value
+              , financeCounterpartySuggestionUsageCount = fromIntegral usageCount
+              , financeCounterpartySuggestionLastUsedAt = lastUsedAt
+              , financeCounterpartySuggestionSuggestedCategory = suggestedCategory
+              }
+          | (value, usageCount, lastUsedAt, suggestedCategory) <- rows
+          ]
+    pure (FinanceCounterpartySuggestionsResult items)
+  where
+    q = financeCounterpartySuggestionsQuery request
+    prefixPattern = q ++ "%"
+    containsPattern = "%" ++ q ++ "%"
+    accountFilter = maybe "" id (financeCounterpartySuggestionsAccountId request)
+    directionSql = reportDirectionSqlFilter (financeCounterpartySuggestionsDirection request)
 
 data ReportBaseRow = ReportBaseRow
   { baseRowId :: !String

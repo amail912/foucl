@@ -45,7 +45,9 @@ import FinanceCategoryRepository
   , normalizeFinanceCategoryName
   )
 import FinanceTransactionRepository
-  ( FinanceTransactionCreateRequest(..)
+  ( FinanceCounterpartySuggestionsRequest(..)
+  , FinanceCounterpartySuggestionsResult(..)
+  , FinanceTransactionCreateRequest(..)
   , FinanceTransactionCategorizeRequest(..)
   , FinanceReportDirection(..)
   , FinanceReportRequest(..)
@@ -665,6 +667,7 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
           , financeTransactionsMetadata
           ]
     , dir "report" financeReport
+    , dir "counterparties" financeCounterparties
     , dir "export" financeExport
     ]
   where
@@ -963,6 +966,39 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
                     Right reportResult -> ok (jsonResponse reportResult)
             _ -> internalServerError emptyResponse
 
+    financeCounterparties = do
+      dir "suggest" $ do
+        nullDir
+        method GET
+        request <- askRq
+        mQ <- (Just <$> look "q") `mplus` pure Nothing
+        mLimitRaw <- (Just <$> look "limit") `mplus` pure Nothing
+        let mDirectionRaw = queryParamValues "direction" request
+            accountIdValues = queryParamValues "accountId" request
+        case (parseCounterpartySuggestionLimit mLimitRaw, parseCounterpartySuggestionDirection mDirectionRaw, parseSingleOptionalParam "accountId" accountIdValues) of
+          (Left message, _, _) -> badRequest message
+          (_, Left message, _) -> badRequest message
+          (_, _, Left message) -> badRequest message
+          (Right limitValue, Right direction, Right accountId) ->
+            case mQ of
+              Nothing -> ok (jsonResponse (FinanceCounterpartySuggestionsResult []))
+              Just rawQ ->
+                let normalizedQ = map toLower rawQ
+                 in if null normalizedQ
+                      then ok (jsonResponse (FinanceCounterpartySuggestionsResult []))
+                      else do
+                        let suggestionRequest =
+                              FinanceCounterpartySuggestionsRequest
+                                { financeCounterpartySuggestionsQuery = normalizedQ
+                                , financeCounterpartySuggestionsLimit = limitValue
+                                , financeCounterpartySuggestionsDirection = direction
+                                , financeCounterpartySuggestionsAccountId = accountId
+                                }
+                        result <- liftIO $ runExceptT (repoSuggestFinanceCounterparties financeTransactionRepo principalUserId suggestionRequest)
+                        case result of
+                          Left _ -> internalServerError emptyResponse
+                          Right suggestions -> ok (jsonResponse suggestions)
+
     financeExport = do
       nullDir
       method GET
@@ -1191,6 +1227,18 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
         "received" -> Right FinanceReportReceived
         _ -> Left "direction must be one of: sent, received, all"
     parseReportDirection _ = Left "direction must be provided at most once"
+
+    parseCounterpartySuggestionDirection = parseReportDirection
+
+    parseCounterpartySuggestionLimit Nothing = Right 8
+    parseCounterpartySuggestionLimit (Just rawLimit) =
+      case reads rawLimit :: [(Int, String)] of
+        [(parsed, "")] | parsed > 0 -> Right (min 20 parsed)
+        _ -> Left "limit must be a positive integer"
+
+    parseSingleOptionalParam _ [] = Right Nothing
+    parseSingleOptionalParam fieldName [value] = Right (Just value)
+    parseSingleOptionalParam fieldName _ = Left (fieldName ++ " must be provided at most once")
 
     hasOverlap leftValues rightValues =
       let leftSet = Set.fromList leftValues

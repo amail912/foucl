@@ -51,6 +51,7 @@ import FinanceTransactionRepository
   , FinanceTransactionCategorizeRequest(..)
   , FinanceReportDirection(..)
   , FinanceReportRequest(..)
+  , FinanceTransactionsListRequest(..)
   , FinanceTransactionDirection(..)
   , FinanceTransactionLinkRequest(..)
   , FinanceTransactionNoteCreateRequest(..)
@@ -879,19 +880,43 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
     financeTransactionsList = do
       nullDir
       method GET
+      request <- askRq
       mAccountId <- (Just <$> look "accountId") `mplus` pure Nothing
       mFromRaw <- (Just <$> look "from") `mplus` pure Nothing
       mToRaw <- (Just <$> look "to") `mplus` pure Nothing
-      case (parseQueryTime "from" mFromRaw, parseQueryTime "to" mToRaw) of
-        (Left message, _) -> badRequest message
-        (_, Left message) -> badRequest message
-        (Right mFrom, Right mTo) ->
+      mAmountMinRaw <- (Just <$> look "amountMin") `mplus` pure Nothing
+      mAmountMaxRaw <- (Just <$> look "amountMax") `mplus` pure Nothing
+      mSearch <- (Just <$> look "search") `mplus` pure Nothing
+      let mDirectionRaw = queryParamValues "direction" request
+          categoryInValues = queryParamValues "categoryIn" request
+          categoryNotInValues = queryParamValues "categoryNotIn" request
+      case (parseQueryTime "from" mFromRaw, parseQueryTime "to" mToRaw, parseReportDirection mDirectionRaw, parseOptionalInt "amountMin" mAmountMinRaw, parseOptionalInt "amountMax" mAmountMaxRaw) of
+        (_, _, _, Left message, _) -> badRequest message
+        (_, _, _, _, Left message) -> badRequest message
+        (_, _, Left message, _, _) -> badRequest message
+        (Left message, _, _, _, _) -> badRequest message
+        (_, Left message, _, _, _) -> badRequest message
+        (Right mFrom, Right mTo, Right direction, Right mAmountMin, Right mAmountMax) ->
           case (mFrom, mTo) of
             (Just fromTs, Just toTs)
               | fromTs > toTs -> badRequest "from must be less than or equal to to"
               | fromTs == toTs -> ok (jsonResponse ([] :: [FinanceTransaction]))
+            _ | hasOverlap categoryInValues categoryNotInValues -> badRequest "categoryIn and categoryNotIn must not overlap"
+              | maybe False (\amountMin -> maybe False (amountMin >) mAmountMax) mAmountMin -> badRequest "amountMin must be less than or equal to amountMax"
             _ -> do
-              result <- liftIO $ runExceptT (repoListFinanceTransactions financeTransactionRepo principalUserId mAccountId mFrom mTo)
+              let listRequest =
+                    FinanceTransactionsListRequest
+                      { financeTransactionsListAccountId = mAccountId
+                      , financeTransactionsListFrom = mFrom
+                      , financeTransactionsListTo = mTo
+                      , financeTransactionsListDirection = direction
+                      , financeTransactionsListCategoryIn = categoryInValues
+                      , financeTransactionsListCategoryNotIn = categoryNotInValues
+                      , financeTransactionsListAmountMin = mAmountMin
+                      , financeTransactionsListAmountMax = mAmountMax
+                      , financeTransactionsListSearch = mSearch
+                      }
+              result <- liftIO $ runExceptT (repoListFinanceTransactionsFiltered financeTransactionRepo principalUserId listRequest)
               case result of
                 Left _ -> internalServerError emptyResponse
                 Right transactions -> ok (jsonResponse transactions)
@@ -1014,7 +1039,17 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
               case categoriesResult of
                 Left _ -> internalServerError emptyResponse
                 Right categories -> do
-                  transactionsResult <- liftIO $ runExceptT (repoListFinanceTransactions financeTransactionRepo principalUserId Nothing Nothing Nothing)
+                  transactionsResult <- liftIO $ runExceptT (repoListFinanceTransactionsFiltered financeTransactionRepo principalUserId FinanceTransactionsListRequest
+                    { financeTransactionsListAccountId = Nothing
+                    , financeTransactionsListFrom = Nothing
+                    , financeTransactionsListTo = Nothing
+                    , financeTransactionsListDirection = FinanceReportAll
+                    , financeTransactionsListCategoryIn = []
+                    , financeTransactionsListCategoryNotIn = []
+                    , financeTransactionsListAmountMin = Nothing
+                    , financeTransactionsListAmountMax = Nothing
+                    , financeTransactionsListSearch = Nothing
+                    })
                   case transactionsResult of
                     Left _ -> internalServerError emptyResponse
                     Right transactions -> do
@@ -1235,6 +1270,12 @@ financeController financeAccountRepo financeCategoryRepo financeTransactionRepo 
       case reads rawLimit :: [(Int, String)] of
         [(parsed, "")] | parsed > 0 -> Right (min 20 parsed)
         _ -> Left "limit must be a positive integer"
+
+    parseOptionalInt _ Nothing = Right Nothing
+    parseOptionalInt fieldName (Just rawValue) =
+      case reads rawValue :: [(Int, String)] of
+        [(parsed, "")] -> Right (Just parsed)
+        _ -> Left (fieldName ++ " must be an integer")
 
     parseSingleOptionalParam _ [] = Right Nothing
     parseSingleOptionalParam fieldName [value] = Right (Just value)

@@ -1014,10 +1014,52 @@ runIntegrationTests = do
         cookie <- signinOnly ledgerValidationUsername basePassword
         account <- createFinanceAccount cookie "Ledger Validation"
         accountId <- requireObjectStringField "id" account
-        _ <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "ledger-validation-key" (object ["accountId" .= accountId, "amount" .= (123 :: Int), "occurredAt" .= ("2026-04-05T10:00:00Z" :: String)])
+        sentResp <- createFinanceTransactionExpectValue cookie financeTransactionsSentEndpoint "ledger-validation-key" (object ["accountId" .= accountId, "amount" .= (123 :: Int), "occurredAt" .= ("2026-04-05T10:00:00Z" :: String), "counterparty" .= ("Coffee Shop" :: String), "description" .= ("Morning coffee" :: String)])
+        assertStatusCode "Validation scenario sent transaction create should succeed" 200 sentResp
+        sentId <- requireObjectStringField "id" (getResponseBody sentResp)
+
+        receivedResp <- createFinanceTransactionExpectValue cookie financeTransactionsReceivedEndpoint "ledger-validation-key-2" (object ["accountId" .= accountId, "amount" .= (456 :: Int), "occurredAt" .= ("2026-04-05T11:00:00Z" :: String), "counterparty" .= ("Payroll Ltd" :: String), "description" .= ("APR salary" :: String)])
+        assertStatusCode "Validation scenario received transaction create should succeed" 200 receivedResp
+        receivedId <- requireObjectStringField "id" (getResponseBody receivedResp)
+        _ <- categorizeFinanceTransactionExpectValue cookie sentId "pets.food"
+        _ <- splitFinanceTransactionExpectValue cookie receivedId [("personal.clothing", 200), ("pets.food", 256)]
 
         unknownAccountTransactions <- getFinanceTransactions cookie [("accountId", "missing-account")]
         assertEqual "Expected unknown account filter to return an empty result set" [] unknownAccountTransactions
+
+        sentOnlyRows <- getFinanceTransactions cookie [("direction", "sent")]
+        assertEqual "Expected direction sent filter to return one row" [sentId] (map financeTransactionIdValue sentOnlyRows)
+
+        receivedOnlyRows <- getFinanceTransactions cookie [("direction", "received")]
+        assertEqual "Expected direction received filter to return one row" [receivedId] (map financeTransactionIdValue receivedOnlyRows)
+
+        categoryInRows <- getFinanceTransactions cookie [("categoryIn", "personal.clothing")]
+        assertEqual "Expected categoryIn filter to match split categories" [receivedId] (map financeTransactionIdValue categoryInRows)
+
+        categoryNotInRows <- getFinanceTransactions cookie [("categoryNotIn", "pets.food")]
+        assertEqual "Expected categoryNotIn to include split rows when at least one active split category remains allowed" [receivedId] (map financeTransactionIdValue categoryNotInRows)
+
+        overlapCategoriesResp <- getFinanceTransactionsExpectValue cookie [("categoryIn", "pets.food"), ("categoryNotIn", "pets.food")]
+        assertStatusCode "Overlapping categoryIn/categoryNotIn should return 400" 400 overlapCategoriesResp
+        assertMessageResponse "categoryIn and categoryNotIn must not overlap" overlapCategoriesResp
+
+        amountRangeRows <- getFinanceTransactions cookie [("amountMin", "200"), ("amountMax", "500")]
+        assertEqual "Expected amount range to include boundary values" [receivedId] (map financeTransactionIdValue amountRangeRows)
+
+        invalidAmountMinResp <- getFinanceTransactionsExpectValue cookie [("amountMin", "not-int")]
+        assertStatusCode "Invalid amountMin should return 400" 400 invalidAmountMinResp
+        assertMessageResponse "amountMin must be an integer" invalidAmountMinResp
+
+        invalidAmountRangeResp <- getFinanceTransactionsExpectValue cookie [("amountMin", "600"), ("amountMax", "500")]
+        assertStatusCode "amountMin greater than amountMax should return 400" 400 invalidAmountRangeResp
+        assertMessageResponse "amountMin must be less than or equal to amountMax" invalidAmountRangeResp
+
+        searchRows <- getFinanceTransactions cookie [("search", "coffee")]
+        assertEqual "Expected search to match counterparty/description case-insensitively" [sentId] (map financeTransactionIdValue searchRows)
+
+        invalidDirectionResp <- getFinanceTransactionsExpectValue cookie [("direction", "bad")]
+        assertStatusCode "Invalid direction should return 400" 400 invalidDirectionResp
+        assertMessageResponse "direction must be one of: sent, received, all" invalidDirectionResp
 
         invalidFromResp <- getFinanceTransactionsExpectValue cookie [("from", "not-a-time")]
         assertStatusCode "Invalid from timestamp should return 400" 400 invalidFromResp

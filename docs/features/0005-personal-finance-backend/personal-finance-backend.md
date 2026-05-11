@@ -19,7 +19,6 @@ Provide an authenticated personal finance backend for manual transaction entry, 
 ## Stories
 
 ### Ready
-- [015 Extended Ledger Filtering Contract](ready/015-extended-ledger-filtering-contract.md) - Extend ledger queries with direction, category include/exclude, amount range, and metadata search filters.
 - [016 Analytics Report Endpoint And Shared Filter Contract](ready/016-analytics-report-endpoint-and-shared-filter-contract.md) - Add richer report analytics payloads and define shared filter semantics between report and ledger endpoints.
 - [017 Exact Report-Ledger Parity Via Shared Query Semantics](ready/017-exact-report-ledger-parity-via-shared-query-semantics.md) - Define exact report-to-ledger parity behavior through equivalent query semantics.
 
@@ -46,6 +45,7 @@ Provide an authenticated personal finance backend for manual transaction entry, 
 - [012 Rich Transaction Metadata Fields And Write Support](done/012-rich-transaction-metadata-fields-and-write-support.md) - Add optional counterparty and description metadata across transaction reads and create writes.
 - [013 Transaction Metadata Update Endpoint](done/013-transaction-metadata-update-endpoint.md) - Define metadata mutation behavior for existing transactions with validation and normalized write semantics.
 - [014 Counterparty Suggestions Endpoint](done/014-counterparty-suggestions-endpoint.md) - Define counterparty typeahead query behavior, ranking precedence, and suggestion response shape.
+- [015 Extended Ledger Filtering Contract](done/015-extended-ledger-filtering-contract.md) - Extend ledger queries with direction, category include/exclude, amount range, and metadata search filters.
 
 ### Canceled
 - [010c Cut Over Export And Read Projections To Canonical Events](canceled/010c-cut-over-export-and-read-projections-to-canonical-events.md) - Canceled because export canonical sourcing was already delivered in `008`, and replay/rebuild parity was dropped from current scope.

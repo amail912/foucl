@@ -6,6 +6,7 @@ module FinanceTransactionRepository
   , FinanceTransaction(..)
   , FinanceReportDirection(..)
   , FinanceReportRequest(..)
+  , FinanceTransactionsListRequest(..)
   , FinanceReportResult(..)
   , FinanceTransactionNote(..)
   , FinanceTransactionAdjustment(..)
@@ -35,7 +36,7 @@ import Control.Monad.IO.Class (liftIO)
 import Data.Char (isSpace, toLower)
 import Data.Aeson (FromJSON(parseJSON), ToJSON(toJSON), Value, object, withObject, (.:), (.:?), (.=))
 import Data.Int (Int64)
-import Data.List (dropWhileEnd, sortOn)
+import Data.List (dropWhileEnd, isInfixOf, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Pool (Pool)
 import Data.Ord (Down(..))
@@ -60,6 +61,7 @@ data FinanceTransactionRepository = FinanceTransactionRepository
   { repoCreateFinanceTransaction :: !(String -> FinanceTransactionWriteRequest -> ExceptT RepositoryError IO FinanceTransaction)
   , repoLoadFinanceTransactionById :: !(String -> String -> ExceptT RepositoryError IO FinanceTransaction)
   , repoListFinanceTransactions :: !(String -> Maybe String -> Maybe UTCTime -> Maybe UTCTime -> ExceptT RepositoryError IO [FinanceTransaction])
+  , repoListFinanceTransactionsFiltered :: !(String -> FinanceTransactionsListRequest -> ExceptT RepositoryError IO [FinanceTransaction])
   , repoGetFinanceReport :: !(String -> FinanceReportRequest -> ExceptT RepositoryError IO FinanceReportResult)
   , repoAddFinanceTransactionNote :: !(String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction)
   , repoUpdateFinanceTransactionNote :: !(String -> String -> String -> String -> ExceptT RepositoryError IO FinanceTransaction)
@@ -166,6 +168,18 @@ data FinanceReportResult = FinanceReportResult
   { financeReportTotal :: !Int
   , financeReportCount :: !Int
   , financeReportTransactionIds :: ![String]
+  } deriving (Eq, Show)
+
+data FinanceTransactionsListRequest = FinanceTransactionsListRequest
+  { financeTransactionsListAccountId :: !(Maybe String)
+  , financeTransactionsListFrom :: !(Maybe UTCTime)
+  , financeTransactionsListTo :: !(Maybe UTCTime)
+  , financeTransactionsListDirection :: !FinanceReportDirection
+  , financeTransactionsListCategoryIn :: ![String]
+  , financeTransactionsListCategoryNotIn :: ![String]
+  , financeTransactionsListAmountMin :: !(Maybe Int)
+  , financeTransactionsListAmountMax :: !(Maybe Int)
+  , financeTransactionsListSearch :: !(Maybe String)
   } deriving (Eq, Show)
 
 data FinanceTransactionSplitRow = FinanceTransactionSplitRow
@@ -426,6 +440,7 @@ postgresFinanceTransactionRepository pool =
     { repoCreateFinanceTransaction = pgCreateFinanceTransaction pool
     , repoLoadFinanceTransactionById = pgLoadFinanceTransactionById pool
     , repoListFinanceTransactions = pgListFinanceTransactions pool
+    , repoListFinanceTransactionsFiltered = pgListFinanceTransactionsFiltered pool
     , repoGetFinanceReport = pgGetFinanceReport pool
     , repoAddFinanceTransactionNote = pgAddFinanceTransactionNote pool
     , repoUpdateFinanceTransactionNote = pgUpdateFinanceTransactionNote pool
@@ -612,6 +627,20 @@ pgLoadFinanceTransactionByIdInConn conn userId transactionId = do
 
 pgListFinanceTransactions :: Pool Connection -> String -> Maybe String -> Maybe UTCTime -> Maybe UTCTime -> ExceptT RepositoryError IO [FinanceTransaction]
 pgListFinanceTransactions pool userId mAccountId mFrom mTo =
+  pgListFinanceTransactionsFiltered pool userId FinanceTransactionsListRequest
+    { financeTransactionsListAccountId = mAccountId
+    , financeTransactionsListFrom = mFrom
+    , financeTransactionsListTo = mTo
+    , financeTransactionsListDirection = FinanceReportAll
+    , financeTransactionsListCategoryIn = []
+    , financeTransactionsListCategoryNotIn = []
+    , financeTransactionsListAmountMin = Nothing
+    , financeTransactionsListAmountMax = Nothing
+    , financeTransactionsListSearch = Nothing
+    }
+
+pgListFinanceTransactionsFiltered :: Pool Connection -> String -> FinanceTransactionsListRequest -> ExceptT RepositoryError IO [FinanceTransaction]
+pgListFinanceTransactionsFiltered pool userId request =
   withPoolExceptHandled (const StorageFailure) pool $ \conn -> do
     rows <- tryExcept (runListQuery conn) mapSqlReadException
     baseRows <- mapM decodeBaseTransaction rows
@@ -619,8 +648,12 @@ pgListFinanceTransactions pool userId mAccountId mFrom mTo =
     rawAdjustmentRows <- tryExcept (runAdjustmentListQuery conn) mapSqlReadException
     adjustmentRows <- mapM decodeAdjustmentListRow rawAdjustmentRows
     let adjustmentTransactions = map financeAdjustmentRowToTransaction adjustmentRows
-    pure (sortOn financeTransactionSortKey (hydratedBaseRows ++ adjustmentTransactions))
+        filteredTransactions = filter (matchesLedgerFilters request) (hydratedBaseRows ++ adjustmentTransactions)
+    pure (sortOn financeTransactionSortKey filteredTransactions)
   where
+    mAccountId = financeTransactionsListAccountId request
+    mFrom = financeTransactionsListFrom request
+    mTo = financeTransactionsListTo request
     runListQuery conn =
       case (mAccountId, mFrom, mTo) of
         (Nothing, Nothing, Nothing) ->
@@ -689,6 +722,60 @@ pgListFinanceTransactions pool userId mAccountId mFrom mTo =
           query conn
             "SELECT snapshot_id, snapshot_occurred_at, recorded_at, account_id, amount, direction, reason FROM finance_balance_snapshot_adjustments WHERE user_id = ? AND account_id = ? AND snapshot_occurred_at >= ? AND snapshot_occurred_at < ? ORDER BY snapshot_occurred_at DESC, snapshot_id ASC"
             (userId, accountId, fromTs, toTs)
+
+matchesLedgerFilters :: FinanceTransactionsListRequest -> FinanceTransaction -> Bool
+matchesLedgerFilters request transaction =
+  matchesDirection
+    && matchesAmount
+    && matchesSearch
+    && matchesCategories
+  where
+    matchesDirection =
+      case financeTransactionsListDirection request of
+        FinanceReportAll -> True
+        FinanceReportSent -> financeTransactionDirection transaction == FinanceTransactionSent
+        FinanceReportReceived -> financeTransactionDirection transaction == FinanceTransactionReceived
+    matchesAmount =
+      let amount = financeTransactionAmount transaction
+          lowerOk = maybe True (<= amount) (financeTransactionsListAmountMin request)
+          upperOk = maybe True (amount <=) (financeTransactionsListAmountMax request)
+       in lowerOk && upperOk
+    matchesSearch =
+      case fmap (map toLower) (financeTransactionsListSearch request) of
+        Nothing -> True
+        Just normalizedSearch ->
+          let matchesField mValue =
+                case mValue of
+                  Nothing -> False
+                  Just value -> normalizedSearch `isInfixOf` map toLower value
+           in matchesField (financeTransactionCounterparty transaction) || matchesField (financeTransactionDescription transaction)
+    matchesCategories =
+      let includeSet = Set.fromList (financeTransactionsListCategoryIn request)
+          excludeSet = Set.fromList (financeTransactionsListCategoryNotIn request)
+          hasCategoryFilters = not (Set.null includeSet) || not (Set.null excludeSet)
+          normalizedWholeCategory =
+            normalizeCategoryForLedgerFilter $
+              case financeTransactionAdjustment transaction of
+                Just _ -> "uncategorized"
+                Nothing ->
+                  case financeTransactionCategory transaction of
+                    Nothing -> "uncategorized"
+                    Just categorySlug -> categorySlug
+          normalizedSplitCategories = map (normalizeCategoryForLedgerFilter . financeTransactionSplitCategory) (financeTransactionSplits transaction)
+          matchesOne normalizedCategory =
+            let includeOk = Set.null includeSet || Set.member normalizedCategory includeSet
+                excludeOk = not (Set.member normalizedCategory excludeSet)
+             in includeOk && excludeOk
+       in if not hasCategoryFilters
+            then True
+            else if not (null normalizedSplitCategories)
+              then any matchesOne normalizedSplitCategories
+              else matchesOne normalizedWholeCategory
+
+normalizeCategoryForLedgerFilter :: String -> String
+normalizeCategoryForLedgerFilter categorySlug
+  | categorySlug `elem` ["uncategorized.expense", "uncategorized.income"] = "uncategorized"
+  | otherwise = categorySlug
 
 pgGetFinanceReport :: Pool Connection -> String -> FinanceReportRequest -> ExceptT RepositoryError IO FinanceReportResult
 pgGetFinanceReport pool userId request =
